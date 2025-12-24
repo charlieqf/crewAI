@@ -36,7 +36,7 @@
 ## 3. 核心组件深度解析：WeComTool
 
 ### 3.1 什么是 WeComTool？
-`WeComTool` 是项目中最核心的“通讯枢纽”。在技术实现上，它是一个继承了 `crewai_tools.BaseTool` 的 Python 类。它的职责是桥接 **CrewAI Agent 的决策输出**与**企业微信的 API 协议**。
+`WeComTool` 是项目中的 **消息发送组件**（AI 的“嘴巴”）。在技术实现上，它是一个继承了 `crewai.tools.BaseTool` 的 Python 类。它的职责是将 **CrewAI Agent 的决策输出** 发送到 **企业微信**。
 
 ### 3.2 两种工作模式（重要）
 根据业务场景的不同，WeComTool 涉及两套完全不同的底层机制：
@@ -44,10 +44,10 @@
 | 模式 | 技术形态 | 执行逻辑 | 对应需求场景 |
 | :--- | :--- | :--- | :--- |
 | **主动推送 (Outgoing)** | **HTTP Client (REST API)** | Agent 调用工具 -> WeComTool 向企业微信发送 `POST` 请求（带 Secret 置换的 Token）。 | 代码评审通知、每日复盘报告推送、行业热点预警。 |
-| **被动接收 (Incoming)** | **Webhook 回调 (Callback)** | 外部事件（用户在群里发消息） -> 触发企业微信回调您的 FastAPI 中台 -> WeComTool 解析 XML 负载并返回结果。 | AI 参与群聊互动、接收用户指令。 |
+| **被动接收 (Incoming)** | **Webhook 回调 (Callback)** | 外部事件（用户在群里发消息） -> 触发企业微信回调您的 FastAPI 中台 -> **WeCom Callback Server** 解析 XML 负载并路由给 Agent。 | AI 参与群聊互动、接收用户指令。 |
 
 ### 3.3 核心内部逻辑
-- **Token 托管**：WeCom 的 `access_token` 每 2 小时过期一次。`WeComTool` 内部维护一个缓存机制，当 Token 失效时自动根据 `AgentId` 和 `Secret` 进行无感重刷。
+- **Token 托管**：WeCom 的 `access_token` 每 2 小时过期一次。`WeComTool` 内部维护一个缓存机制，当 Token 失效时自动根据 `corp_id` 和 `secret` 进行无感重刷。
 - **消息格式适配**：
     - **文字消息**：用于日常简短交流。
     - **Markdown 消息**：用于展示复杂的 **Code Review 差分**、表格样式的**热点汇总**。
@@ -56,12 +56,12 @@
 ### 3.4 模块间的“发布-订阅”关系
 `WeComTool` 并不是被某个 Agent 锁死的，而是作为一种“能力”按需分配：
 
-1. **研发侧同步**：`GitLabAgent` 完成审计 -> 获取审计结论 -> 调用 `WeComTool.send_markdown()`。
-2. **业务侧汇总**：`TrendAgent` 搜集到热点 -> 整理为摘要 -> 调用 `WeComTool.send_text_card()`。
-3. **管理侧提醒**：`ReviewAgent` 总结出待办 -> 生成 Checkbox 列表 -> 调用 `WeComTool.send_markdown()`。
+1. **研发侧同步**：`GitLabAgent` 完成审计 -> 获取审计结论 -> 调用 `WeComTool._run(msg_type="markdown")`。
+2. **业务侧汇总**：`TrendAgent` 搜集到热点 -> 整理为摘要 -> 调用 `WeComTool._run(msg_type="text")`。
+3. **管理侧提醒**：`ReviewAgent` 总结出待办 -> 生成 Checkbox 列表 -> 调用 `WeComTool._run(msg_type="markdown")`。
 
 > [!NOTE]
-> 简而言之，`WeComTool` 就像是 AI 的“手机”，有了它，AI 才能在企业内网“打电话”和“发微信”。
+> 简而言之，`WeComTool` 是 AI 的“嘴巴”（发送消息），`WeCom Callback Server` 是 AI 的“耳朵”（接收消息）。
 
 ---
 
@@ -107,7 +107,7 @@
 | :--- | :---: | :---: | :---: | :---: | :--- |
 | **环境搭建 (uv/Docker)** | ● | ● | ● | ○ | 已完成 uv 本地环境同步，准备 Docker 容器化 |
 | **WeComTool (主动推送)** | ● | ● | ● | ○ | 核心逻辑通过 TDD 验证，待部署到测试服务器 |
-| **信号通路配置 (Webhook)** | ● | ○ | · | · | 企业微信白名单/域名校验进行中 |
+| **WeCom 回调服务 (Webhook)** | ● | ● | ● | ○ | AES 解密、消息解析、FastAPI 端点通过测试 |
 
 ### 第二阶段：GitLab 专家集群开发 (支撑需求 2.1)
 | 任务条目 | [需] | [开] | [测] | [部] | 当前状态/说明 |
