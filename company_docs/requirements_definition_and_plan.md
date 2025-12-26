@@ -43,11 +43,13 @@
 
 | 模式 | 技术形态 | 执行逻辑 | 对应需求场景 |
 | :--- | :--- | :--- | :--- |
-| **主动推送 (Outgoing)** | **HTTP Client (REST API)** | Agent 调用工具 -> WeComTool 向企业微信发送 `POST` 请求（带 Secret 置换的 Token）。 | 代码评审通知、每日复盘报告推送、行业热点预警。 |
-| **被动接收 (Incoming)** | **Webhook 回调 (Callback)** | 外部事件（用户在群里发消息） -> 触发企业微信回调您的 FastAPI 中台 -> **WeCom Callback Server** 解析 XML 负载并路由给 Agent。 | AI 参与群聊互动、接收用户指令。 |
+| **主动推送 (Outgoing)** | **群聊机器人 Webhook** | Agent 调用工具 -> WeComWebhookTool 向群机器人 Webhook URL 发送 `POST` 请求（无需 Token 刷新）。 | 代码评审通知、每日复盘报告推送、行业热点预警。 |
+| **被动接收 (Incoming)** | **应用回调 (Callback)** | 外部事件（用户在群里发消息） -> 触发企业微信回调您的 FastAPI 中台 -> **WeCom Callback Server** 解密 XML 负载并路由给 Agent。 | AI 参与群聊互动、接收用户指令。 |
 
 ### 3.3 核心内部逻辑
-- **Token 托管**：WeCom 的 `access_token` 每 2 小时过期一次。`WeComTool` 内部维护一个缓存机制，当 Token 失效时自动根据 `corp_id` 和 `secret` 进行无感重刷。
+- **认证机制**：
+    - **主动推送**：使用群机器人 Webhook URL（无需 Token，URL 本身即为认证凭证）
+    - **被动接收**：使用应用回调配置（Token + EncodingAESKey 用于消息解密）
 - **消息格式适配**：
     - **文字消息**：用于日常简短交流。
     - **Markdown 消息**：用于展示复杂的 **Code Review 差分**、表格样式的**热点汇总**。
@@ -89,6 +91,47 @@
 ### 4.3 硬件规格建议
 - **规格**：2 核 8G（CrewAI 在多 Agent 运行时对内存有一定要求）。
 - **网络**：必须具备固定公网 IP，开放 80/443/8000 端口。
+
+### 4.4 混合部署架构（内网 GitLab 方案）
+
+由于 GitLab CE 13.6.7 部署在公司内网，腾讯云无法直接访问，我们采用 **混合部署** 架构：
+
+```mermaid
+flowchart TB
+    subgraph 公司内网
+        GitLab[GitLab CE 13.6.7]
+        InternalAgent[内网 Agent 服务<br/>GitLabTool + 审计 Agent]
+        GitLab -->|Webhook| InternalAgent
+        InternalAgent -->|API 调用| GitLab
+    end
+    
+    subgraph 腾讯云
+        ResultAPI[结果接收 API]
+        WeComServer[WeCom Callback Server]
+        WeChat[企业微信群]
+        ResultAPI --> WeComServer
+        WeComServer --> WeChat
+    end
+    
+    InternalAgent -->|HTTPS POST<br/>审计结果| ResultAPI
+```
+
+**职责分工**：
+
+| 组件 | 部署位置 | 职责 |
+| :--- | :--- | :--- |
+| **GitLabTool** | 内网 | 调用 GitLab API（获取 Diff、发表评论） |
+| **审计 Agent** | 内网 | Code Review 逻辑（直连 GitLab） |
+| **结果接收 API** | 腾讯云 | 接收内网推送的审计结果 |
+| **WeComTool** | 腾讯云 | 将结果推送到企业微信 |
+| **Callback Server** | 腾讯云 | 接收企业微信群聊消息 |
+
+**通信方式**：
+- **内网 → 云端**：HTTPS POST（出站流量，通常不被防火墙阻挡）
+- **云端 → 内网**：不需要（单向推送）
+
+> [!IMPORTANT]
+> 此架构要求内网服务器能够访问公网。已确认贵司内网满足此条件。
 
 ---
 

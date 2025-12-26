@@ -1,0 +1,30 @@
+# =============================================================================
+# WeCom Callback Service Dependencies
+# =============================================================================
+# Minimal dependencies for running the WeCom callback server
+# Install: pip install -r requirements-server.txt
+# =============================================================================
+
+# Web Framework
+fastapi>=0.100.0
+uvicorn[standard]>=0.22.0
+
+# HTTP requests
+requests>=2.31.0
+
+# Data validation
+pydantic>=2.0.0
+
+# XML parsing (secure)
+defusedxml>=0.7.1
+
+# Encryption for WeCom callback
+pycryptodome>=3.18.0
+
+# Environment variables
+python-dotenv>=1.0.0
+
+# LLM providers (optional - only install what you need)
+openai>=1.0.0
+# google-generativeai>=0.3.0
+# anthropic>=0.3.0
