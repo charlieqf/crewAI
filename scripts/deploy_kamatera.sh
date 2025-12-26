@@ -7,10 +7,10 @@
 #   scp scripts/deploy_kamatera.sh root@104.238.213.119:/tmp/
 #   ssh root@104.238.213.119 "bash /tmp/deploy_kamatera.sh"
 #
-# 环境变量 (必须在运行前设置):
+# 环境变量 (部署后在 /etc/wecom-callback/env 中配置):
 #   WECOM_TOKEN, WECOM_ENCODING_AES_KEY, WECOM_CORP_ID
-#   GEMINI_API_KEY (或其他 LLM API key)
-#   WECOM_WEBHOOK_URL_GPT (或 GEMINI/GROK)
+#   GEMINI_API_KEY, OPENAI_API_KEY, GROK_API_KEY
+#   WEBHOOK_GPT, WEBHOOK_GEMINI, WEBHOOK_GROK
 #
 # =============================================================================
 
@@ -35,12 +35,12 @@ echo ""
 echo ">>> 2. 创建应用目录..."
 
 APP_DIR="/opt/wecom-callback"
-DATA_DIR="/var/lib/wecom-callback"
-LOG_DIR="/var/log/wecom-callback"
+DATA_DIR="/var/lib/wecom-callback"  # Used by CHAT_DB_PATH in env file
+LOG_DIR="/var/log/wecom-callback"   # Only used in standalone mode; systemd uses journal
 
 mkdir -p "$APP_DIR"
 mkdir -p "$DATA_DIR"
-mkdir -p "$LOG_DIR"
+mkdir -p "$LOG_DIR"  # Created for standalone/fallback use
 
 # -----------------------------------------------------------------------------
 # 3. 克隆/更新代码
@@ -48,15 +48,28 @@ mkdir -p "$LOG_DIR"
 echo ""
 echo ">>> 3. 获取代码..."
 
-DEPLOY_BRANCH="${DEPLOY_BRANCH:-main}"
-REPO_URL="${REPO_URL:-https://github.com/your-org/crewAI.git}"
+DEPLOY_BRANCH="${DEPLOY_BRANCH:-feat-wecom}"
+REPO_URL="${REPO_URL:-https://github.com/charlieqf/crewAI.git}"
 
 if [ -d "$APP_DIR/.git" ]; then
     cd "$APP_DIR"
+    # Safer update: stash local changes with timestamp
+    if ! git diff --quiet || ! git diff --cached --quiet; then
+        STASH_MSG="deploy-$(date +%Y%m%d-%H%M%S)"
+        git stash push -u -m "$STASH_MSG"
+        echo "Note: Local changes stashed as '$STASH_MSG'. Use 'git stash list' to view."
+    fi
     git fetch origin
-    git reset --hard "origin/$DEPLOY_BRANCH"
+    # Use -B to create/reset branch to track remote; fallback to main if branch doesn't exist
+    if git rev-parse --verify "origin/$DEPLOY_BRANCH" >/dev/null 2>&1; then
+        git checkout -B "$DEPLOY_BRANCH" "origin/$DEPLOY_BRANCH"
+    else
+        echo "WARNING: Branch '$DEPLOY_BRANCH' not found on remote, falling back to 'main'"
+        DEPLOY_BRANCH="main"
+        git checkout -B "$DEPLOY_BRANCH" "origin/$DEPLOY_BRANCH"
+    fi
 else
-    git clone --depth 1 -b "$DEPLOY_BRANCH" "$REPO_URL" "$APP_DIR"
+    git clone -b "$DEPLOY_BRANCH" "$REPO_URL" "$APP_DIR"
     cd "$APP_DIR"
 fi
 
@@ -93,10 +106,10 @@ GEMINI_API_KEY=
 OPENAI_API_KEY=
 GROK_API_KEY=
 
-# Webhook URLs
-WECOM_WEBHOOK_URL_GPT=
-WECOM_WEBHOOK_URL_GEMINI=
-WECOM_WEBHOOK_URL_GROK=
+# Webhook URLs (must match BOT_CONFIG in code)
+WEBHOOK_GPT=
+WEBHOOK_GEMINI=
+WEBHOOK_GROK=
 
 # 数据存储
 CHAT_DB_PATH=/var/lib/wecom-callback/chat_history.db
@@ -128,9 +141,10 @@ ExecStart=$APP_DIR/venv/bin/python -m uvicorn src.crewai_enterprise.server.wecom
 Restart=always
 RestartSec=5
 
-# 日志
-StandardOutput=append:$LOG_DIR/wecom_callback.log
-StandardError=append:$LOG_DIR/wecom_callback_error.log
+# 日志 - 使用 journal 而不是文件追加，避免重复
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=wecom-callback
 
 [Install]
 WantedBy=multi-user.target

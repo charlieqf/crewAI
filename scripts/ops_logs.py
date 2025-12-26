@@ -94,20 +94,25 @@ def run_ssh_command(command: str, interactive: bool = False) -> int:
 def cmd_tail(args: argparse.Namespace) -> int:
     """Follow live logs."""
     lines = args.lines or 50
-    log_path = ERROR_LOG_PATH if args.errors else DEFAULT_LOG_PATH
+    priority = "-p err" if args.errors else ""
 
-    print(f"Following logs from {log_path}...")
+    print(f"Following logs (journalctl)...")
     print("Press Ctrl+C to stop\n")
 
-    return run_ssh_command(f"tail -n {lines} -f {log_path}", interactive=True)
+    return run_ssh_command(
+        f"journalctl -u {SERVICE_NAME} -n {lines} -f {priority}",
+        interactive=True,
+    )
 
 
 def cmd_recent(args: argparse.Namespace) -> int:
     """Show recent log entries."""
     lines = args.lines or 100
-    log_path = ERROR_LOG_PATH if args.errors else DEFAULT_LOG_PATH
+    priority = "-p err" if args.errors else ""
 
-    return run_ssh_command(f"tail -n {lines} {log_path}")
+    return run_ssh_command(
+        f"journalctl -u {SERVICE_NAME} -n {lines} {priority} --no-pager"
+    )
 
 
 def cmd_errors(args: argparse.Namespace) -> int:

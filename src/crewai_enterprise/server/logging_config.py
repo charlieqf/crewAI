@@ -1,7 +1,11 @@
 """
 Logging configuration for WeCom callback server.
 
-Configures both file and console logging with rotation support.
+When running under systemd (detected via INVOCATION_ID or JOURNAL_STREAM env vars):
+  - Only logs to stdout (systemd captures to journal and configured log files)
+
+When running standalone (local dev, tests):
+  - Logs to both console and rotating log files
 """
 
 from __future__ import annotations
@@ -49,50 +53,64 @@ def setup_logging(
     level_str = os.getenv("LOG_LEVEL", log_level).upper()
     level = getattr(logging, level_str, logging.INFO)
 
+    # Detect if running under systemd (which captures stdout to journal/file)
+    running_under_systemd = (
+        os.getenv("INVOCATION_ID") is not None
+        or os.getenv("JOURNAL_STREAM") is not None
+    )
+
     # Configure root logger
     root_logger = logging.getLogger()
     root_logger.setLevel(level)
 
-    # Clear existing handlers
+    # Clear existing handlers to avoid duplicates
     root_logger.handlers.clear()
 
     # Log format with structured fields for grep
     log_format = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
     formatter = logging.Formatter(log_format, datefmt="%Y-%m-%d %H:%M:%S")
 
-    # Console handler
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(level)
-    console_handler.setFormatter(formatter)
-    root_logger.addHandler(console_handler)
+    if running_under_systemd:
+        # Under systemd: only log to stdout (systemd captures to file)
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setLevel(level)
+        console_handler.setFormatter(formatter)
+        root_logger.addHandler(console_handler)
+        logging.info(f"Logging initialized (systemd mode): level={level_str}")
+    else:
+        # Standalone: log to both console and file
+        # Console handler
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setLevel(level)
+        console_handler.setFormatter(formatter)
+        root_logger.addHandler(console_handler)
 
-    # File handler with rotation
-    log_file_path = log_path / log_file
-    file_handler = RotatingFileHandler(
-        log_file_path,
-        maxBytes=max_bytes,
-        backupCount=backup_count,
-        encoding="utf-8",
-    )
-    file_handler.setLevel(level)
-    file_handler.setFormatter(formatter)
-    root_logger.addHandler(file_handler)
+        # File handler with rotation
+        log_file_path = log_path / log_file
+        file_handler = RotatingFileHandler(
+            log_file_path,
+            maxBytes=max_bytes,
+            backupCount=backup_count,
+            encoding="utf-8",
+        )
+        file_handler.setLevel(level)
+        file_handler.setFormatter(formatter)
+        root_logger.addHandler(file_handler)
 
-    # Error log (separate file for errors only)
-    error_log_path = log_path / "wecom_callback_error.log"
-    error_handler = RotatingFileHandler(
-        error_log_path,
-        maxBytes=max_bytes,
-        backupCount=backup_count,
-        encoding="utf-8",
-    )
-    error_handler.setLevel(logging.ERROR)
-    error_handler.setFormatter(formatter)
-    root_logger.addHandler(error_handler)
+        # Error log (separate file for errors only)
+        error_log_path = log_path / "wecom_callback_error.log"
+        error_handler = RotatingFileHandler(
+            error_log_path,
+            maxBytes=max_bytes,
+            backupCount=backup_count,
+            encoding="utf-8",
+        )
+        error_handler.setLevel(logging.ERROR)
+        error_handler.setFormatter(formatter)
+        root_logger.addHandler(error_handler)
 
-    # Log startup message
-    logging.info(f"Logging initialized: level={level_str}, dir={log_dir}")
-    logging.info(f"Log files: {log_file_path}, {error_log_path}")
+        logging.info(f"Logging initialized: level={level_str}, dir={log_dir}")
+        logging.info(f"Log files: {log_file_path}, {error_log_path}")
 
 
 # Auto-configure on import if running as main server
