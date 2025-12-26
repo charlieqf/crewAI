@@ -123,11 +123,39 @@ class ChatStorageTool(BaseTool):
             CREATE INDEX IF NOT EXISTS idx_chat_date 
             ON chat_messages(chat_id, DATE(timestamp))
         """)
-        cursor.execute("""
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_wecom_msg_id
-            ON chat_messages(wecom_msg_id)
-            WHERE wecom_msg_id IS NOT NULL
-        """)
+
+        # Safe unique index creation: remove duplicates first if any exist
+        try:
+            cursor.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_wecom_msg_id
+                ON chat_messages(wecom_msg_id)
+                WHERE wecom_msg_id IS NOT NULL
+            """)
+        except (sqlite3.OperationalError, sqlite3.IntegrityError) as e:
+            # OperationalError: index creation fails due to duplicates
+            # IntegrityError: unique constraint violation
+            if "unique" in str(e).lower() or "duplicate" in str(e).lower():
+                # Clean up duplicates keeping the first occurrence
+                logger.warning("Duplicate wecom_msg_id detected, cleaning up...")
+                cursor.execute("""
+                    DELETE FROM chat_messages
+                    WHERE id NOT IN (
+                        SELECT MIN(id) FROM chat_messages
+                        WHERE wecom_msg_id IS NOT NULL
+                        GROUP BY wecom_msg_id
+                    ) AND wecom_msg_id IS NOT NULL
+                """)
+                self._sqlite_conn.commit()
+                # Retry index creation
+                cursor.execute("""
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_wecom_msg_id
+                    ON chat_messages(wecom_msg_id)
+                    WHERE wecom_msg_id IS NOT NULL
+                """)
+                logger.info("Duplicate cleanup completed and unique index created")
+            else:
+                raise
+
         # Migration: add new columns if they don't exist
         try:
             cursor.execute(
@@ -180,10 +208,15 @@ class ChatStorageTool(BaseTool):
         """Execute the tool logic."""
 
         if action == "save":
+            # Validate required parameters
+            if not sender_id:
+                raise ValueError("sender_id is required for save action")
+            if not content:
+                raise ValueError("content is required for save action")
             return self._save_message(
                 chat_id,
                 sender_id,
-                sender_name,
+                sender_name or sender_id,  # Fallback to sender_id if no name
                 content,
                 message_type,
                 role,
@@ -373,7 +406,15 @@ class ChatStorageTool(BaseTool):
                 raw_messages = self._redis_client.lrange(redis_key, 0, limit - 1)
                 for raw in raw_messages:
                     msg = json.loads(raw)
-                    messages.append(msg)
+                    # Normalize to stable schema: {sender_name, content, role, timestamp}
+                    messages.append(
+                        {
+                            "sender_name": msg.get("sender_name", ""),
+                            "content": msg.get("content", ""),
+                            "role": msg.get("role", "user"),
+                            "timestamp": msg.get("timestamp", ""),
+                        }
+                    )
                 messages.reverse()  # Oldest first
             except Exception as e:
                 logger.warning(f"Redis read failed: {e}, falling back to SQLite")
@@ -383,7 +424,7 @@ class ChatStorageTool(BaseTool):
             cursor = self._sqlite_conn.cursor()
             cursor.execute(
                 """
-                SELECT sender_name, content, timestamp, message_type, role
+                SELECT sender_name, content, timestamp, role
                 FROM chat_messages
                 WHERE chat_id = ?
                 ORDER BY timestamp DESC
@@ -393,13 +434,14 @@ class ChatStorageTool(BaseTool):
             )
             rows = cursor.fetchall()
             for row in reversed(rows):
-                sender_name, content, timestamp, msg_type, role = row
+                sender_name, content, timestamp, role = row
+                # Same stable schema as Redis path
                 messages.append(
                     {
                         "sender_name": sender_name,
                         "content": content,
-                        "timestamp": str(timestamp),
                         "role": role or "user",  # Default for legacy rows
+                        "timestamp": str(timestamp),
                     }
                 )
 

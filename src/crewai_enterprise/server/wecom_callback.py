@@ -147,8 +147,9 @@ def create_app() -> FastAPI:
             ) from e
 
         logger.info(
-            f"Received message from {message.from_user_name}: "
-            f"{message.content or f'[{message.msg_type}]'}"
+            f"[RECV] msg_id={message.msg_id} type={message.msg_type} "
+            f"from={message.from_user_name} agent={message.agent_id} "
+            f"content={repr(message.content[:50] if message.content else '[media]')}..."
         )
 
         # Determine chat_id for context isolation
@@ -157,12 +158,16 @@ def create_app() -> FastAPI:
         content = message.content or ""
         bot_type = detect_bot_type(content)
 
+        logger.debug(f"[ROUTE] chat_id={chat_id} user={user_name} bot_type={bot_type}")
+
         # Get webhook URL for bot
         config = BOT_CONFIG.get(bot_type, BOT_CONFIG["gpt"])
         webhook_url = get_optional_env(config["webhook_env"])
 
         if not webhook_url:
-            logger.warning(f"Webhook URL not configured for {bot_type}")
+            logger.warning(
+                f"[NO_WEBHOOK] bot_type={bot_type} env={config['webhook_env']} - message dropped"
+            )
             return {
                 "status": "no_webhook",
                 "from": message.from_user_name,
@@ -173,6 +178,7 @@ def create_app() -> FastAPI:
         if message.msg_type == "text" and content:
             # Check for clear command
             if is_clear_command(content):
+                logger.info(f"[CLEAR] chat_id={chat_id} user={user_name}")
                 background_tasks.add_task(
                     handle_clear_command,
                     chat_id,
@@ -186,6 +192,9 @@ def create_app() -> FastAPI:
                 }
 
             # Normal text message
+            logger.info(
+                f"[PROCESS] msg_id={message.msg_id} bot={bot_type} chat={chat_id}"
+            )
             background_tasks.add_task(
                 process_text_message,
                 bot_type,
@@ -198,6 +207,10 @@ def create_app() -> FastAPI:
 
         elif message.has_media:
             # File/media message
+            logger.info(
+                f"[FILE] msg_id={message.msg_id} type={message.msg_type} "
+                f"media_id={message.media_id} filename={message.filename}"
+            )
             background_tasks.add_task(
                 process_file_message,
                 bot_type,
@@ -205,6 +218,10 @@ def create_app() -> FastAPI:
                 message,
                 user_name,
                 webhook_url,
+            )
+        else:
+            logger.debug(
+                f"[SKIP] msg_id={message.msg_id} type={message.msg_type} - no handler"
             )
 
         # Always acknowledge receipt quickly
@@ -223,6 +240,11 @@ def create_app() -> FastAPI:
 
     return app
 
+
+# Initialize logging before app creation
+from src.crewai_enterprise.server.logging_config import setup_logging
+
+setup_logging()
 
 # Create the app instance
 app = create_app()

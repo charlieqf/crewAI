@@ -113,11 +113,21 @@ async def process_text_message(
         )
 
         logger.info(
-            f"[{bot_type}] Processing message from {user_name} in {chat_id}: {content[:50]}..."
+            f"[LLM_REQ] bot={bot_type} provider={provider} chat={chat_id} "
+            f"user={user_name} msg_count={len(messages)} content={content[:50]!r}..."
         )
 
         # Call LLM
+        import time
+
+        start_time = time.time()
         response = llm_router.chat(provider=provider, messages=messages)
+        elapsed_ms = int((time.time() - start_time) * 1000)
+
+        logger.info(
+            f"[LLM_RES] bot={bot_type} elapsed={elapsed_ms}ms "
+            f"response_len={len(response.content)} content={response.content[:50]!r}..."
+        )
 
         # Add assistant response to context
         context_manager.add_message(
@@ -136,11 +146,13 @@ async def process_text_message(
         )
 
         logger.info(
-            f"[{bot_type}] Replied to {user_name} in {chat_id}: {response.content[:50]}..."
+            f"[SENT] bot={bot_type} chat={chat_id} user={user_name} elapsed_total={elapsed_ms}ms"
         )
 
     except LLMError as e:
-        logger.error(f"LLM error: {e}")
+        logger.error(
+            f"[LLM_ERR] bot={bot_type} chat={chat_id} user={user_name} error={e}"
+        )
         try:
             send_webhook_message(
                 webhook_url,
@@ -150,10 +162,14 @@ async def process_text_message(
         except WeComWebhookError:
             pass
     except WeComWebhookError as e:
-        logger.error(f"Webhook error: {e}")
+        logger.error(
+            f"[WEBHOOK_ERR] bot={bot_type} chat={chat_id} webhook={webhook_url[:30]}... error={e}"
+        )
     except Exception as e:
         # Catch-all to prevent silent failures in background tasks
-        logger.exception(f"Unexpected error in process_text_message: {e}")
+        logger.exception(
+            f"[FATAL] bot={bot_type} chat={chat_id} user={user_name} error={e}"
+        )
         try:
             send_webhook_message(
                 webhook_url,
