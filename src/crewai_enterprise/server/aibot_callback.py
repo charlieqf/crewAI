@@ -1295,7 +1295,7 @@ async def _call_file_llm_async(
             # For PDF/Images, utilize the File API (Verified working with corrected payload order)
             file_uri = await loop.run_in_executor(
                     None,
-                    lambda: router.upload_file(provider, file_bytes, file_ctx["mime"], filename)
+                    lambda: router.upload_file(provider, file_bytes, mime_type, filename)
                 )
 
         # Save context for future turns (PERSISTENT)
