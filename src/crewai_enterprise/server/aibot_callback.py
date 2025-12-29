@@ -364,26 +364,31 @@ async def _call_llm_async(
         loop = asyncio.get_running_loop()
 
         if use_file_context:
-            # Format history for file chat (since chat_with_file takes text prompt)
-            history_text = "\n\n".join(
-                [f"{'用户' if m['role']=='user' else '模型'}: {m['content']}" for m in messages]
-            )
-            # Override content with history + current (last message is already in messages)
-            full_prompt = f"对话历史:\n{history_text}\n\n(注意：用户之前上传了文件 {file_ctx['filename']}，请基于该文件回答)"
-            
-            response = await loop.run_in_executor(
-                None,
-                lambda: router.chat_with_file(
-                    provider=provider,
-                    text=full_prompt,
-                    file_data=None,
-                    file_mime_type=file_ctx["mime"],
-                    filename=file_ctx["filename"],
-                    file_uri=file_ctx["uri"],
-                    system_prompt=system_prompt,
+            try:
+                # Format history for file chat (since chat_with_file takes text prompt)
+                history_text = "\n\n".join(
+                    [f"{'用户' if m['role']=='user' else '模型'}: {m['content']}" for m in messages]
                 )
-            )
-        else:
+                # Override content with history + current (last message is already in messages)
+                full_prompt = f"对话历史:\n{history_text}\n\n(注意：用户之前上传了文件 {file_ctx['filename']}，请基于该文件回答)"
+                
+                response = await loop.run_in_executor(
+                    None,
+                    lambda: router.chat_with_file(
+                        provider=provider,
+                        text=full_prompt,
+                        file_data=None,
+                        file_mime_type=file_ctx["mime"],
+                        filename=file_ctx["filename"],
+                        file_uri=file_ctx["uri"],
+                        system_prompt=system_prompt,
+                    )
+                )
+            except Exception as e:
+                logger.warning(f"[AIBOT_CTX] Failed to use file context (fallback to text): {e}")
+                use_file_context = False
+
+        if not use_file_context:
             # Run standard LLM call
             response = await loop.run_in_executor(
                 None, lambda: router.chat(provider=provider, messages=messages)
@@ -1192,6 +1197,7 @@ async def _call_file_llm_async(
         ext = os.path.splitext(filename)[1].lower()
         if ext in ['.sql', '.py', '.js', '.ts', '.html', '.css', '.md', '.json', '.xml', '.sh', '.yaml', '.yml', '.c', '.cpp', '.java']:
             mime_type = "text/plain"
+            filename += ".txt"  # Append .txt to bypass file extension checks
 
         if not aes_key:
             raise ValueError(f"AES Key not found for {bot_type}")
