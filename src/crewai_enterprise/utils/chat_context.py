@@ -267,6 +267,7 @@ class ChatContextManager:
         file_uri: str,
         filename: str,
         mime_type: str,
+        wecom_msg_id: str | None = None,
     ) -> None:
         """
         Save file context to persistent storage.
@@ -286,12 +287,25 @@ class ChatContextManager:
             content=json.dumps(file_info, ensure_ascii=False),
             message_type="file",
             role="user",
+            wecom_msg_id=wecom_msg_id,
         )
-        logger.info(f"Saved persistent file context for {chat_id}: {filename}")
+        logger.info(f"Saved persistent file context for {chat_id}: {filename} (msg_id={wecom_msg_id})")
 
-    def get_active_file(self, chat_id: str, limit: int = 50) -> dict | None:
+    def get_active_file(
+        self, 
+        chat_id: str, 
+        limit: int = 50,
+        filename: str | None = None,
+        wecom_msg_id: str | None = None
+    ) -> dict | None:
         """
-        Get the most recent file context from storage history.
+        Get the most recent or specifically requested file context from storage history.
+        
+        Args:
+            chat_id: The chat room ID.
+            limit: How many messages to scan backwards.
+            filename: If provided, find the latest file with this name.
+            wecom_msg_id: If provided, find the specific file with this MsgId.
         """
         result = self.storage._run(
             action="get_recent_json",
@@ -313,7 +327,16 @@ class ChatContextManager:
                 if content.strip().startswith('{"uri":') and "filename" in content:
                     try:
                         data = json.loads(content)
-                        if "uri" in data:
+                        # Filter logic
+                        if wecom_msg_id:
+                            if msg.get("wecom_msg_id") == wecom_msg_id:
+                                return data
+                        elif filename:
+                            # Strict filename match (case-sensitive) or flexible match
+                            if data.get("filename") == filename:
+                                return data
+                        elif not wecom_msg_id and not filename:
+                            # Default: just get the latest one
                             return data
                     except:
                         continue

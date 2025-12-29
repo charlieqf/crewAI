@@ -256,8 +256,11 @@ def _extract_chat_id(data: dict, user_id: str) -> str:
     return user_id
 
 
-def _extract_quote_content(data: dict) -> str | None:
-    """Extract quoted message content from WeCom payload.
+def _extract_quote_content(data: dict) -> tuple[str | None, str | None]:
+    """Extract quoted message content and ID from WeCom payload.
+
+    Returns:
+        tuple: (content, msgid)
 
     WeCom intelligent bot payloads may include quoted/referenced messages.
     Common structures include:
@@ -271,14 +274,14 @@ def _extract_quote_content(data: dict) -> str | None:
         # Try different content field names
         for key in ["content", "text", "Content", "Text"]:
             if key in quote_data and quote_data[key]:
-                return str(quote_data[key]).strip()
+                return str(quote_data[key]).strip(), quote_data.get("msgid")
         # If quote has type info, try to extract based on type
         if "msgtype" in quote_data:
             msgtype = quote_data["msgtype"]
             if msgtype == "text" and "text" in quote_data:
                 text_obj = quote_data["text"]
                 if isinstance(text_obj, dict) and "content" in text_obj:
-                    return str(text_obj["content"]).strip()
+                    return str(text_obj["content"]).strip(), quote_data.get("msgid")
 
     # Try quote nested in text object
     text_data = data.get("text", {})
@@ -287,9 +290,9 @@ def _extract_quote_content(data: dict) -> str | None:
         if isinstance(quote_in_text, dict):
             for key in ["content", "text"]:
                 if key in quote_in_text and quote_in_text[key]:
-                    return str(quote_in_text[key]).strip()
+                    return str(quote_in_text[key]).strip(), quote_in_text.get("msgid")
         elif isinstance(quote_in_text, str):
-            return quote_in_text.strip()
+            return quote_in_text.strip(), None
 
     # Try reference field (alternative naming)
     for ref_key in ["reference", "ref", "reply_to"]:
@@ -297,7 +300,7 @@ def _extract_quote_content(data: dict) -> str | None:
             ref_data = data[ref_key]
             for key in ["content", "text", "message"]:
                 if key in ref_data and ref_data[key]:
-                    return str(ref_data[key]).strip()
+                    return str(ref_data[key]).strip(), ref_data.get("msgid")
 
     # Log structure if we suspect there might be a quote but couldn't extract
     # Only check top-level keys to avoid performance issues with large payloads
@@ -308,7 +311,7 @@ def _extract_quote_content(data: dict) -> str | None:
             f"keys: {list(data.keys())[:10]}"
         )
 
-    return None
+    return None, None
 
 
 async def _call_llm_async(
@@ -319,6 +322,8 @@ async def _call_llm_async(
     user_id: str,
     user_name: str,
     wecom_msg_id: str | None,
+    quoted_msg_id: str | None = None,
+    quoted_filename: str | None = None,
 ) -> None:
     """Call the appropriate LLM asynchronously and update task result."""
     config = BOT_CONFIGS[bot_type]
@@ -345,15 +350,26 @@ async def _call_llm_async(
             system_prompt=system_prompt,
         )
 
-        # Check for active file context
-        # Check for active file context (PERSISTENT)
-        # Check last 50 messages for any file context
-        file_ctx = context_manager.get_active_file(chat_id, limit=50)
-        use_file_context = False
+        # 1. Quoted File (Specific)
+        file_ctx = None
+        if quoted_msg_id:
+            file_ctx = context_manager.get_active_file(chat_id, wecom_msg_id=quoted_msg_id)
+            if file_ctx:
+                logger.info(f"[AIBOT_CTX] Found quoted file by MsgId: {file_ctx['filename']}")
         
+        if not file_ctx and quoted_filename:
+             file_ctx = context_manager.get_active_file(chat_id, filename=quoted_filename)
+             if file_ctx:
+                 logger.info(f"[AIBOT_CTX] Found quoted file by Filename: {file_ctx['filename']}")
+
+        # 2. Latest File (Sticky/Global)
+        if not file_ctx:
+             file_ctx = context_manager.get_active_file(chat_id, limit=50)
+
+        use_file_context = False
         if file_ctx and provider == "gemini":
              use_file_context = True
-             logger.info(f"[AIBOT_CTX] Using persistent file context for chat={chat_id}: {file_ctx['filename']}")
+             logger.info(f"[AIBOT_CTX] Using file context for chat={chat_id}: {file_ctx['filename']}")
 
         logger.info(
             f"[AIBOT_LLM_REQ] bot={bot_type} provider={provider} chat={chat_id} "
@@ -592,8 +608,15 @@ async def _handle_text_message(
     user_name = from_data.get("name", from_data.get("alias", user_id))
 
     # Extract quoted message content if present
-    quoted_content = _extract_quote_content(data)
+    quoted_content, quoted_msg_id = _extract_quote_content(data)
     original_content = content  # Save original user input
+    quoted_filename = None
+    
+    if quoted_content:
+        # If quoting a file, content is often the filename
+        # Basic check: if it has an extension, treat as filename
+        if "." in quoted_content and len(quoted_content) < 100:
+            quoted_filename = quoted_content
 
     if quoted_content:
         if original_content:
@@ -673,6 +696,8 @@ async def _handle_text_message(
             user_id=user_id,
             user_name=user_name,
             wecom_msg_id=wecom_msg_id,
+            quoted_msg_id=quoted_msg_id,
+            quoted_filename=quoted_filename,
         )
     )
 
@@ -1195,6 +1220,7 @@ async def _handle_file_message(
         "bot_type": bot_type,
         "chat_id": chat_id,
         "user_id": user_id,
+        "wecom_msg_id": wecom_msg_id,
     }
     
     # Start async download and analysis
@@ -1209,6 +1235,7 @@ async def _handle_file_message(
             system_prompt=config["system_prompt"],
             user_id=user_id,
             chat_id=chat_id,
+            wecom_msg_id=wecom_msg_id,
         )
     )
     
@@ -1226,6 +1253,7 @@ async def _call_file_llm_async(
     system_prompt: str,
     user_id: str,
     chat_id: str,
+    wecom_msg_id: str | None = None,
 ) -> None:
     """Download file, upload to LLM, and generate analysis."""
     try:
@@ -1348,7 +1376,7 @@ async def _call_file_llm_async(
         # Save context for future turns (PERSISTENT)
         if file_uri:
             get_context_manager().save_file(
-                chat_id, user_id, user_id, file_uri, filename, mime_type
+                chat_id, user_id, user_id, file_uri, filename, mime_type, wecom_msg_id
             )
             logger.info(f"[AIBOT_CTX] Saved persistent file context for chat={chat_id}")
 
