@@ -215,6 +215,10 @@ def _extract_msg_id(data: dict) -> str | None:
     for key in ["msgid", "msg_id", "MsgId", "message_id"]:
         if key in data:
             return str(data[key])
+            
+    # Fallback to nested msg object
+    if "msg" in data and isinstance(data["msg"], dict):
+        return data["msg"].get("msgid")
 
     # Check nested structures - msgid often inside text, image, etc.
     for nested_key in ["text", "image", "voice", "file", "link"]:
@@ -614,9 +618,23 @@ async def _handle_text_message(
     
     if quoted_content:
         # If quoting a file, content is often the filename
-        # Basic check: if it has an extension, treat as filename
-        if "." in quoted_content and len(quoted_content) < 100:
-            quoted_filename = quoted_content
+        # Clean it up: remove common prefixes like "user:" or "[icon]"
+        clean_name = quoted_content.strip()
+        
+        # Split by newline or colon and take the last part (often contains the filename)
+        if "\n" in clean_name:
+            clean_name = clean_name.split("\n")[-1].strip()
+        elif ":" in clean_name:
+            clean_name = clean_name.split(":")[-1].strip()
+            
+        # Remove common marks
+        for mark in ["[文件]", "[图片]", "📋", "📄"]:
+            clean_name = clean_name.replace(mark, "")
+        clean_name = clean_name.strip()
+            
+        if "." in clean_name and len(clean_name) < 100:
+            quoted_filename = clean_name
+            logger.info(f"[AIBOT_QUOTE] Detected quoted filename: {quoted_filename}")
 
     if quoted_content:
         if original_content:
@@ -1133,10 +1151,25 @@ def _extract_file_info(data: dict) -> tuple[str | None, str, str]:
     Returns: (url, filename, mimetype)
     """
     file_data = data.get("file", {})
-    url = file_data.get("url")  # Intelligent bot usually provides URL via callback
+    # Check multiple locations for filename
+    filename = file_data.get("filename") or file_data.get("name") or data.get("filename") or data.get("name")
     
-    filename = file_data.get("filename", file_data.get("name", "unknown_file"))
-    ext = file_data.get("file_ext", "")
+    # Try to extract from URL if still unknown
+    url = file_data.get("url") or data.get("url")
+    if not filename and url:
+        try:
+            from urllib.parse import urlparse
+            path = urlparse(url).path
+            filename = os.path.basename(path)
+            if not "." in filename:
+                filename = None
+        except:
+            pass
+            
+    if not filename:
+        filename = "unknown_file"
+
+    ext = file_data.get("file_ext", data.get("file_ext", ""))
     
     if ext and not filename.endswith(f".{ext}"):
         filename = f"{filename}.{ext}"

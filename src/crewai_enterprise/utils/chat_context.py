@@ -332,9 +332,16 @@ class ChatContextManager:
                             if msg.get("wecom_msg_id") == wecom_msg_id:
                                 return data
                         elif filename:
-                            # Strict filename match (case-sensitive) or flexible match
-                            if data.get("filename") == filename:
+                            # Robust filename match:
+                            stored_name = data.get("filename", "").lower()
+                            sought_name = filename.lower()
+                            
+                            if stored_name == sought_name or sought_name in stored_name or stored_name in sought_name:
                                 return data
+                            
+                            # Fallback: if stored name is "unknown_file", we might still want it 
+                            # if it's the only recent file, but that's risky. 
+                            # Let's stick to name matching for now but allow substring.
                         elif not wecom_msg_id and not filename:
                             # Default: just get the latest one
                             return data
