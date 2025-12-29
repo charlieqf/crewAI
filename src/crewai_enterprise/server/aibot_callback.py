@@ -369,21 +369,45 @@ async def _call_llm_async(
                 history_text = "\n\n".join(
                     [f"{'用户' if m['role']=='user' else '模型'}: {m['content']}" for m in messages]
                 )
-                # Override content with history + current (last message is already in messages)
-                full_prompt = f"对话历史:\n{history_text}\n\n(注意：用户之前上传了文件 {file_ctx['filename']}，请基于该文件回答)"
                 
-                response = await loop.run_in_executor(
-                    None,
-                    lambda: router.chat_with_file(
-                        provider=provider,
-                        text=full_prompt,
-                        file_data=None,
-                        file_mime_type=file_ctx["mime"],
-                        filename=file_ctx["filename"],
-                        file_uri=file_ctx["uri"],
-                        system_prompt=system_prompt,
+                # Check if file context is inline text or cloud URI
+                file_uri = file_ctx["uri"]
+                filename = file_ctx["filename"]
+                
+                if file_uri.startswith("content:"):
+                    # Inline Text Context
+                    raw_content = file_uri[8:]
+                    full_prompt = (
+                        f"对话历史:\n{history_text}\n\n"
+                        f"(注意：用户之前上传了文件 {filename}，内容如下，请基于此回答):\n"
+                        f"```\n{raw_content}\n```\n\n用户新问题: {messages[-1]['content']}" # Last msg is current query
+                        # Note: messages[-1] is already in history_text, but emphasizing it here helps
                     )
-                )
+                    
+                    response = await loop.run_in_executor(
+                        None,
+                        lambda: router.chat(
+                            provider=provider,
+                            messages=[{"role": "user", "content": full_prompt}],
+                            system_prompt=system_prompt,
+                        )
+                    )
+                else:
+                    # Cloud URI Context (PDF/Images)
+                    full_prompt = f"对话历史:\n{history_text}\n\n(注意：用户之前上传了文件 {filename}，请基于该文件回答)"
+                    
+                    response = await loop.run_in_executor(
+                        None,
+                        lambda: router.chat_with_file(
+                            provider=provider,
+                            text=full_prompt,
+                            file_data=None,
+                            file_mime_type=file_ctx["mime"],
+                            filename=filename,
+                            file_uri=file_uri,
+                            system_prompt=system_prompt,
+                        )
+                    )
             except Exception as e:
                 logger.warning(f"[AIBOT_CTX] Failed to use file context (fallback to text): {e}")
                 use_file_context = False
@@ -1215,9 +1239,29 @@ async def _call_file_llm_async(
         start_time = time.time()
         loop = asyncio.get_running_loop()
 
-        # 2. Upload file (if provider supports it)
+        # 2. Upload file OR Prepare inline content
         file_uri = None
-        if provider == "gemini":
+        is_inline_text = False
+        
+        # Check if it is a code/text file suitable for inline processing
+        import os
+        ext = os.path.splitext(filename)[1].lower()
+        is_code_file = ext in ['.sql', '.py', '.js', '.ts', '.html', '.css', '.txt', '.md', '.json', '.xml', '.sh', '.yaml', '.yml', '.c', '.cpp', '.java', '.go', '.rs', '.php']
+        
+        if is_code_file:
+            try:
+                # Decode bytes to string
+                text_content = file_bytes.decode('utf-8')
+                # Store content directly in URI field specific prefix
+                file_uri = f"content:{text_content}"
+                is_inline_text = True
+                logger.info(f"[AIBOT_FILE] Treating {filename} as inline text ({len(text_content)} chars)")
+            except Exception as e:
+                logger.warning(f"Failed to decode text file {filename}: {e}. Falling back to upload.")
+                is_code_file = False
+
+        if not is_code_file and provider == "gemini":
+            # Binary upload for PDF/Images
             file_uri = await loop.run_in_executor(
                 None,
                 lambda: router.upload_file(
@@ -1227,18 +1271,38 @@ async def _call_file_llm_async(
                     filename=filename
                 )
             )
-            # Save context for future turns
-            # Save context for future turns (PERSISTENT)
-            if file_uri:
-                get_context_manager().save_file(
-                    chat_id, user_id, user_id, file_uri, filename, mime_type
-                )
-                logger.info(f"[AIBOT_CTX] Saved persistent file context for chat={chat_id}")
 
-        # 3. Call LLM with file
-        response = await loop.run_in_executor(
-            None,
-            lambda: router.chat_with_file(
+        # Save context for future turns (PERSISTENT)
+        if file_uri:
+            get_context_manager().save_file(
+                chat_id, user_id, user_id, file_uri, filename, mime_type
+            )
+            logger.info(f"[AIBOT_CTX] Saved persistent file context for chat={chat_id}")
+
+        # 3. Call LLM
+        if is_inline_text:
+            # Chat directly with text content
+            full_prompt = f"请分析以下文件内容 ({filename}):\n\n```\n{file_uri[8:]}\n```\n\n{prompt}"
+            response = await loop.run_in_executor(
+                None,
+                lambda: router.chat(
+                    provider=provider,
+                    messages=[{"role": "user", "content": full_prompt}],
+                    system_prompt=system_prompt  # Pass system prompt here as well
+                )
+            )
+        else:
+            # Chat with Cloud URI
+            response = await loop.run_in_executor(
+                None,
+                lambda: router.chat_with_file(
+                    provider=provider,
+                    text=prompt,  # Use the user's prompt (e.g. "analyze this")
+                    file_uri=file_uri,
+                    file_mime_type=mime_type,  # Pass metadata
+                    system_prompt=system_prompt,
+                )
+            )
                 provider=provider,
                 text=prompt,
                 file_data=file_bytes,
