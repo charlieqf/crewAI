@@ -473,16 +473,11 @@ class LLMRouter:
         model = model or config["default_model"]
 
         if provider == "gemini":
-            # 1. Get File URI (upload if needed)
-            if not file_uri:
-                if not file_data:
-                    raise LLMError("Either file_data or file_uri must be provided")
-                file_uri = self._upload_gemini_file(api_key, file_data, file_mime_type, filename)
-            
-            # 2. Call Gemini with file URI
+            # Pass data to helper, let it decide between URI or Inline
             return self._call_gemini_file(
                 api_key, text, file_uri, file_mime_type,
-                system_prompt, model, max_tokens, temperature
+                system_prompt, model, max_tokens, temperature,
+                file_data=file_data
             )
         else:
             return LLMResponse(
@@ -564,29 +559,32 @@ class LLMRouter:
         self,
         api_key: str,
         text: str,
-        file_uri: str,
+        file_uri: str | None,
         mime_type: str,
         system_prompt: str | None,
         model: str,
         max_tokens: int,
         temperature: float,
+        file_data: bytes | None = None,
     ) -> LLMResponse:
-        """Call Gemini with existing file URI."""
+        """Call Gemini with file URI or Inline Data."""
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
 
         user_text = text
         if system_prompt:
             user_text = system_prompt + "\n\n" + text
 
-        parts = [
-            {"text": user_text},
-            {
-                "file_data": {
-                    "mime_type": mime_type,
-                    "file_uri": file_uri
-                }
-            }
-        ]
+        media_part = {}
+        if file_uri:
+            media_part = {"file_data": {"mime_type": mime_type, "file_uri": file_uri}}
+        elif file_data:
+            import base64
+            b64_data = base64.b64encode(file_data).decode('utf-8')
+            media_part = {"inline_data": {"mime_type": mime_type, "data": b64_data}}
+        
+        parts = [{"text": user_text}]
+        if media_part:
+            parts.append(media_part)
 
         payload = {
             "contents": [{"role": "user", "parts": parts}],

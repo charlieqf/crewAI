@@ -392,8 +392,10 @@ async def _call_llm_async(
                             system_prompt=system_prompt,
                         )
                     )
-                else:
-                    # Cloud URI Context (PDF/Images)
+                elif file_uri.startswith("base64:"):
+                    # Inline Base64 Context (PDF/Images)
+                    raw_b64 = file_uri[7:]
+                    file_bytes = base64.b64decode(raw_b64)
                     full_prompt = f"对话历史:\n{history_text}\n\n(注意：用户之前上传了文件 {filename}，请基于该文件回答)"
                     
                     response = await loop.run_in_executor(
@@ -401,7 +403,23 @@ async def _call_llm_async(
                         lambda: router.chat_with_file(
                             provider=provider,
                             text=full_prompt,
-                            file_data=None, # Missing arg fixed
+                            file_data=file_bytes,
+                            file_mime_type=file_ctx["mime"],
+                            filename=filename,
+                            file_uri=None,
+                            system_prompt=system_prompt,
+                        )
+                    )
+                else:
+                    # Legacy Cloud URI Context (should rarely be hit now)
+                    full_prompt = f"对话历史:\n{history_text}\n\n(注意：用户之前上传了文件 {filename}，请基于该文件回答)"
+                    
+                    response = await loop.run_in_executor(
+                        None,
+                        lambda: router.chat_with_file(
+                            provider=provider,
+                            text=full_prompt,
+                            file_data=None, 
                             file_mime_type=file_ctx["mime"],
                             filename=filename,
                             file_uri=file_uri,
@@ -1250,8 +1268,18 @@ async def _call_file_llm_async(
         
         if is_code_file:
             try:
-                # Decode bytes to string
-                text_content = file_bytes.decode('utf-8')
+                # Decode bytes to string with multiple encoding fallbacks
+                text_content = None
+                for enc in ['utf-8', 'gbk', 'gb18030', 'latin-1']:
+                    try:
+                        text_content = file_bytes.decode(enc)
+                        break
+                    except UnicodeDecodeError:
+                        continue
+                
+                if text_content is None:
+                    raise ValueError(f"Could not decode file {filename} with any supported encoding")
+
                 # Store content directly in URI field specific prefix
                 file_uri = f"content:{text_content}"
                 is_inline_text = True
@@ -1261,16 +1289,11 @@ async def _call_file_llm_async(
                 is_code_file = False
 
         if not is_code_file and provider == "gemini":
-            # Binary upload for PDF/Images
-            file_uri = await loop.run_in_executor(
-                None,
-                lambda: router.upload_file(
-                    provider=provider,
-                    file_data=file_bytes,
-                    mime_type=mime_type,
-                    filename=filename
-                )
-            )
+            # For Gemini 3, File API Upload is flaky. Use Base64 persistence.
+            # Store Base64 string directly as URI prefix "base64:"
+            b64_data = base64.b64encode(file_bytes).decode('utf-8')
+            file_uri = f"base64:{b64_data}"
+            # Do NOT upload to cloud.
 
         # Save context for future turns (PERSISTENT)
         if file_uri:
@@ -1292,14 +1315,22 @@ async def _call_file_llm_async(
                 )
             )
         else:
-            # Chat with Cloud URI
+            # Chat with Cloud URI or Base64 URI
+            real_file_data = None
+            real_file_uri = file_uri
+            
+            if file_uri.startswith("base64:"):
+                # Decode for immediate use
+                real_file_data = base64.b64decode(file_uri[7:])
+                real_file_uri = None
+            
             response = await loop.run_in_executor(
                 None,
                 lambda: router.chat_with_file(
                     provider=provider,
                     text=prompt,  # Use the user's prompt (e.g. "analyze this")
-                    file_data=None, # Missing arg fixed
-                    file_uri=file_uri,
+                    file_data=real_file_data,
+                    file_uri=real_file_uri,
                     file_mime_type=mime_type,  # Pass metadata
                     system_prompt=system_prompt,
                 )
