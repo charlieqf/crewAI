@@ -45,7 +45,7 @@ class LLMRouter:
             "env_key": "OPENAI_API_KEY",
         },
         "gemini": {
-            "base_url": "https://generativelanguage.googleapis.com/v1alpha/models/{model}:generateContent",
+            "base_url": "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
             "default_model": "gemini-3-flash-preview",
             "env_key": "GEMINI_API_KEY",
         },
@@ -167,7 +167,7 @@ class LLMRouter:
         temperature: float,
     ) -> LLMResponse:
         """Call Google Gemini API."""
-        url = f"https://generativelanguage.googleapis.com/v1alpha/models/{model}:generateContent?key={api_key}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
 
         # Convert OpenAI-style messages to Gemini format
         # Gemini doesn't support 'system' role - merge into first user message
@@ -372,7 +372,7 @@ class LLMRouter:
         temperature: float,
     ) -> LLMResponse:
         """Call Google Gemini Vision API."""
-        url = f"https://generativelanguage.googleapis.com/v1alpha/models/{model}:generateContent?key={api_key}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
 
         # Build content with text and image
         user_text = text
@@ -496,7 +496,7 @@ class LLMRouter:
     ) -> str:
         """Upload file to Gemini File API and return URI."""
         # Ref: https://ai.google.dev/api/files#method:-files.create
-        url = f"https://generativelanguage.googleapis.com/upload/v1alpha/files?key={api_key}"
+        url = f"https://generativelanguage.googleapis.com/upload/v1beta/files?key={api_key}"
         
         # Simple metadata + content upload
         headers = {
@@ -532,7 +532,7 @@ class LLMRouter:
 
             # POLL for ACTIVE state (for up to 30 seconds)
             # Ref: https://ai.google.dev/gemini-api/docs/files#get_file
-            check_url = f"https://generativelanguage.googleapis.com/v1alpha/{file_name_id}?key={api_key}"
+            check_url = f"https://generativelanguage.googleapis.com/v1beta/{file_name_id}?key={api_key}"
             start_wait = time.time()
             
             while time.time() - start_wait < 30:
@@ -568,7 +568,7 @@ class LLMRouter:
         file_data: bytes | None = None,
     ) -> LLMResponse:
         """Call Gemini with file URI or Inline Data."""
-        url = f"https://generativelanguage.googleapis.com/v1alpha/models/{model}:generateContent?key={api_key}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
 
         user_text = text
         if system_prompt:

@@ -1303,11 +1303,29 @@ async def _call_file_llm_async(
                    is_code_file = False
 
         if not is_code_file and provider == "gemini":
-            # For PDF/Images, utilize the File API (Verified working with corrected payload order)
-            file_uri = await loop.run_in_executor(
-                    None,
-                    lambda: router.upload_file(provider, file_bytes, mime_type, filename)
-                )
+            try:
+                # Use Inline Data (Base64) for files under 20MB (Verified working for gemini-3)
+                if len(file_bytes) < 20 * 1024 * 1024:
+                    real_file_data = file_bytes
+                    file_uri = None
+                    logger.info(f"[AIBOT_FILE] Preferring Inline Data (Base64) for {filename} ({len(file_bytes)} bytes)")
+                else:
+                    # Fallback to standard File API for larger files
+                    file_uri = await loop.run_in_executor(
+                        None, 
+                        lambda: router.upload_file(file_bytes, mime_type, api_key)
+                    )
+                    logger.info(f"[AIBOT_FILE] Uploaded large file {filename} to Gemini File API: {file_uri}")
+            except Exception as e:
+                logger.error(f"Failed to process Gemini file {filename}: {e}")
+                # Emergency fallback to inline text if upload fails
+                is_code_file = True
+                try:
+                    text_content = file_bytes.decode('utf-8', errors='replace')
+                    file_uri = f"content:{text_content}"
+                    is_inline_text = True
+                except:
+                    pass
 
         # Save context for future turns (PERSISTENT)
         if file_uri:
