@@ -1268,28 +1268,39 @@ async def _call_file_llm_async(
         
         if is_code_file:
             try:
-                # Decode bytes to string with multiple encoding fallbacks
+                # 1. Try decoding with specific encodings
                 text_content = None
-                for enc in ['utf-8', 'gbk', 'gb18030', 'latin-1']:
+                for enc in ['utf-8', 'gbk', 'gb18030', 'iso-8859-1']:
                     try:
                         text_content = file_bytes.decode(enc)
                         break
                     except UnicodeDecodeError:
                         continue
                 
+                # 2. Safe Fallback
                 if text_content is None:
-                    # Final fallback: Decode with replacement to ensure we return TEXT
                     text_content = file_bytes.decode('utf-8', errors='replace')
-                    logger.warning(f"Forced lossy decoding for {filename} to avoid Base64 fallback")
+                    logger.warning(f"Used lossy decoding for {filename}")
 
-                # Store content directly in URI field specific prefix
+                # 3. Validation
+                if not text_content:
+                    text_content = "<Empty File>"
+
+                # 4. Success -> Inline Text
                 file_uri = f"content:{text_content}"
                 is_inline_text = True
                 logger.info(f"[AIBOT_FILE] Treating {filename} as inline text ({len(text_content)} chars)")
+
             except Exception as e:
-                # This should technically be unreachable now due to errors='replace' but keeping for safety
-                logger.error(f"Unexpected error decoding text file {filename}: {e}. Forced to fallback (likely fail).")
-                is_code_file = False
+                logger.error(f"Decoding error for {filename}: {e}. Fallback to Safe Decode.")
+                # EMERGENCY FALLBACK: Force decode
+                try:
+                    safe_text = file_bytes.decode('utf-8', errors='replace')
+                    file_uri = f"content:{safe_text}"
+                    is_inline_text = True
+                except:
+                   # Only if everything fails, allow fallback (likely 400)
+                   is_code_file = False
 
         if not is_code_file and provider == "gemini":
             # For PDF/Images, utilize the File API (Verified working with corrected payload order)
