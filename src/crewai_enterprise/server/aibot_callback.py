@@ -380,6 +380,12 @@ def register_aibot_routes(app: FastAPI) -> None:
                 return await _handle_text_message(bot_type, data, nonce, timestamp)
             elif msgtype == "stream":
                 return await _handle_stream_refresh(bot_type, data, nonce, timestamp)
+            elif msgtype == "mixed":
+                # Handle mixed messages (text + image combination)
+                return await _handle_mixed_message(bot_type, data, nonce, timestamp)
+            elif msgtype == "image":
+                # Handle image-only messages
+                return await _handle_image_message(bot_type, data, nonce, timestamp)
             elif msgtype == "event":
                 # Handle events (e.g., bot added to group)
                 logger.info(f"[AIBOT_EVENT] bot={bot_type} event={data}")
@@ -568,3 +574,145 @@ def _cleanup_old_tasks() -> None:
 
     if expired_task_ids:
         logger.debug(f"Cleaned up {len(expired_task_ids)} expired tasks")
+
+
+def _extract_text_from_mixed(data: dict) -> str:
+    """Extract text content from a mixed (image+text) message.
+
+    Mixed messages contain a msg_item list with different content types.
+    We extract all text content and combine it.
+    """
+    text_parts = []
+
+    # Try msg_item array (common mixed message structure)
+    msg_items = data.get("msg_item", data.get("mixed", {}).get("msg_item", []))
+    if isinstance(msg_items, list):
+        for item in msg_items:
+            if isinstance(item, dict):
+                item_type = item.get("msgtype", item.get("type", ""))
+                if item_type == "text":
+                    text_obj = item.get("text", {})
+                    if isinstance(text_obj, dict):
+                        content = text_obj.get("content", "")
+                        if content:
+                            text_parts.append(content)
+                    elif isinstance(text_obj, str):
+                        text_parts.append(text_obj)
+
+    # Also check for top-level text field as fallback
+    if not text_parts:
+        text_data = data.get("text", {})
+        if isinstance(text_data, dict):
+            content = text_data.get("content", "")
+            if content:
+                text_parts.append(content)
+        elif isinstance(text_data, str):
+            text_parts.append(text_data)
+
+    return " ".join(text_parts).strip()
+
+
+def _has_image_in_mixed(data: dict) -> bool:
+    """Check if mixed message contains image content."""
+    msg_items = data.get("msg_item", data.get("mixed", {}).get("msg_item", []))
+    if isinstance(msg_items, list):
+        for item in msg_items:
+            if isinstance(item, dict):
+                item_type = item.get("msgtype", item.get("type", ""))
+                if item_type == "image":
+                    return True
+    return False
+
+
+async def _handle_mixed_message(
+    bot_type: str,
+    data: dict,
+    nonce: str,
+    timestamp: str,
+) -> Response:
+    """Handle mixed messages (image + text combination).
+
+    Extract text content and process it. Note that image analysis
+    is not yet supported - we inform the user about this limitation.
+    """
+    _cleanup_old_tasks()
+
+    # Extract text from mixed message
+    text_content = _extract_text_from_mixed(data)
+    has_image = _has_image_in_mixed(data)
+
+    # Extract user info
+    from_data = data.get("from", {})
+    user_id = from_data.get("user_id", from_data.get("userid", "unknown"))
+    user_name = from_data.get("name", from_data.get("alias", user_id))
+
+    logger.info(
+        f"[AIBOT_MIXED] bot={bot_type} user={user_name} "
+        f"has_image={has_image} text={text_content[:50]!r}..."
+    )
+
+    if not text_content:
+        # Image-only in mixed message, no text
+        if has_image:
+            return await _handle_image_message(bot_type, data, nonce, timestamp)
+        else:
+            logger.warning(f"[AIBOT_MIXED] bot={bot_type} no content found")
+            return Response(content="success", media_type="text/plain")
+
+    # Build message content with image context note
+    if has_image:
+        content = f"[用户发送了图片+文字] 文字内容: {text_content}\n\n(注: 图片分析功能暂未开放,请基于文字内容回复)"
+    else:
+        content = text_content
+
+    # Create a modified data dict with text content for _handle_text_message
+    modified_data = data.copy()
+    modified_data["text"] = {"content": content}
+    modified_data["msgtype"] = "text"  # Treat as text for processing
+
+    return await _handle_text_message(bot_type, modified_data, nonce, timestamp)
+
+
+async def _handle_image_message(
+    bot_type: str,
+    data: dict,
+    nonce: str,
+    timestamp: str,
+) -> Response:
+    """Handle image-only messages.
+
+    Currently returns a friendly response explaining image analysis limitations.
+    Image analysis with Vision models can be added in the future.
+    """
+    # Extract user info
+    from_data = data.get("from", {})
+    user_id = from_data.get("user_id", from_data.get("userid", "unknown"))
+    user_name = from_data.get("name", from_data.get("alias", user_id))
+
+    logger.info(f"[AIBOT_IMAGE] bot={bot_type} user={user_name} received image")
+
+    # Generate response explaining limitation
+    stream_id = _generate_stream_id()
+    response_text = (
+        "收到您的图片！目前图片分析功能正在开发中，暂时无法处理纯图片消息。\n\n"
+        "💡 小提示：您可以在发送图片的同时添加文字说明或问题，我会根据文字内容为您解答。"
+    )
+
+    # Create a completed task
+    _stream_tasks[stream_id] = {
+        "content": response_text,
+        "finished": True,
+        "created_at": time.time(),
+        "completed_at": time.time(),
+        "bot_type": bot_type,
+        "chat_id": _extract_chat_id(data, user_id),
+        "user_id": user_id,
+        "user_name": user_name,
+    }
+
+    # Return response
+    stream_json = _make_text_stream(stream_id, response_text, finish=True)
+    encrypted = _encrypt_response(bot_type, stream_json, nonce, timestamp)
+
+    logger.info(f"[AIBOT_IMAGE] bot={bot_type} stream_id={stream_id} image_notice_sent")
+    return Response(content=encrypted, media_type="text/plain")
