@@ -44,12 +44,12 @@ class LLMRouter:
         },
         "gemini": {
             "base_url": "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-            "default_model": "gemini-1.5-pro",
+            "default_model": "gemini-3-flash-preview",
             "env_key": "GEMINI_API_KEY",
         },
         "xai": {
             "base_url": "https://api.x.ai/v1/chat/completions",
-            "default_model": "grok-beta",
+            "default_model": "grok-4-fast-non-reasoning",
             "env_key": "XAI_API_KEY",
         },
     }

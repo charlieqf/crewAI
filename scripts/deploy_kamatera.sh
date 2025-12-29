@@ -96,17 +96,34 @@ mkdir -p "$(dirname $ENV_FILE)"
 
 if [ ! -f "$ENV_FILE" ]; then
     cat > "$ENV_FILE" << 'EOF'
-# WeCom 配置 (必填)
+# WeCom 配置 (自建应用 - 如不使用可忽略)
 WECOM_TOKEN=your_token_here
 WECOM_ENCODING_AES_KEY=your_aes_key_here
 WECOM_CORP_ID=your_corp_id_here
 
+# =============================================================================
+# AI Bot 智能机器人配置 (每个机器人独立的 Token 和 EncodingAESKey)
+# =============================================================================
+# Gemini Bot
+GEMINI_BOT_TOKEN=
+GEMINI_BOT_ENCODING_AES_KEY=
+
+# ChatGPT Bot
+CHATGPT_BOT_TOKEN=
+CHATGPT_BOT_ENCODING_AES_KEY=
+
+# Grok Bot
+GROK_BOT_TOKEN=
+GROK_BOT_ENCODING_AES_KEY=
+
+# =============================================================================
 # LLM API Keys (至少配置一个)
+# =============================================================================
 GEMINI_API_KEY=
 OPENAI_API_KEY=
-GROK_API_KEY=
+XAI_API_KEY=
 
-# Webhook URLs (must match BOT_CONFIG in code)
+# Webhook URLs (自建应用使用, 智能机器人不需要)
 WEBHOOK_GPT=
 WEBHOOK_GEMINI=
 WEBHOOK_GROK=
