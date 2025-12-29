@@ -1303,15 +1303,7 @@ async def _call_file_llm_async(
                     system_prompt=system_prompt,
                 )
             )
-                provider=provider,
-                text=prompt,
-                file_data=file_bytes,
-                file_mime_type=mime_type,
-                filename=filename,
-                file_uri=file_uri,
-                system_prompt=system_prompt,
-            )
-        )
+
         
         elapsed_ms = int((time.time() - start_time) * 1000)
         logger.info(f"[AIBOT_FILE_RES] bot={bot_type} elapsed={elapsed_ms}ms")
