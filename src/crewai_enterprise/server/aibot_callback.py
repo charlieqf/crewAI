@@ -21,12 +21,15 @@ Streaming Flow:
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import os
 import time
 from typing import Any
 
+import requests
+from Crypto.Cipher import AES
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse, Response
 
@@ -92,6 +95,73 @@ def _get_bot_crypto(bot_type: str) -> WXBizJsonMsgCrypt:
 
     # For intelligent robots, receiveid is empty string
     return WXBizJsonMsgCrypt(token, aes_key, "")
+
+
+def _get_bot_aes_key(bot_type: str) -> str:
+    """Get the EncodingAESKey for a specific bot."""
+    config = BOT_CONFIGS.get(bot_type)
+    if not config:
+        raise ValueError(f"Unknown bot type: {bot_type}")
+    return os.getenv(config["aes_key_env"], "")
+
+
+def _decrypt_image(image_url: str, aes_key_base64: str) -> tuple[bool, bytes | str]:
+    """Download and decrypt an encrypted image from WeCom.
+
+    Args:
+        image_url: URL of the encrypted image
+        aes_key_base64: Base64-encoded AES key (same as EncodingAESKey)
+
+    Returns:
+        tuple: (success, data) - if success, data is decrypted bytes; otherwise error message
+    """
+    try:
+        # 1. Download encrypted image
+        logger.info(f"[IMAGE] Downloading encrypted image: {image_url[:80]}...")
+        response = requests.get(image_url, timeout=15)
+        response.raise_for_status()
+        encrypted_data = response.content
+        logger.info(f"[IMAGE] Downloaded {len(encrypted_data)} bytes")
+
+        # 2. Prepare AES key and IV
+        if not aes_key_base64:
+            raise ValueError("AES key is empty")
+
+        # Base64 decode key (handle padding)
+        aes_key = base64.b64decode(aes_key_base64 + "=" * (-len(aes_key_base64) % 4))
+        if len(aes_key) != 32:
+            raise ValueError(f"Invalid AES key length: expected 32, got {len(aes_key)}")
+
+        iv = aes_key[:16]  # IV is first 16 bytes of key
+
+        # 3. Decrypt image data
+        cipher = AES.new(aes_key, AES.MODE_CBC, iv)
+        decrypted_data = cipher.decrypt(encrypted_data)
+
+        # 4. Remove PKCS#7 padding
+        pad_len = decrypted_data[-1]
+        if pad_len > 32:  # AES-256 block size
+            raise ValueError(f"Invalid padding length: {pad_len}")
+
+        decrypted_data = decrypted_data[:-pad_len]
+        logger.info(f"[IMAGE] Decrypted to {len(decrypted_data)} bytes")
+
+        return True, decrypted_data
+
+    except requests.exceptions.RequestException as e:
+        error_msg = f"Image download failed: {e}"
+        logger.error(f"[IMAGE] {error_msg}")
+        return False, error_msg
+
+    except ValueError as e:
+        error_msg = f"Decryption error: {e}"
+        logger.error(f"[IMAGE] {error_msg}")
+        return False, error_msg
+
+    except Exception as e:
+        error_msg = f"Image processing error: {e}"
+        logger.error(f"[IMAGE] {error_msg}")
+        return False, error_msg
 
 
 def _make_text_stream(stream_id: str, content: str, finish: bool) -> str:
@@ -624,6 +694,35 @@ def _has_image_in_mixed(data: dict) -> bool:
     return False
 
 
+def _extract_image_urls_from_mixed(data: dict) -> list[str]:
+    """Extract image URLs from mixed message or image message.
+
+    Returns a list of image URLs (encrypted) from the message.
+    """
+    urls = []
+
+    # Check msg_item array (mixed message structure)
+    msg_items = data.get("msg_item", data.get("mixed", {}).get("msg_item", []))
+    if isinstance(msg_items, list):
+        for item in msg_items:
+            if isinstance(item, dict):
+                item_type = item.get("msgtype", item.get("type", ""))
+                if item_type == "image":
+                    image_data = item.get("image", {})
+                    url = image_data.get("url", image_data.get("pic_url", ""))
+                    if url:
+                        urls.append(url)
+
+    # Check top-level image field (image-only message)
+    if not urls:
+        image_data = data.get("image", {})
+        url = image_data.get("url", image_data.get("pic_url", ""))
+        if url:
+            urls.append(url)
+
+    return urls
+
+
 async def _handle_mixed_message(
     bot_type: str,
     data: dict,
@@ -632,14 +731,14 @@ async def _handle_mixed_message(
 ) -> Response:
     """Handle mixed messages (image + text combination).
 
-    Extract text content and process it. Note that image analysis
-    is not yet supported - we inform the user about this limitation.
+    Downloads and decrypts images, then sends to multimodal LLM for analysis.
     """
     _cleanup_old_tasks()
 
     # Extract text from mixed message
     text_content = _extract_text_from_mixed(data)
-    has_image = _has_image_in_mixed(data)
+    image_urls = _extract_image_urls_from_mixed(data)
+    has_image = len(image_urls) > 0
 
     # Extract user info
     from_data = data.get("from", {})
@@ -648,29 +747,53 @@ async def _handle_mixed_message(
 
     logger.info(
         f"[AIBOT_MIXED] bot={bot_type} user={user_name} "
-        f"has_image={has_image} text={text_content[:50]!r}..."
+        f"images={len(image_urls)} text={text_content[:50]!r}..."
     )
 
-    if not text_content:
-        # Image-only in mixed message, no text
-        if has_image:
-            return await _handle_image_message(bot_type, data, nonce, timestamp)
+    if not text_content and not has_image:
+        logger.warning(f"[AIBOT_MIXED] bot={bot_type} no content found")
+        return Response(content="success", media_type="text/plain")
+
+    # If no image, just process as text
+    if not has_image:
+        modified_data = data.copy()
+        modified_data["text"] = {"content": text_content}
+        modified_data["msgtype"] = "text"
+        return await _handle_text_message(bot_type, modified_data, nonce, timestamp)
+
+    # Process with image - try to download and decrypt
+    aes_key = _get_bot_aes_key(bot_type)
+    image_base64 = None
+    image_error = None
+
+    # Try the first image
+    if image_urls:
+        success, result = _decrypt_image(image_urls[0], aes_key)
+        if success:
+            image_base64 = base64.b64encode(result).decode("utf-8")
+            logger.info(f"[AIBOT_MIXED] bot={bot_type} image decrypted successfully")
         else:
-            logger.warning(f"[AIBOT_MIXED] bot={bot_type} no content found")
-            return Response(content="success", media_type="text/plain")
+            image_error = result
+            logger.warning(f"[AIBOT_MIXED] bot={bot_type} image decrypt failed: {result}")
 
-    # Build message content with image context note
-    if has_image:
-        content = f"[用户发送了图片+文字] 文字内容: {text_content}\n\n(注: 图片分析功能暂未开放,请基于文字内容回复)"
+    # Build prompt
+    if text_content:
+        prompt = text_content
     else:
-        content = text_content
+        prompt = "请描述这张图片的内容"
 
-    # Create a modified data dict with text content for _handle_text_message
-    modified_data = data.copy()
-    modified_data["text"] = {"content": content}
-    modified_data["msgtype"] = "text"  # Treat as text for processing
+    # If image decryption failed, fall back to text-only
+    if not image_base64:
+        error_note = f"\n\n(注: 图片处理失败: {image_error})" if image_error else ""
+        modified_data = data.copy()
+        modified_data["text"] = {"content": prompt + error_note}
+        modified_data["msgtype"] = "text"
+        return await _handle_text_message(bot_type, modified_data, nonce, timestamp)
 
-    return await _handle_text_message(bot_type, modified_data, nonce, timestamp)
+    # Process with image using vision API
+    return await _handle_vision_message(
+        bot_type, data, nonce, timestamp, prompt, image_base64, user_id, user_name
+    )
 
 
 async def _handle_image_message(
@@ -681,9 +804,10 @@ async def _handle_image_message(
 ) -> Response:
     """Handle image-only messages.
 
-    Currently returns a friendly response explaining image analysis limitations.
-    Image analysis with Vision models can be added in the future.
+    Downloads and decrypts the image, then sends to multimodal LLM for analysis.
     """
+    _cleanup_old_tasks()
+
     # Extract user info
     from_data = data.get("from", {})
     user_id = from_data.get("user_id", from_data.get("userid", "unknown"))
@@ -691,28 +815,189 @@ async def _handle_image_message(
 
     logger.info(f"[AIBOT_IMAGE] bot={bot_type} user={user_name} received image")
 
-    # Generate response explaining limitation
-    stream_id = _generate_stream_id()
-    response_text = (
-        "收到您的图片！目前图片分析功能正在开发中，暂时无法处理纯图片消息。\n\n"
-        "💡 小提示：您可以在发送图片的同时添加文字说明或问题，我会根据文字内容为您解答。"
+    # Extract image URL
+    image_urls = _extract_image_urls_from_mixed(data)
+    if not image_urls:
+        logger.warning(f"[AIBOT_IMAGE] bot={bot_type} no image URL found")
+        stream_id = _generate_stream_id()
+        response_text = "收到您的消息，但未找到图片内容。请重新发送图片。"
+        _stream_tasks[stream_id] = {
+            "content": response_text,
+            "finished": True,
+            "created_at": time.time(),
+            "completed_at": time.time(),
+            "bot_type": bot_type,
+            "chat_id": _extract_chat_id(data, user_id),
+            "user_id": user_id,
+            "user_name": user_name,
+        }
+        stream_json = _make_text_stream(stream_id, response_text, finish=True)
+        encrypted = _encrypt_response(bot_type, stream_json, nonce, timestamp)
+        return Response(content=encrypted, media_type="text/plain")
+
+    # Try to download and decrypt image
+    aes_key = _get_bot_aes_key(bot_type)
+    success, result = _decrypt_image(image_urls[0], aes_key)
+
+    if not success:
+        logger.error(f"[AIBOT_IMAGE] bot={bot_type} decrypt failed: {result}")
+        stream_id = _generate_stream_id()
+        response_text = f"收到您的图片，但处理时出现问题：{result}\n\n请稍后重试，或添加文字说明。"
+        _stream_tasks[stream_id] = {
+            "content": response_text,
+            "finished": True,
+            "created_at": time.time(),
+            "completed_at": time.time(),
+            "bot_type": bot_type,
+            "chat_id": _extract_chat_id(data, user_id),
+            "user_id": user_id,
+            "user_name": user_name,
+        }
+        stream_json = _make_text_stream(stream_id, response_text, finish=True)
+        encrypted = _encrypt_response(bot_type, stream_json, nonce, timestamp)
+        return Response(content=encrypted, media_type="text/plain")
+
+    # Image decrypted successfully
+    image_base64 = base64.b64encode(result).decode("utf-8")
+    prompt = "请描述并分析这张图片的内容"
+
+    logger.info(f"[AIBOT_IMAGE] bot={bot_type} image decrypted, sending to vision API")
+
+    return await _handle_vision_message(
+        bot_type, data, nonce, timestamp, prompt, image_base64, user_id, user_name
     )
 
-    # Create a completed task
+
+async def _handle_vision_message(
+    bot_type: str,
+    data: dict,
+    nonce: str,
+    timestamp: str,
+    prompt: str,
+    image_base64: str,
+    user_id: str,
+    user_name: str,
+) -> Response:
+    """Handle vision (image+text) message with multimodal LLM.
+
+    This is the core function that calls the vision API asynchronously.
+    """
+    config = BOT_CONFIGS[bot_type]
+    provider = config["provider"]
+    system_prompt = config["system_prompt"]
+
+    chat_id = _extract_chat_id(data, user_id)
+    wecom_msg_id = _extract_msg_id(data)
+
+    # Check for duplicate message
+    if wecom_msg_id and wecom_msg_id in _processed_messages:
+        existing_stream_id = _processed_messages[wecom_msg_id]
+        if existing_stream_id in _stream_tasks:
+            task = _stream_tasks[existing_stream_id]
+            stream_json = _make_text_stream(
+                existing_stream_id, task["content"], task["finished"]
+            )
+            encrypted = _encrypt_response(bot_type, stream_json, nonce, timestamp)
+            logger.info(f"[AIBOT_VISION] Returning cached response for msgid={wecom_msg_id}")
+            return Response(content=encrypted, media_type="text/plain")
+
+    # Create stream task for tracking
+    stream_id = _generate_stream_id()
     _stream_tasks[stream_id] = {
-        "content": response_text,
-        "finished": True,
+        "content": "正在分析图片...",
+        "finished": False,
         "created_at": time.time(),
-        "completed_at": time.time(),
         "bot_type": bot_type,
-        "chat_id": _extract_chat_id(data, user_id),
+        "chat_id": chat_id,
         "user_id": user_id,
         "user_name": user_name,
     }
 
-    # Return response
-    stream_json = _make_text_stream(stream_id, response_text, finish=True)
+    if wecom_msg_id:
+        _processed_messages[wecom_msg_id] = stream_id
+
+    # Start vision LLM call asynchronously
+    asyncio.create_task(
+        _call_vision_llm_async(
+            stream_id=stream_id,
+            bot_type=bot_type,
+            provider=provider,
+            prompt=prompt,
+            image_base64=image_base64,
+            system_prompt=system_prompt,
+            chat_id=chat_id,
+            user_id=user_id,
+            user_name=user_name,
+        )
+    )
+
+    # Return immediate "analyzing" response
+    stream_json = _make_text_stream(stream_id, "正在分析图片...", finish=False)
     encrypted = _encrypt_response(bot_type, stream_json, nonce, timestamp)
 
-    logger.info(f"[AIBOT_IMAGE] bot={bot_type} stream_id={stream_id} image_notice_sent")
+    logger.info(f"[AIBOT_VISION] bot={bot_type} stream_id={stream_id} analyzing image")
     return Response(content=encrypted, media_type="text/plain")
+
+
+async def _call_vision_llm_async(
+    stream_id: str,
+    bot_type: str,
+    provider: str,
+    prompt: str,
+    image_base64: str,
+    system_prompt: str,
+    chat_id: str,
+    user_id: str,
+    user_name: str,
+) -> None:
+    """Call vision LLM asynchronously and update task result."""
+    try:
+        router = get_router()
+
+        logger.info(
+            f"[AIBOT_VISION_REQ] bot={bot_type} provider={provider} "
+            f"prompt={prompt[:50]!r}... image_size={len(image_base64)//1024}KB"
+        )
+
+        start_time = time.time()
+
+        # Run vision LLM call in thread pool
+        loop = asyncio.get_running_loop()
+        response = await loop.run_in_executor(
+            None,
+            lambda: router.chat_with_image(
+                provider=provider,
+                text=prompt,
+                image_base64=image_base64,
+                system_prompt=system_prompt,
+            )
+        )
+
+        elapsed_ms = int((time.time() - start_time) * 1000)
+
+        logger.info(
+            f"[AIBOT_VISION_RES] bot={bot_type} elapsed={elapsed_ms}ms "
+            f"response_len={len(response.content)}"
+        )
+
+        # Update task with completed response
+        if stream_id in _stream_tasks:
+            _stream_tasks[stream_id]["content"] = response.content
+            _stream_tasks[stream_id]["finished"] = True
+            _stream_tasks[stream_id]["completed_at"] = time.time()
+
+    except LLMError as e:
+        logger.error(f"[AIBOT_VISION_ERR] bot={bot_type} error={e}")
+        if stream_id in _stream_tasks:
+            _stream_tasks[stream_id]["content"] = (
+                f"抱歉，图片分析服务暂时不可用: {str(e)[:100]}"
+            )
+            _stream_tasks[stream_id]["finished"] = True
+            _stream_tasks[stream_id]["completed_at"] = time.time()
+
+    except Exception as e:
+        logger.exception(f"[AIBOT_VISION_ERR] bot={bot_type} unexpected error: {e}")
+        if stream_id in _stream_tasks:
+            _stream_tasks[stream_id]["content"] = "图片分析时发生错误，请稍后重试。"
+            _stream_tasks[stream_id]["finished"] = True
+            _stream_tasks[stream_id]["completed_at"] = time.time()
