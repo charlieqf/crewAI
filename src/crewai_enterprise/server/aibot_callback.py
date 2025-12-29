@@ -1292,7 +1292,6 @@ async def _call_file_llm_async(
                 is_code_file = False
 
         if not is_code_file and provider == "gemini":
-        if not is_code_file and provider == "gemini":
             # For PDF/Images, utilize the File API (Verified working with corrected payload order)
             file_uri = await loop.run_in_executor(
                     None,
