@@ -1,0 +1,570 @@
+"""
+AI Bot Callback Handler for WeCom Intelligent Robots.
+
+Handles callbacks from 3 independent intelligent robots (gemini/chatgpt/grok).
+Each robot has its own callback endpoint and connects to its respective LLM.
+
+Key differences from self-built application:
+- Uses JSON encryption (not XML)
+- receiveid is empty string
+- Supports streaming responses
+- Direct callback response (no webhook needed)
+
+Streaming Flow:
+1. User sends message -> WeCom calls POST /ai-bot/{bot_type}
+2. We immediately store task with finish=False & return "思考中..."
+3. LLM is called asynchronously, result stored when complete
+4. WeCom polls with msgtype=stream, we return current progress
+5. When LLM completes, we return finish=True with full response
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+import time
+from typing import Any
+
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import PlainTextResponse, Response
+
+from src.crewai_enterprise.utils.wecom_json_crypto import WXBizJsonMsgCrypt
+from src.crewai_enterprise.utils.llm_router import LLMError, get_router
+from src.crewai_enterprise.utils.chat_context import get_context_manager
+
+logger = logging.getLogger(__name__)
+
+# Bot configurations - each bot has its own Token/EncodingAESKey
+BOT_CONFIGS: dict[str, dict[str, str]] = {
+    "gemini": {
+        "provider": "gemini",
+        "token_env": "GEMINI_BOT_TOKEN",
+        "aes_key_env": "GEMINI_BOT_ENCODING_AES_KEY",
+        "system_prompt": "你是Gemini,一个擅长长文本分析和理解的AI助手。请用中文回答。",
+    },
+    "chatgpt": {
+        "provider": "openai",
+        "token_env": "CHATGPT_BOT_TOKEN",
+        "aes_key_env": "CHATGPT_BOT_ENCODING_AES_KEY",
+        "system_prompt": "你是ChatGPT,一个友好的AI助手。请用简洁清晰的中文回答问题。",
+    },
+    "grok": {
+        "provider": "xai",
+        "token_env": "GROK_BOT_TOKEN",
+        "aes_key_env": "GROK_BOT_ENCODING_AES_KEY",
+        "system_prompt": "你是Grok,一个风趣幽默且知识渊博的AI助手。请用中文回答。",
+    },
+}
+
+# ============================================================================
+# WARNING: In-memory caches - NOT suitable for multi-worker/multi-instance!
+# For production with multiple Uvicorn workers or load-balanced instances,
+# replace these with Redis or a shared database.
+# ============================================================================
+_stream_tasks: dict[str, dict[str, Any]] = {}
+_processed_messages: dict[str, str] = {}  # msg_id -> stream_id
+
+
+def _generate_stream_id() -> str:
+    """Generate a unique stream ID for task tracking."""
+    import random
+    import string
+
+    return "".join(random.choices(string.ascii_letters + string.digits, k=16))
+
+
+def _get_bot_crypto(bot_type: str) -> WXBizJsonMsgCrypt:
+    """Get WXBizJsonMsgCrypt instance for a specific bot."""
+    config = BOT_CONFIGS.get(bot_type)
+    if not config:
+        raise ValueError(f"Unknown bot type: {bot_type}")
+
+    token = os.getenv(config["token_env"], "")
+    aes_key = os.getenv(config["aes_key_env"], "")
+
+    if not token or not aes_key:
+        raise ValueError(
+            f"Missing configuration for {bot_type}: "
+            f"set {config['token_env']} and {config['aes_key_env']}"
+        )
+
+    # For intelligent robots, receiveid is empty string
+    return WXBizJsonMsgCrypt(token, aes_key, "")
+
+
+def _make_text_stream(stream_id: str, content: str, finish: bool) -> str:
+    """Create a text stream response message."""
+    return json.dumps(
+        {
+            "msgtype": "stream",
+            "stream": {"id": stream_id, "finish": finish, "content": content},
+        },
+        ensure_ascii=False,
+    )
+
+
+def _encrypt_response(
+    bot_type: str, stream_json: str, nonce: str, timestamp: str
+) -> str:
+    """Encrypt response message for WeCom."""
+    crypto = _get_bot_crypto(bot_type)
+    ret, encrypted = crypto.EncryptMsg(stream_json, nonce, timestamp)
+    if ret != 0:
+        raise ValueError(f"Encryption failed with error code: {ret}")
+    return encrypted
+
+
+def _extract_msg_id(data: dict) -> str | None:
+    """Extract message ID from WeCom payload for dedup.
+
+    The intelligent bot payload may use different keys.
+    Try common variations including nested objects.
+    """
+    # Try top-level keys first
+    for key in ["msgid", "msg_id", "MsgId", "message_id"]:
+        if key in data:
+            return str(data[key])
+
+    # Check nested structures - msgid often inside text, image, etc.
+    for nested_key in ["text", "image", "voice", "file", "link"]:
+        if nested_key in data and isinstance(data[nested_key], dict):
+            nested = data[nested_key]
+            for key in ["msgid", "msg_id", "MsgId"]:
+                if key in nested:
+                    return str(nested[key])
+
+    # Log available keys for debugging (helps identify correct field names)
+    # Include nested structure hint for better debugging
+    nested_info = {
+        k: list(v.keys())[:5] if isinstance(v, dict) else type(v).__name__
+        for k, v in list(data.items())[:8]
+    }
+    logger.debug(f"[AIBOT_MSGID] Could not extract msgid, structure: {nested_info}")
+    return None
+
+
+def _extract_chat_id(data: dict, user_id: str) -> str:
+    """Extract chat/group ID from WeCom payload.
+
+    The intelligent bot payload may have different structures.
+    Try common variations and fall back to user_id for 1-on-1 chats.
+    """
+    # Try various possible key names for group chat ID
+    for key in ["chat_id", "chatid", "ChatId", "roomid", "room_id", "groupid"]:
+        if key in data and data[key]:
+            return str(data[key])
+
+    # Check nested structures
+    if "chat" in data and isinstance(data["chat"], dict):
+        chat_data = data["chat"]
+        for key in ["id", "chat_id", "chatid"]:
+            if key in chat_data and chat_data[key]:
+                return str(chat_data[key])
+
+    # Fall back to user_id for 1-on-1 chats
+    return user_id
+
+
+def _extract_quote_content(data: dict) -> str | None:
+    """Extract quoted message content from WeCom payload.
+
+    WeCom intelligent bot payloads may include quoted/referenced messages.
+    Common structures include:
+    - data["quote"]["content"] - direct quote object
+    - data["text"]["quote"] - nested in text object
+    - data["reference"] - alternative naming
+    """
+    # Try top-level quote field
+    if "quote" in data and isinstance(data["quote"], dict):
+        quote_data = data["quote"]
+        # Try different content field names
+        for key in ["content", "text", "Content", "Text"]:
+            if key in quote_data and quote_data[key]:
+                return str(quote_data[key]).strip()
+        # If quote has type info, try to extract based on type
+        if "msgtype" in quote_data:
+            msgtype = quote_data["msgtype"]
+            if msgtype == "text" and "text" in quote_data:
+                text_obj = quote_data["text"]
+                if isinstance(text_obj, dict) and "content" in text_obj:
+                    return str(text_obj["content"]).strip()
+
+    # Try quote nested in text object
+    text_data = data.get("text", {})
+    if isinstance(text_data, dict) and "quote" in text_data:
+        quote_in_text = text_data["quote"]
+        if isinstance(quote_in_text, dict):
+            for key in ["content", "text"]:
+                if key in quote_in_text and quote_in_text[key]:
+                    return str(quote_in_text[key]).strip()
+        elif isinstance(quote_in_text, str):
+            return quote_in_text.strip()
+
+    # Try reference field (alternative naming)
+    for ref_key in ["reference", "ref", "reply_to"]:
+        if ref_key in data and isinstance(data[ref_key], dict):
+            ref_data = data[ref_key]
+            for key in ["content", "text", "message"]:
+                if key in ref_data and ref_data[key]:
+                    return str(ref_data[key]).strip()
+
+    # Log structure if we suspect there might be a quote but couldn't extract
+    # Only check top-level keys to avoid performance issues with large payloads
+    quote_related_keys = ["quote", "reference", "ref", "reply_to", "reply"]
+    if any(k in data for k in quote_related_keys):
+        logger.debug(
+            f"[AIBOT_QUOTE] Possible quote detected but not extracted, "
+            f"keys: {list(data.keys())[:10]}"
+        )
+
+    return None
+
+
+async def _call_llm_async(
+    stream_id: str,
+    bot_type: str,
+    content: str,
+    chat_id: str,
+    user_id: str,
+    user_name: str,
+    wecom_msg_id: str | None,
+) -> None:
+    """Call the appropriate LLM asynchronously and update task result."""
+    config = BOT_CONFIGS[bot_type]
+    provider = config["provider"]
+    system_prompt = config["system_prompt"]
+
+    try:
+        router = get_router()
+        context_manager = get_context_manager()
+
+        # Add user message to context (with dedup via wecom_msg_id)
+        context_manager.add_message(
+            chat_id=chat_id,
+            sender_id=user_id,
+            sender_name=user_name or user_id,
+            content=content,
+            role="user",
+            wecom_msg_id=wecom_msg_id,
+        )
+
+        # Get conversation history
+        messages = context_manager.get_messages_for_llm(
+            chat_id,
+            system_prompt=system_prompt,
+        )
+
+        logger.info(
+            f"[AIBOT_LLM_REQ] bot={bot_type} provider={provider} chat={chat_id} "
+            f"user={user_name} msg_count={len(messages)} content={content[:50]!r}..."
+        )
+
+        start_time = time.time()
+
+        # Run LLM call in thread pool to not block event loop
+        loop = asyncio.get_running_loop()
+        response = await loop.run_in_executor(
+            None, lambda: router.chat(provider=provider, messages=messages)
+        )
+
+        elapsed_ms = int((time.time() - start_time) * 1000)
+
+        logger.info(
+            f"[AIBOT_LLM_RES] bot={bot_type} elapsed={elapsed_ms}ms "
+            f"response_len={len(response.content)} content={response.content[:50]!r}..."
+        )
+
+        # Add assistant response to context
+        context_manager.add_message(
+            chat_id=chat_id,
+            sender_id=f"bot_{bot_type}",
+            sender_name=f"{bot_type}",
+            content=response.content,
+            role="assistant",
+        )
+
+        # Update task with completed response
+        if stream_id in _stream_tasks:
+            _stream_tasks[stream_id]["content"] = response.content
+            _stream_tasks[stream_id]["finished"] = True
+            _stream_tasks[stream_id]["completed_at"] = time.time()
+
+    except LLMError as e:
+        logger.error(f"[AIBOT_LLM_ERR] bot={bot_type} error={e}")
+        if stream_id in _stream_tasks:
+            _stream_tasks[stream_id]["content"] = (
+                f"抱歉,AI服务暂时不可用: {str(e)[:50]}"
+            )
+            _stream_tasks[stream_id]["finished"] = True
+            _stream_tasks[stream_id]["error"] = True
+    except Exception as e:
+        logger.exception(f"[AIBOT_ERR] bot={bot_type} error={e}")
+        if stream_id in _stream_tasks:
+            _stream_tasks[stream_id]["content"] = "抱歉,发生了意外错误,请稍后重试。"
+            _stream_tasks[stream_id]["finished"] = True
+            _stream_tasks[stream_id]["error"] = True
+
+
+def register_aibot_routes(app: FastAPI) -> None:
+    """Register AI Bot callback routes to the FastAPI app."""
+
+    @app.get("/ai-bot/{bot_type}", response_class=PlainTextResponse)
+    async def verify_url(
+        bot_type: str,
+        msg_signature: str = Query(..., description="Message signature"),
+        timestamp: str = Query(..., description="Timestamp"),
+        nonce: str = Query(..., description="Nonce"),
+        echostr: str = Query(..., description="Echo string to decrypt and return"),
+    ) -> str:
+        """URL verification endpoint for WeCom intelligent robot callback configuration."""
+        logger.info(f"[AIBOT_VERIFY] bot={bot_type} Verifying callback URL")
+
+        if bot_type not in BOT_CONFIGS:
+            raise HTTPException(status_code=404, detail=f"Unknown bot: {bot_type}")
+
+        try:
+            crypto = _get_bot_crypto(bot_type)
+            ret, decrypted_echostr = crypto.VerifyURL(
+                msg_signature, timestamp, nonce, echostr
+            )
+
+            if ret != 0:
+                logger.error(
+                    f"[AIBOT_VERIFY] bot={bot_type} Verification failed: {ret}"
+                )
+                raise HTTPException(status_code=403, detail="Verification failed")
+
+            logger.info(f"[AIBOT_VERIFY] bot={bot_type} Verification successful")
+            return decrypted_echostr
+
+        except ValueError as e:
+            logger.error(f"[AIBOT_VERIFY] bot={bot_type} Config error: {e}")
+            raise HTTPException(status_code=500, detail=str(e)) from e
+
+    @app.post("/ai-bot/{bot_type}")
+    async def handle_message(
+        request: Request,
+        bot_type: str,
+        msg_signature: str = Query(...),
+        timestamp: str = Query(...),
+        nonce: str = Query(...),
+    ) -> Response:
+        """Handle incoming messages from WeCom intelligent robot."""
+        if bot_type not in BOT_CONFIGS:
+            raise HTTPException(status_code=404, detail=f"Unknown bot: {bot_type}")
+
+        try:
+            crypto = _get_bot_crypto(bot_type)
+            post_data = await request.body()
+
+            # Decrypt message
+            ret, decrypted_msg = crypto.DecryptMsg(
+                post_data, msg_signature, timestamp, nonce
+            )
+
+            if ret != 0:
+                logger.error(f"[AIBOT_MSG] bot={bot_type} Decryption failed: {ret}")
+                raise HTTPException(status_code=400, detail="Decryption failed")
+
+            data = json.loads(decrypted_msg)
+            msgtype = data.get("msgtype", "")
+
+            logger.info(
+                f"[AIBOT_RECV] bot={bot_type} msgtype={msgtype} "
+                f"data={json.dumps(data, ensure_ascii=False)[:200]}"
+            )
+
+            if msgtype == "text":
+                return await _handle_text_message(bot_type, data, nonce, timestamp)
+            elif msgtype == "stream":
+                return await _handle_stream_refresh(bot_type, data, nonce, timestamp)
+            elif msgtype == "event":
+                # Handle events (e.g., bot added to group)
+                logger.info(f"[AIBOT_EVENT] bot={bot_type} event={data}")
+                return Response(content="success", media_type="text/plain")
+            else:
+                logger.warning(
+                    f"[AIBOT_MSG] bot={bot_type} Unsupported msgtype: {msgtype}"
+                )
+                return Response(content="success", media_type="text/plain")
+
+        except json.JSONDecodeError as e:
+            logger.error(f"[AIBOT_MSG] bot={bot_type} JSON decode error: {e}")
+            raise HTTPException(status_code=400, detail="Invalid JSON") from e
+        except Exception as e:
+            logger.exception(f"[AIBOT_MSG] bot={bot_type} Error: {e}")
+            raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+async def _handle_text_message(
+    bot_type: str,
+    data: dict,
+    nonce: str,
+    timestamp: str,
+) -> Response:
+    """Handle text message: start LLM processing, return immediate 'thinking' response."""
+    # Cleanup old tasks on each message to prevent unbounded growth
+    _cleanup_old_tasks()
+
+    text_data = data.get("text", {})
+    content = text_data.get("content", "").strip()
+
+    # Extract user info
+    from_data = data.get("from", {})
+    user_id = from_data.get("user_id", from_data.get("userid", "unknown"))
+    user_name = from_data.get("name", from_data.get("alias", user_id))
+
+    # Extract quoted message content if present
+    quoted_content = _extract_quote_content(data)
+    original_content = content  # Save original user input
+
+    if quoted_content:
+        if original_content:
+            # User has both quote and their own message
+            content = (
+                f"[用户引用消息: {quoted_content}]\n\n用户提问: {original_content}"
+            )
+        else:
+            # Quote-only: user just referenced something without adding text
+            content = (
+                f"用户引用了以下消息并@你，请针对引用内容回复:\n\n{quoted_content}"
+            )
+        logger.info(f"[AIBOT_QUOTE] bot={bot_type} quoted={quoted_content[:50]!r}...")
+
+    # Validate: reject empty content (only triggers if no quote AND no text)
+    # Note: Quote-only messages bypass this check intentionally - they have content
+    if not content:
+        logger.warning(
+            f"[AIBOT_TEXT] bot={bot_type} user={user_name} empty content, skipping"
+        )
+        stream_id = _generate_stream_id()
+        stream_json = _make_text_stream(
+            stream_id, "你好!请问有什么可以帮助你的?", finish=True
+        )
+        encrypted = _encrypt_response(bot_type, stream_json, nonce, timestamp)
+        return Response(content=encrypted, media_type="text/plain")
+
+    # Extract message ID for dedup
+    wecom_msg_id = _extract_msg_id(data)
+
+    # Check for duplicate message
+    if wecom_msg_id and wecom_msg_id in _processed_messages:
+        existing_stream_id = _processed_messages[wecom_msg_id]
+        task = _stream_tasks.get(existing_stream_id)
+        if task:
+            logger.info(
+                f"[AIBOT_DEDUP] bot={bot_type} msg_id={wecom_msg_id} "
+                f"returning existing stream_id={existing_stream_id}"
+            )
+            stream_json = _make_text_stream(
+                existing_stream_id, task["content"], task["finished"]
+            )
+            encrypted = _encrypt_response(bot_type, stream_json, nonce, timestamp)
+            return Response(content=encrypted, media_type="text/plain")
+
+    # Extract chat ID for context isolation
+    chat_id = _extract_chat_id(data, user_id)
+
+    logger.info(
+        f"[AIBOT_TEXT] bot={bot_type} user={user_name} chat={chat_id} "
+        f"msg_id={wecom_msg_id} content={content[:50]!r}..."
+    )
+
+    # Generate stream ID and create task BEFORE starting LLM
+    stream_id = _generate_stream_id()
+
+    # Store task with initial "thinking" state
+    _stream_tasks[stream_id] = {
+        "content": "思考中...",
+        "finished": False,
+        "created_at": time.time(),
+        "bot_type": bot_type,
+        "user_name": user_name,
+    }
+
+    # Store message ID -> stream ID mapping for dedup
+    if wecom_msg_id:
+        _processed_messages[wecom_msg_id] = stream_id
+
+    # Start LLM call asynchronously (don't wait for it)
+    asyncio.create_task(
+        _call_llm_async(
+            stream_id=stream_id,
+            bot_type=bot_type,
+            content=content,
+            chat_id=chat_id,
+            user_id=user_id,
+            user_name=user_name,
+            wecom_msg_id=wecom_msg_id,
+        )
+    )
+
+    # Return immediate response with "thinking" status
+    stream_json = _make_text_stream(stream_id, "思考中...", finish=False)
+    encrypted = _encrypt_response(bot_type, stream_json, nonce, timestamp)
+
+    logger.info(
+        f"[AIBOT_REPLY] bot={bot_type} stream_id={stream_id} finish=False (thinking)"
+    )
+    return Response(content=encrypted, media_type="text/plain")
+
+
+async def _handle_stream_refresh(
+    bot_type: str,
+    data: dict,
+    nonce: str,
+    timestamp: str,
+) -> Response:
+    """Handle stream refresh request to get updated content."""
+    stream_data = data.get("stream", {})
+    stream_id = stream_data.get("id", "")
+
+    task = _stream_tasks.get(stream_id)
+    if not task:
+        # Task not found - may be expired or on different worker
+        logger.warning(f"[AIBOT_STREAM] bot={bot_type} stream_id={stream_id} not found")
+        stream_json = _make_text_stream(stream_id, "任务已过期,请重新提问", finish=True)
+        encrypted = _encrypt_response(bot_type, stream_json, nonce, timestamp)
+        return Response(content=encrypted, media_type="text/plain")
+
+    # Return current content and status
+    stream_json = _make_text_stream(stream_id, task["content"], finish=task["finished"])
+    encrypted = _encrypt_response(bot_type, stream_json, nonce, timestamp)
+
+    logger.info(
+        f"[AIBOT_STREAM] bot={bot_type} stream_id={stream_id} "
+        f"finish={task['finished']} content_len={len(task['content'])}"
+    )
+
+    # Clean up finished tasks older than 5 minutes
+    _cleanup_old_tasks()
+
+    return Response(content=encrypted, media_type="text/plain")
+
+
+def _cleanup_old_tasks() -> None:
+    """Remove expired stream tasks and message mappings from cache."""
+    current_time = time.time()
+
+    # Clean up tasks older than 5 minutes
+    expired_task_ids = [
+        sid
+        for sid, task in _stream_tasks.items()
+        if current_time - task.get("created_at", 0) > 300
+    ]
+    for sid in expired_task_ids:
+        del _stream_tasks[sid]
+
+    # Clean up message mappings pointing to expired tasks
+    expired_msg_ids = [
+        msg_id
+        for msg_id, stream_id in _processed_messages.items()
+        if stream_id in expired_task_ids or stream_id not in _stream_tasks
+    ]
+    for msg_id in expired_msg_ids:
+        del _processed_messages[msg_id]
+
+    if expired_task_ids:
+        logger.debug(f"Cleaned up {len(expired_task_ids)} expired tasks")

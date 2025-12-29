@@ -238,6 +238,11 @@ def create_app() -> FastAPI:
         """Health check endpoint."""
         return {"status": "healthy", "service": "wecom-callback", "version": "0.3.0"}
 
+    # Register AI Bot routes for intelligent robots
+    from src.crewai_enterprise.server.aibot_callback import register_aibot_routes
+
+    register_aibot_routes(app)
+
     return app
 
 
