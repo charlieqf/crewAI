@@ -45,7 +45,7 @@ class LLMRouter:
         },
         "gemini": {
             "base_url": "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-            "default_model": "gemini-3-flash-preview",
+            "default_model": "gemini-2.5-pro",
             "env_key": "GEMINI_API_KEY",
         },
         "xai": {
