@@ -388,8 +388,7 @@ async def _call_llm_async(
                         None,
                         lambda: router.chat(
                             provider=provider,
-                            messages=[{"role": "user", "content": full_prompt}],
-                            system_prompt=system_prompt,
+                            messages=[{"role": "user", "content": full_prompt}]
                         )
                     )
                 elif file_uri and file_uri.startswith("base64:"):
@@ -1332,7 +1331,7 @@ async def _call_file_llm_async(
                     # Fallback to standard File API for larger files
                     file_uri = await loop.run_in_executor(
                         None, 
-                        lambda: router.upload_file(file_bytes, mime_type, api_key)
+                        lambda: router.upload_file(provider, file_bytes, mime_type, filename)
                     )
                     logger.info(f"[AIBOT_FILE] Uploaded large file {filename} to Gemini File API: {file_uri}")
             except Exception as e:
@@ -1363,8 +1362,7 @@ async def _call_file_llm_async(
                 None,
                 lambda: router.chat(
                     provider=provider,
-                    messages=[{"role": "user", "content": full_prompt}],
-                    system_prompt=system_prompt
+                    messages=[{"role": "user", "content": full_prompt}]
                 )
             )
         else:
