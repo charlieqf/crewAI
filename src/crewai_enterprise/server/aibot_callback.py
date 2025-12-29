@@ -24,6 +24,7 @@ import asyncio
 import base64
 import json
 import logging
+import mimetypes
 import os
 import time
 from typing import Any
@@ -105,23 +106,23 @@ def _get_bot_aes_key(bot_type: str) -> str:
     return os.getenv(config["aes_key_env"], "")
 
 
-def _decrypt_image(image_url: str, aes_key_base64: str) -> tuple[bool, bytes | str]:
-    """Download and decrypt an encrypted image from WeCom.
+def _decrypt_media(media_url: str, aes_key_base64: str) -> tuple[bool, bytes | str]:
+    """Download and decrypt encrypted media (image/file) from WeCom.
 
     Args:
-        image_url: URL of the encrypted image
+        media_url: URL of the encrypted media
         aes_key_base64: Base64-encoded AES key (same as EncodingAESKey)
 
     Returns:
         tuple: (success, data) - if success, data is decrypted bytes; otherwise error message
     """
     try:
-        # 1. Download encrypted image
-        logger.info(f"[IMAGE] Downloading encrypted image: {image_url[:80]}...")
-        response = requests.get(image_url, timeout=15)
+        # 1. Download encrypted media
+        logger.info(f"[MEDIA] Downloading encrypted media: {media_url[:80]}...")
+        response = requests.get(media_url, timeout=60)  # Increase timeout for files
         response.raise_for_status()
         encrypted_data = response.content
-        logger.info(f"[IMAGE] Downloaded {len(encrypted_data)} bytes")
+        logger.info(f"[MEDIA] Downloaded {len(encrypted_data)} bytes")
 
         # 2. Prepare AES key and IV
         if not aes_key_base64:
@@ -134,7 +135,7 @@ def _decrypt_image(image_url: str, aes_key_base64: str) -> tuple[bool, bytes | s
 
         iv = aes_key[:16]  # IV is first 16 bytes of key
 
-        # 3. Decrypt image data
+        # 3. Decrypt data
         cipher = AES.new(aes_key, AES.MODE_CBC, iv)
         decrypted_data = cipher.decrypt(encrypted_data)
 
@@ -144,23 +145,23 @@ def _decrypt_image(image_url: str, aes_key_base64: str) -> tuple[bool, bytes | s
             raise ValueError(f"Invalid padding length: {pad_len}")
 
         decrypted_data = decrypted_data[:-pad_len]
-        logger.info(f"[IMAGE] Decrypted to {len(decrypted_data)} bytes")
+        logger.info(f"[MEDIA] Decrypted to {len(decrypted_data)} bytes")
 
         return True, decrypted_data
 
     except requests.exceptions.RequestException as e:
-        error_msg = f"Image download failed: {e}"
-        logger.error(f"[IMAGE] {error_msg}")
+        error_msg = f"Media download failed: {e}"
+        logger.error(f"[MEDIA] {error_msg}")
         return False, error_msg
 
     except ValueError as e:
         error_msg = f"Decryption error: {e}"
-        logger.error(f"[IMAGE] {error_msg}")
+        logger.error(f"[MEDIA] {error_msg}")
         return False, error_msg
 
     except Exception as e:
-        error_msg = f"Image processing error: {e}"
-        logger.error(f"[IMAGE] {error_msg}")
+        error_msg = f"Media processing error: {e}"
+        logger.error(f"[MEDIA] {error_msg}")
         return False, error_msg
 
 
@@ -456,6 +457,9 @@ def register_aibot_routes(app: FastAPI) -> None:
             elif msgtype == "image":
                 # Handle image-only messages
                 return await _handle_image_message(bot_type, data, nonce, timestamp)
+            elif msgtype == "file":
+                # Handle file messages (PDF, Excel, etc.)
+                return await _handle_file_message(bot_type, data, nonce, timestamp)
             elif msgtype == "event":
                 # Handle events (e.g., bot added to group)
                 logger.info(f"[AIBOT_EVENT] bot={bot_type} event={data}")
@@ -768,7 +772,7 @@ async def _handle_mixed_message(
 
     # Try the first image
     if image_urls:
-        success, result = _decrypt_image(image_urls[0], aes_key)
+        success, result = _decrypt_media(image_urls[0], aes_key)
         if success:
             image_base64 = base64.b64encode(result).decode("utf-8")
             logger.info(f"[AIBOT_MIXED] bot={bot_type} image decrypted successfully")
@@ -837,7 +841,7 @@ async def _handle_image_message(
 
     # Try to download and decrypt image
     aes_key = _get_bot_aes_key(bot_type)
-    success, result = _decrypt_image(image_urls[0], aes_key)
+    success, result = _decrypt_media(image_urls[0], aes_key)
 
     if not success:
         logger.error(f"[AIBOT_IMAGE] bot={bot_type} decrypt failed: {result}")
@@ -999,5 +1003,177 @@ async def _call_vision_llm_async(
         logger.exception(f"[AIBOT_VISION_ERR] bot={bot_type} unexpected error: {e}")
         if stream_id in _stream_tasks:
             _stream_tasks[stream_id]["content"] = "图片分析时发生错误，请稍后重试。"
+            _stream_tasks[stream_id]["finished"] = True
+            _stream_tasks[stream_id]["completed_at"] = time.time()
+
+
+def _extract_file_info(data: dict) -> tuple[str | None, str, str]:
+    """Extract file URL, filename and mimetype from message.
+    
+    Returns: (url, filename, mimetype)
+    """
+    file_data = data.get("file", {})
+    url = file_data.get("url")  # Intelligent bot usually provides URL via callback
+    
+    filename = file_data.get("filename", file_data.get("name", "unknown_file"))
+    ext = file_data.get("file_ext", "")
+    
+    if ext and not filename.endswith(f".{ext}"):
+        filename = f"{filename}.{ext}"
+        
+    mime_type, _ = mimetypes.guess_type(filename)
+    if not mime_type:
+        mime_type = "application/octet-stream"
+        
+    return url, filename, mime_type
+
+
+async def _handle_file_message(
+    bot_type: str,
+    data: dict,
+    nonce: str,
+    timestamp: str,
+) -> Response:
+    """Handle file messages (PDF, Excel, Word).
+    
+    Downloads decrypted file and sends to Gemini for analysis.
+    For other bots, returns a friendly 'not supported' message.
+    """
+    _cleanup_old_tasks()
+
+    # Extract user info
+    from_data = data.get("from", {})
+    user_id = from_data.get("user_id", from_data.get("userid", "unknown"))
+    user_name = from_data.get("name", from_data.get("alias", user_id))
+    
+    # Extract file info
+    url, filename, mime_type = _extract_file_info(data)
+    
+    logger.info(f"[AIBOT_FILE] bot={bot_type} user={user_name} file={filename} mime={mime_type}")
+    
+    stream_id = _generate_stream_id()
+    chat_id = _extract_chat_id(data, user_id)
+    wecom_msg_id = _extract_msg_id(data)
+    
+    # Check bot support
+    config = BOT_CONFIGS[bot_type]
+    provider = config["provider"]
+    
+    if provider != "gemini":
+        response_text = (
+            f"收到文件：{filename}\n\n"
+            f"抱歉，目前仅 Gemini 机器人支持文档深度分析（PDF/Excel/Word）。{bot_type} 暂不支持此功能。"
+        )
+        _stream_tasks[stream_id] = {
+            "content": response_text,
+            "finished": True,
+            "created_at": time.time(),
+            "bot_type": bot_type,
+            "chat_id": chat_id,
+            "user_id": user_id,
+        }
+        stream_json = _make_text_stream(stream_id, response_text, finish=True)
+        return Response(content=_encrypt_response(bot_type, stream_json, nonce, timestamp), media_type="text/plain")
+
+    if not url:
+        logger.warning(f"[AIBOT_FILE] bot={bot_type} No file URL found in {data}")
+        response_text = f"收到文件：{filename}\n\n无法获取文件下载链接，请稍后重试。"
+        _stream_tasks[stream_id] = {
+            "content": response_text,
+            "finished": True,
+            "created_at": time.time(),
+            "bot_type": bot_type,
+            "chat_id": chat_id,
+            "user_id": user_id,
+        }
+        stream_json = _make_text_stream(stream_id, response_text, finish=True)
+        return Response(content=_encrypt_response(bot_type, stream_json, nonce, timestamp), media_type="text/plain")
+        
+    # Start processing task
+    if wecom_msg_id:
+        _processed_messages[wecom_msg_id] = stream_id
+        
+    _stream_tasks[stream_id] = {
+        "content": f"正在下载并分析文档：{filename} ...",
+        "finished": False,
+        "created_at": time.time(),
+        "bot_type": bot_type,
+        "chat_id": chat_id,
+        "user_id": user_id,
+    }
+    
+    # Start async download and analysis
+    asyncio.create_task(
+        _call_file_llm_async(
+            stream_id=stream_id,
+            bot_type=bot_type,
+            provider=provider,
+            file_url=url,
+            filename=filename,
+            mime_type=mime_type,
+            system_prompt=config["system_prompt"],
+            user_id=user_id
+        )
+    )
+    
+    stream_json = _make_text_stream(stream_id, f"正在分析文档：{filename} ...", finish=False)
+    return Response(content=_encrypt_response(bot_type, stream_json, nonce, timestamp), media_type="text/plain")
+
+
+async def _call_file_llm_async(
+    stream_id: str,
+    bot_type: str,
+    provider: str,
+    file_url: str,
+    filename: str,
+    mime_type: str,
+    system_prompt: str,
+    user_id: str,
+) -> None:
+    """Download file, upload to LLM, and generate analysis."""
+    try:
+        router = get_router()
+        aes_key = _get_bot_aes_key(bot_type)
+        
+        # 1. Download and decrypt
+        success, media_data = _decrypt_media(file_url, aes_key)
+        if not success:
+            raise ValueError(f"File download failed: {media_data}")
+            
+        file_bytes = media_data if isinstance(media_data, bytes) else media_data.encode("utf-8")
+        
+        logger.info(f"[AIBOT_FILE_REQ] bot={bot_type} file={filename} size={len(file_bytes)} bytes")
+        
+        prompt = f"请详细分析这份文档的内容：{filename}"
+        
+        start_time = time.time()
+        
+        # 2. Call LLM with file
+        loop = asyncio.get_running_loop()
+        response = await loop.run_in_executor(
+            None,
+            lambda: router.chat_with_file(
+                provider=provider,
+                text=prompt,
+                file_data=file_bytes,
+                file_mime_type=mime_type,
+                filename=filename,
+                system_prompt=system_prompt,
+            )
+        )
+        
+        elapsed_ms = int((time.time() - start_time) * 1000)
+        logger.info(f"[AIBOT_FILE_RES] bot={bot_type} elapsed={elapsed_ms}ms")
+        
+        # Update result
+        if stream_id in _stream_tasks:
+            _stream_tasks[stream_id]["content"] = response.content
+            _stream_tasks[stream_id]["finished"] = True
+            _stream_tasks[stream_id]["completed_at"] = time.time()
+            
+    except Exception as e:
+        logger.exception(f"[AIBOT_FILE_ERR] bot={bot_type} error: {e}")
+        if stream_id in _stream_tasks:
+            _stream_tasks[stream_id]["content"] = f"文档分析失败：{str(e)[:100]}"
             _stream_tasks[stream_id]["finished"] = True
             _stream_tasks[stream_id]["completed_at"] = time.time()

@@ -415,6 +415,162 @@ class LLMRouter:
         )
 
 
+    def chat_with_file(
+        self,
+        provider: str,
+        text: str,
+        file_data: bytes,
+        file_mime_type: str,
+        filename: str = "uploaded_file",
+        system_prompt: str | None = None,
+        model: str | None = None,
+        max_tokens: int = 2048,
+        temperature: float = 0.7,
+    ) -> LLMResponse:
+        """
+        Chat with a file (document/PDF/etc).
+
+        Currently primarily supports Gemini via File API.
+        Other providers will raise NotImplementedError or fallback gracefully.
+
+        Args:
+            provider: 'gemini' (others not fully supported for direct file upload yet)
+            text: Text prompt
+            file_data: Raw file bytes
+            file_mime_type: MIME type of file (e.g. application/pdf)
+            filename: Display name of the file
+            ...
+        """
+        if provider not in self.PROVIDERS:
+            raise LLMError(f"Unknown provider: {provider}")
+
+        api_key = self.keys.get(provider)
+        if not api_key:
+            raise LLMError(f"API key not configured for {provider}")
+
+        config = self.PROVIDERS[provider]
+        model = model or config["default_model"]
+
+        if provider == "gemini":
+            # 1. Upload file to Gemini
+            file_uri = self._upload_gemini_file(api_key, file_data, file_mime_type, filename)
+            
+            # 2. Call Gemini with file URI
+            return self._call_gemini_file(
+                api_key, text, file_uri, file_mime_type,
+                system_prompt, model, max_tokens, temperature
+            )
+        else:
+            # Fallback for others: just append note about file
+            # In future, could extract text from PDF/Excel here
+            return LLMResponse(
+                content=f"抱歉，目前仅 Gemini 机器人支持直接分析 {filename} ({file_mime_type}) 文件。{provider} 暂时不支持。",
+                model=model,
+                provider=provider,
+                usage={}
+            )
+
+    def _upload_gemini_file(
+        self,
+        api_key: str,
+        file_data: bytes,
+        mime_type: str,
+        display_name: str
+    ) -> str:
+        """Upload file to Gemini File API and return URI."""
+        # Ref: https://ai.google.dev/api/files#method:-files.create
+        url = f"https://generativelanguage.googleapis.com/upload/v1beta/files?key={api_key}"
+        
+        # Simple metadata + content upload
+        headers = {
+            "X-Goog-Upload-Protocol": "multipart",
+            "X-Goog-Upload-Header-Content-Length": str(len(file_data)),
+            "X-Goog-Upload-Header-Content-Type": mime_type
+        }
+        
+        metadata = {
+            "file": {
+                "displayName": display_name
+            }
+        }
+        
+        files = {
+            'metadata': ('metadata', json.dumps(metadata), 'application/json'),
+            'file': (display_name, file_data, mime_type)
+        }
+        
+        try:
+            logger.info(f"Uploading file '{display_name}' ({len(file_data)} bytes) to Gemini...")
+            response = requests.post(url, headers=headers, files=files, timeout=300)
+            response.raise_for_status()
+            result = response.json()
+            file_uri = result.get("file", {}).get("uri")
+            
+            if not file_uri:
+                raise LLMError(f"Upload successful but no URI returned: {result}")
+                
+            logger.info(f"File uploaded successfully. URI: {file_uri}")
+            return file_uri
+            
+        except requests.exceptions.RequestException as e:
+            raise LLMError(f"Gemini File Upload error: {e}") from e
+
+    def _call_gemini_file(
+        self,
+        api_key: str,
+        text: str,
+        file_uri: str,
+        mime_type: str,
+        system_prompt: str | None,
+        model: str,
+        max_tokens: int,
+        temperature: float,
+    ) -> LLMResponse:
+        """Call Gemini with existing file URI."""
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+
+        user_text = text
+        if system_prompt:
+            user_text = system_prompt + "\n\n" + text
+
+        parts = [
+            {"text": user_text},
+            {
+                "file_data": {
+                    "mime_type": mime_type,
+                    "file_uri": file_uri
+                }
+            }
+        ]
+
+        payload = {
+            "contents": [{"role": "user", "parts": parts}],
+            "generationConfig": {
+                "maxOutputTokens": max_tokens,
+                "temperature": temperature,
+            },
+        }
+
+        try:
+            response = requests.post(url, json=payload, timeout=120)
+            response.raise_for_status()
+            data = response.json()
+        except requests.exceptions.RequestException as e:
+            raise LLMError(f"Gemini File Analysis API error: {e}") from e
+
+        content = data["candidates"][0]["content"]["parts"][0]["text"]
+        usage = data.get("usageMetadata")
+
+        logger.info(f"Gemini file analysis response: {len(content)} chars, model={model}")
+
+        return LLMResponse(
+            content=content,
+            model=model,
+            provider="gemini",
+            usage=usage,
+        )
+
+
 # Global singleton with thread-safe access
 _router: LLMRouter | None = None
 _router_lock = __import__("threading").Lock()
