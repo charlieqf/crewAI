@@ -1282,7 +1282,6 @@ async def _call_file_llm_async(
         is_inline_text = False
         
         # Check if it is a code/text file suitable for inline processing
-        import os
         ext = os.path.splitext(filename)[1].lower()
         is_code_file = ext in ['.sql', '.py', '.js', '.ts', '.html', '.css', '.txt', '.md', '.json', '.xml', '.sh', '.yaml', '.yml', '.c', '.cpp', '.java', '.go', '.rs', '.php']
         

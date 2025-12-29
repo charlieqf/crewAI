@@ -13,6 +13,7 @@ from dataclasses import dataclass
 
 import requests
 import time
+import base64
 
 
 logger = logging.getLogger(__name__)
@@ -578,7 +579,6 @@ class LLMRouter:
         if file_uri:
             media_part = {"file_data": {"mime_type": mime_type, "file_uri": file_uri}}
         elif file_data:
-            import base64
             b64_data = base64.b64encode(file_data).decode('utf-8')
             media_part = {"inline_data": {"mime_type": mime_type, "data": b64_data}}
         
