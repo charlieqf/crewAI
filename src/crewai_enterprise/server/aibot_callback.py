@@ -401,7 +401,7 @@ async def _call_llm_async(
                         lambda: router.chat_with_file(
                             provider=provider,
                             text=full_prompt,
-                            file_data=None,
+                            file_data=None, # Missing arg fixed
                             file_mime_type=file_ctx["mime"],
                             filename=filename,
                             file_uri=file_uri,
@@ -1298,6 +1298,7 @@ async def _call_file_llm_async(
                 lambda: router.chat_with_file(
                     provider=provider,
                     text=prompt,  # Use the user's prompt (e.g. "analyze this")
+                    file_data=None, # Missing arg fixed
                     file_uri=file_uri,
                     file_mime_type=mime_type,  # Pass metadata
                     system_prompt=system_prompt,
