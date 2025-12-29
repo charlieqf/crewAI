@@ -374,7 +374,7 @@ async def _call_llm_async(
                 file_uri = file_ctx["uri"]
                 filename = file_ctx["filename"]
                 
-                if file_uri.startswith("content:"):
+                if file_uri and file_uri.startswith("content:"):
                     # Inline Text Context
                     raw_content = file_uri[8:]
                     full_prompt = (
@@ -392,7 +392,7 @@ async def _call_llm_async(
                             system_prompt=system_prompt,
                         )
                     )
-                elif file_uri.startswith("base64:"):
+                elif file_uri and file_uri.startswith("base64:"):
                     # Inline Base64 Context (PDF/Images)
                     raw_b64 = file_uri[7:]
                     file_bytes = base64.b64decode(raw_b64)
@@ -1306,9 +1306,9 @@ async def _call_file_llm_async(
             try:
                 # Use Inline Data (Base64) for files under 20MB (Verified working for gemini-3)
                 if len(file_bytes) < 20 * 1024 * 1024:
-                    real_file_data = file_bytes
-                    file_uri = None
-                    logger.info(f"[AIBOT_FILE] Preferring Inline Data (Base64) for {filename} ({len(file_bytes)} bytes)")
+                    b64_data = base64.b64encode(file_bytes).decode('utf-8')
+                    file_uri = f"base64:{b64_data}"
+                    logger.info(f"[AIBOT_FILE] Prepared Inline Data (base64) for {filename} ({len(file_bytes)} bytes)")
                 else:
                     # Fallback to standard File API for larger files
                     file_uri = await loop.run_in_executor(
@@ -1337,13 +1337,15 @@ async def _call_file_llm_async(
         # 3. Call LLM
         if is_inline_text:
             # Chat directly with text content
-            full_prompt = f"请分析以下文件内容 ({filename}):\n\n```\n{file_uri[8:]}\n```\n\n{prompt}"
+            # Ensure file_uri is not None before slicing
+            raw_text = file_uri[8:] if (file_uri and file_uri.startswith("content:")) else "<Error: Text missing>"
+            full_prompt = f"请分析以下文件内容 ({filename}):\n\n```\n{raw_text}\n```\n\n{prompt}"
             response = await loop.run_in_executor(
                 None,
                 lambda: router.chat(
                     provider=provider,
                     messages=[{"role": "user", "content": full_prompt}],
-                    system_prompt=system_prompt  # Pass system prompt here as well
+                    system_prompt=system_prompt
                 )
             )
         else:
@@ -1351,7 +1353,7 @@ async def _call_file_llm_async(
             real_file_data = None
             real_file_uri = file_uri
             
-            if file_uri.startswith("base64:"):
+            if file_uri and file_uri.startswith("base64:"):
                 # Decode for immediate use
                 real_file_data = base64.b64decode(file_uri[7:])
                 real_file_uri = None
@@ -1360,10 +1362,10 @@ async def _call_file_llm_async(
                 None,
                 lambda: router.chat_with_file(
                     provider=provider,
-                    text=prompt,  # Use the user's prompt (e.g. "analyze this")
+                    text=prompt, 
                     file_data=real_file_data,
                     file_uri=real_file_uri,
-                    file_mime_type=mime_type,  # Pass metadata
+                    file_mime_type=mime_type,
                     system_prompt=system_prompt,
                 )
             )
