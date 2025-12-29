@@ -276,25 +276,28 @@ def _extract_quote_content(data: dict) -> tuple[str | None, str | None]:
     if "quote" in data and isinstance(data["quote"], dict):
         quote_data = data["quote"]
         # Try different content field names
+        msgid = quote_data.get("msgid") or quote_data.get("msg_id") or quote_data.get("MsgId")
         for key in ["content", "text", "Content", "Text"]:
             if key in quote_data and quote_data[key]:
-                return str(quote_data[key]).strip(), quote_data.get("msgid")
+                return str(quote_data[key]).strip(), msgid
         # If quote has type info, try to extract based on type
         if "msgtype" in quote_data:
             msgtype = quote_data["msgtype"]
             if msgtype == "text" and "text" in quote_data:
                 text_obj = quote_data["text"]
                 if isinstance(text_obj, dict) and "content" in text_obj:
-                    return str(text_obj["content"]).strip(), quote_data.get("msgid")
+                    msgid = quote_data.get("msgid") or quote_data.get("msg_id") or quote_data.get("MsgId")
+                    return str(text_obj["content"]).strip(), msgid
 
     # Try quote nested in text object
     text_data = data.get("text", {})
     if isinstance(text_data, dict) and "quote" in text_data:
         quote_in_text = text_data["quote"]
         if isinstance(quote_in_text, dict):
+            msgid = quote_in_text.get("msgid") or quote_in_text.get("msg_id") or quote_in_text.get("MsgId")
             for key in ["content", "text"]:
                 if key in quote_in_text and quote_in_text[key]:
-                    return str(quote_in_text[key]).strip(), quote_in_text.get("msgid")
+                    return str(quote_in_text[key]).strip(), msgid
         elif isinstance(quote_in_text, str):
             return quote_in_text.strip(), None
 
@@ -302,9 +305,10 @@ def _extract_quote_content(data: dict) -> tuple[str | None, str | None]:
     for ref_key in ["reference", "ref", "reply_to"]:
         if ref_key in data and isinstance(data[ref_key], dict):
             ref_data = data[ref_key]
+            msgid = ref_data.get("msgid") or ref_data.get("msg_id") or ref_data.get("MsgId")
             for key in ["content", "text", "message"]:
                 if key in ref_data and ref_data[key]:
-                    return str(ref_data[key]).strip(), ref_data.get("msgid")
+                    return str(ref_data[key]).strip(), msgid
 
     # Log structure if we suspect there might be a quote but couldn't extract
     # Only check top-level keys to avoid performance issues with large payloads

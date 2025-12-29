@@ -413,6 +413,7 @@ class ChatStorageTool(BaseTool):
                             "content": msg.get("content", ""),
                             "role": msg.get("role", "user"),
                             "timestamp": msg.get("timestamp", ""),
+                            "wecom_msg_id": msg.get("wecom_msg_id"),
                         }
                     )
                 messages.reverse()  # Oldest first
@@ -424,7 +425,7 @@ class ChatStorageTool(BaseTool):
             cursor = self._sqlite_conn.cursor()
             cursor.execute(
                 """
-                SELECT sender_name, content, timestamp, role
+                SELECT sender_name, content, timestamp, role, wecom_msg_id
                 FROM chat_messages
                 WHERE chat_id = ?
                 ORDER BY timestamp DESC
@@ -434,7 +435,7 @@ class ChatStorageTool(BaseTool):
             )
             rows = cursor.fetchall()
             for row in reversed(rows):
-                sender_name, content, timestamp, role = row
+                sender_name, content, timestamp, role, wecom_msg_id = row
                 # Same stable schema as Redis path
                 messages.append(
                     {
@@ -442,6 +443,7 @@ class ChatStorageTool(BaseTool):
                         "content": content,
                         "role": role or "user",  # Default for legacy rows
                         "timestamp": str(timestamp),
+                        "wecom_msg_id": wecom_msg_id,
                     }
                 )
 
