@@ -12,6 +12,7 @@ import json
 from dataclasses import dataclass
 
 import requests
+import time
 
 
 logger = logging.getLogger(__name__)
@@ -525,12 +526,35 @@ class LLMRouter:
             response = requests.post(url, headers=headers, files=files, timeout=300)
             response.raise_for_status()
             result = response.json()
-            file_uri = result.get("file", {}).get("uri")
-            
+            file_info = result.get("file", {})
+            file_uri = file_info.get("uri")
+            file_name_id = file_info.get("name") # e.g. files/abc-123
+
             if not file_uri:
                 raise LLMError(f"Upload successful but no URI returned: {result}")
+
+            logger.info(f"File uploaded. Name: {file_name_id} URI: {file_uri}. Waiting for processing...")
+
+            # POLL for ACTIVE state (for up to 30 seconds)
+            # Ref: https://ai.google.dev/gemini-api/docs/files#get_file
+            check_url = f"https://generativelanguage.googleapis.com/v1beta/{file_name_id}?key={api_key}"
+            start_wait = time.time()
+            
+            while time.time() - start_wait < 30:
+                check_res = requests.get(check_url, timeout=30)
+                check_res.raise_for_status()
+                state = check_res.json().get("state")
                 
-            logger.info(f"File uploaded successfully. URI: {file_uri}")
+                if state == "ACTIVE":
+                    logger.info(f"File {file_name_id} is ACTIVE. Ready to use.")
+                    return file_uri
+                elif state == "FAILED":
+                    raise LLMError(f"Gemini File Processing FAILED for {file_name_id}")
+                
+                time.sleep(1) # Wait 1s between checks
+            
+            # If timeout, warn but return URI (maybe it works?) OR raise error
+            logger.warning(f"Timeout waiting for file {file_name_id} to be ACTIVE. State: {state}. Trying to proceed anyway.")
             return file_uri
             
         except requests.exceptions.RequestException as e:
