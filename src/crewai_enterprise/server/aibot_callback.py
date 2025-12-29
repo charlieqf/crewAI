@@ -1233,14 +1233,6 @@ async def _call_file_llm_async(
         router = get_router()
         aes_key = _get_bot_aes_key(bot_type)
         
-        # 1. Download and decrypt file
-        # Force text/plain for code files to ensure Gemini compatibility
-        import os
-        ext = os.path.splitext(filename)[1].lower()
-        if ext in ['.sql', '.py', '.js', '.ts', '.html', '.css', '.md', '.json', '.xml', '.sh', '.yaml', '.yml', '.c', '.cpp', '.java']:
-            mime_type = "text/plain"
-            filename += ".txt"  # Append .txt to bypass file extension checks
-
         if not aes_key:
             raise ValueError(f"AES Key not found for {bot_type}")
 
@@ -1250,7 +1242,35 @@ async def _call_file_llm_async(
             
         file_bytes = media_data if isinstance(media_data, bytes) else media_data.encode("utf-8")
         
-        logger.info(f"[AIBOT_FILE_REQ] bot={bot_type} file={filename} size={len(file_bytes)} bytes")
+        # 1.5 Robust MIME Type Detection (Gemini 3 is strict about this for inline_data)
+        original_mime = mime_type
+        
+        # If filename is generic or missing, try magic bytes
+        if filename == "unknown_file":
+            if file_bytes.startswith(b'%PDF-'):
+                mime_type = "application/pdf"
+                filename = "uploaded_file.pdf"
+            else:
+                try:
+                    file_bytes.decode('utf-8')
+                    mime_type = "text/plain"
+                    filename = "uploaded_file.txt"
+                except:
+                    # Keep as is, or default to octet-stream
+                    pass
+        
+        # Trust extension more than WeCom's reported mime_type
+        ext = os.path.splitext(filename)[1].lower()
+        if ext == '.pdf':
+            mime_type = "application/pdf"
+        elif ext in ['.sql', '.py', '.js', '.ts', '.html', '.css', '.md', '.json', '.xml', '.sh', '.yaml', '.yml', '.c', '.cpp', '.java', '.go', '.rs', '.php', '.txt']:
+            mime_type = "text/plain"
+        elif not mime_type or mime_type == "application/octet-stream":
+            guessed = mimetypes.guess_type(filename)[0]
+            if guessed:
+                mime_type = guessed
+        
+        logger.info(f"[AIBOT_FILE_REQ] bot={bot_type} file={filename} size={len(file_bytes)} original_mime={original_mime} final_mime={mime_type}")
         
         prompt = f"请详细分析这份文档的内容：{filename}"
         
