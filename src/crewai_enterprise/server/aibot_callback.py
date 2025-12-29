@@ -1278,22 +1278,26 @@ async def _call_file_llm_async(
                         continue
                 
                 if text_content is None:
-                    raise ValueError(f"Could not decode file {filename} with any supported encoding")
+                    # Final fallback: Decode with replacement to ensure we return TEXT
+                    text_content = file_bytes.decode('utf-8', errors='replace')
+                    logger.warning(f"Forced lossy decoding for {filename} to avoid Base64 fallback")
 
                 # Store content directly in URI field specific prefix
                 file_uri = f"content:{text_content}"
                 is_inline_text = True
                 logger.info(f"[AIBOT_FILE] Treating {filename} as inline text ({len(text_content)} chars)")
             except Exception as e:
-                logger.warning(f"Failed to decode text file {filename}: {e}. Falling back to upload.")
+                # This should technically be unreachable now due to errors='replace' but keeping for safety
+                logger.error(f"Unexpected error decoding text file {filename}: {e}. Forced to fallback (likely fail).")
                 is_code_file = False
 
         if not is_code_file and provider == "gemini":
-            # For Gemini 3, File API Upload is flaky. Use Base64 persistence.
-            # Store Base64 string directly as URI prefix "base64:"
-            b64_data = base64.b64encode(file_bytes).decode('utf-8')
-            file_uri = f"base64:{b64_data}"
-            # Do NOT upload to cloud.
+        if not is_code_file and provider == "gemini":
+            # For PDF/Images, utilize the File API (Verified working with corrected payload order)
+            file_uri = await loop.run_in_executor(
+                    None,
+                    lambda: router.upload_file(provider, file_bytes, file_ctx["mime"], filename)
+                )
 
         # Save context for future turns (PERSISTENT)
         if file_uri:

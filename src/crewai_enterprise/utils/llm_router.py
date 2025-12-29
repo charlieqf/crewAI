@@ -582,9 +582,10 @@ class LLMRouter:
             b64_data = base64.b64encode(file_data).decode('utf-8')
             media_part = {"inline_data": {"mime_type": mime_type, "data": b64_data}}
         
-        parts = [{"text": user_text}]
+        parts = []
         if media_part:
             parts.append(media_part)
+        parts.append({"text": user_text})
 
         payload = {
             "contents": [{"role": "user", "parts": parts}],
