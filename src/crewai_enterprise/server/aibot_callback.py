@@ -37,7 +37,7 @@ from fastapi.responses import PlainTextResponse, Response
 from src.crewai_enterprise.utils.wecom_json_crypto import WXBizJsonMsgCrypt
 from src.crewai_enterprise.utils.llm_router import LLMError, get_router
 from src.crewai_enterprise.utils.chat_context import get_context_manager
-from src.crewai_enterprise.utils.ierror import WxBizMsgCryptError
+
 
 # Configure logging
 logging.basicConfig(
