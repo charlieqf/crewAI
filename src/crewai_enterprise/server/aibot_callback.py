@@ -1150,22 +1150,34 @@ def _extract_file_info(data: dict) -> tuple[str | None, str, str]:
     
     Returns: (url, filename, mimetype)
     """
-    file_data = data.get("file", {})
-    # Check multiple locations for filename
-    filename = (
-        file_data.get("filename") or 
-        file_data.get("name") or 
-        file_data.get("title") or
-        file_data.get("file_name") or
-        data.get("filename") or 
-        data.get("name") or
-        data.get("title")
-    )
-    
-    logger.info(f"[AIBOT_FILE_EXTRACT] Found initial filename={filename} from keys in {list(file_data.keys())}")
+    # Deep search for filename-like keys
+    def deep_find_filename(obj):
+        if not isinstance(obj, dict):
+            return None
+        # Priority keys
+        for k in ["filename", "name", "title", "file_name"]:
+            if k in obj and obj[k] and isinstance(obj[k], str) and "." in obj[k]:
+                return obj[k]
+        # Recursion
+        for v in obj.values():
+            if isinstance(v, dict):
+                res = deep_find_filename(v)
+                if res: return res
+            elif isinstance(v, list):
+                for item in v:
+                    res = deep_find_filename(item)
+                    if res: return res
+        return None
+
+    filename = deep_find_filename(data)
     
     # Try to extract from URL if still unknown
-    url = file_data.get("url") or data.get("url")
+    url = data.get("url")
+    if not isinstance(url, str):
+        file_obj = data.get("file", {})
+        if isinstance(file_obj, dict):
+            url = file_obj.get("url")
+            
     if not filename and url:
         try:
             from urllib.parse import urlparse
@@ -1177,16 +1189,21 @@ def _extract_file_info(data: dict) -> tuple[str | None, str, str]:
             pass
             
     if not filename:
-        filename = "unknown_file"
+        filename = "文档"
 
-    ext = file_data.get("file_ext", data.get("file_ext", ""))
+    file_data = data.get("file", {})
+    ext = ""
+    if isinstance(file_data, dict):
+        ext = file_data.get("file_ext", "")
+    if not ext:
+        ext = data.get("file_ext", "")
     
-    if ext and not filename.endswith(f".{ext}"):
+    if ext and filename != "文档" and not filename.endswith(f".{ext}"):
         filename = f"{filename}.{ext}"
         
-    logger.info(f"[AIBOT_FILE_EXTRACT] Final filename={filename} ext={ext}")
+    logger.info(f"[AIBOT_FILE_EXTRACT] Deep search filename={filename} ext={ext}")
         
-    mime_type, _ = mimetypes.guess_type(filename)
+    mime_type, _ = mimetypes.guess_type(filename) if filename != "文档" else (None, None)
     if not mime_type:
         mime_type = "application/octet-stream"
         
@@ -1318,15 +1335,15 @@ async def _call_file_llm_async(
         original_mime = mime_type
         
         # If filename is generic or missing, try magic bytes
-        if filename == "unknown_file":
+        if filename in ["unknown_file", "文档", "file"]:
             if file_bytes.startswith(b'%PDF-'):
                 mime_type = "application/pdf"
-                filename = "uploaded_file.pdf"
+                filename = "document.pdf"
             else:
                 try:
                     file_bytes.decode('utf-8')
                     mime_type = "text/plain"
-                    filename = "uploaded_file.txt"
+                    filename = "content.txt"
                 except:
                     # Keep as is, or default to octet-stream
                     pass
