@@ -31,16 +31,34 @@ from typing import Any
 
 import requests
 from Crypto.Cipher import AES
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import APIRouter, BackgroundTasks, FastAPI, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse, Response
 
 from src.crewai_enterprise.utils.wecom_json_crypto import WXBizJsonMsgCrypt
 from src.crewai_enterprise.utils.llm_router import LLMError, get_router
 from src.crewai_enterprise.utils.chat_context import get_context_manager
+from src.crewai_enterprise.utils.ierror import WxBizMsgCryptError
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
+)
 logger = logging.getLogger(__name__)
 
-# Bot configurations - each bot has its own Token/EncodingAESKey
+# ============================================================================
+# WARNING: In-memory caches - NOT suitable for multi-worker/multi-instance!
+# For production with multiple Uvicorn workers or load-balanced instances,
+# replace these with Redis or a shared database.
+# ============================================================================
+# Global storage for streaming tasks and processed messages
+# In production, use Redis instead of memory
+_stream_tasks: dict[str, dict] = {}
+_processed_messages: dict[str, str] = {}  # msgid -> stream_id (dedup)
+
+
+
+# Bot configurations
+# EncodingAESKey and Token must match WeCom admin console
 BOT_CONFIGS: dict[str, dict[str, str]] = {
     "gemini": {
         "provider": "gemini",
@@ -327,18 +345,49 @@ async def _call_llm_async(
             system_prompt=system_prompt,
         )
 
+        # Check for active file context
+        # Check for active file context (PERSISTENT)
+        # Check last 50 messages for any file context
+        file_ctx = context_manager.get_active_file(chat_id, limit=50)
+        use_file_context = False
+        
+        if file_ctx and provider == "gemini":
+             use_file_context = True
+             logger.info(f"[AIBOT_CTX] Using persistent file context for chat={chat_id}: {file_ctx['filename']}")
+
         logger.info(
             f"[AIBOT_LLM_REQ] bot={bot_type} provider={provider} chat={chat_id} "
-            f"user={user_name} msg_count={len(messages)} content={content[:50]!r}..."
+            f"user={user_name} msg_count={len(messages)} file_ctx={use_file_context} content={content[:50]!r}..."
         )
 
         start_time = time.time()
-
-        # Run LLM call in thread pool to not block event loop
         loop = asyncio.get_running_loop()
-        response = await loop.run_in_executor(
-            None, lambda: router.chat(provider=provider, messages=messages)
-        )
+
+        if use_file_context:
+            # Format history for file chat (since chat_with_file takes text prompt)
+            history_text = "\n\n".join(
+                [f"{'用户' if m['role']=='user' else '模型'}: {m['content']}" for m in messages]
+            )
+            # Override content with history + current (last message is already in messages)
+            full_prompt = f"对话历史:\n{history_text}\n\n(注意：用户之前上传了文件 {file_ctx['filename']}，请基于该文件回答)"
+            
+            response = await loop.run_in_executor(
+                None,
+                lambda: router.chat_with_file(
+                    provider=provider,
+                    text=full_prompt,
+                    file_data=None,
+                    file_mime_type=file_ctx["mime"],
+                    filename=file_ctx["filename"],
+                    file_uri=file_ctx["uri"],
+                    system_prompt=system_prompt,
+                )
+            )
+        else:
+            # Run standard LLM call
+            response = await loop.run_in_executor(
+                None, lambda: router.chat(provider=provider, messages=messages)
+            )
 
         elapsed_ms = int((time.time() - start_time) * 1000)
 
@@ -1112,7 +1161,8 @@ async def _handle_file_message(
             filename=filename,
             mime_type=mime_type,
             system_prompt=config["system_prompt"],
-            user_id=user_id
+            user_id=user_id,
+            chat_id=chat_id,
         )
     )
     
@@ -1129,6 +1179,7 @@ async def _call_file_llm_async(
     mime_type: str,
     system_prompt: str,
     user_id: str,
+    chat_id: str,
 ) -> None:
     """Download file, upload to LLM, and generate analysis."""
     try:
@@ -1147,9 +1198,29 @@ async def _call_file_llm_async(
         prompt = f"请详细分析这份文档的内容：{filename}"
         
         start_time = time.time()
-        
-        # 2. Call LLM with file
         loop = asyncio.get_running_loop()
+
+        # 2. Upload file (if provider supports it)
+        file_uri = None
+        if provider == "gemini":
+            file_uri = await loop.run_in_executor(
+                None,
+                lambda: router.upload_file(
+                    provider=provider,
+                    file_data=file_bytes,
+                    mime_type=mime_type,
+                    filename=filename
+                )
+            )
+            # Save context for future turns
+            # Save context for future turns (PERSISTENT)
+            if file_uri:
+                get_context_manager().save_file(
+                    chat_id, user_id, user_id, file_uri, filename, mime_type
+                )
+                logger.info(f"[AIBOT_CTX] Saved persistent file context for chat={chat_id}")
+
+        # 3. Call LLM with file
         response = await loop.run_in_executor(
             None,
             lambda: router.chat_with_file(
@@ -1158,6 +1229,7 @@ async def _call_file_llm_async(
                 file_data=file_bytes,
                 file_mime_type=mime_type,
                 filename=filename,
+                file_uri=file_uri,
                 system_prompt=system_prompt,
             )
         )

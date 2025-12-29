@@ -415,13 +415,34 @@ class LLMRouter:
         )
 
 
+    def upload_file(
+        self,
+        provider: str,
+        file_data: bytes,
+        mime_type: str,
+        filename: str = "uploaded_file"
+    ) -> str:
+        """Upload file to provider and return URI/ID."""
+        if provider not in self.PROVIDERS:
+            raise LLMError(f"Unknown provider: {provider}")
+
+        api_key = self.keys.get(provider)
+        if not api_key:
+            raise LLMError(f"API key not configured for {provider}")
+
+        if provider == "gemini":
+            return self._upload_gemini_file(api_key, file_data, mime_type, filename)
+        else:
+            raise NotImplementedError(f"File upload not supported for {provider}")
+
     def chat_with_file(
         self,
         provider: str,
         text: str,
-        file_data: bytes,
+        file_data: bytes | None,
         file_mime_type: str,
         filename: str = "uploaded_file",
+        file_uri: str | None = None,
         system_prompt: str | None = None,
         model: str | None = None,
         max_tokens: int = 2048,
@@ -430,15 +451,13 @@ class LLMRouter:
         """
         Chat with a file (document/PDF/etc).
 
-        Currently primarily supports Gemini via File API.
-        Other providers will raise NotImplementedError or fallback gracefully.
-
         Args:
-            provider: 'gemini' (others not fully supported for direct file upload yet)
-            text: Text prompt
-            file_data: Raw file bytes
-            file_mime_type: MIME type of file (e.g. application/pdf)
-            filename: Display name of the file
+            provider: 'gemini'
+            text: Prompt
+            file_data: Raw bytes (optional if file_uri provided)
+            file_mime_type: MIME type
+            filename: Name
+            file_uri: Pre-uploaded file URI (optional)
             ...
         """
         if provider not in self.PROVIDERS:
@@ -452,8 +471,11 @@ class LLMRouter:
         model = model or config["default_model"]
 
         if provider == "gemini":
-            # 1. Upload file to Gemini
-            file_uri = self._upload_gemini_file(api_key, file_data, file_mime_type, filename)
+            # 1. Get File URI (upload if needed)
+            if not file_uri:
+                if not file_data:
+                    raise LLMError("Either file_data or file_uri must be provided")
+                file_uri = self._upload_gemini_file(api_key, file_data, file_mime_type, filename)
             
             # 2. Call Gemini with file URI
             return self._call_gemini_file(
@@ -461,8 +483,6 @@ class LLMRouter:
                 system_prompt, model, max_tokens, temperature
             )
         else:
-            # Fallback for others: just append note about file
-            # In future, could extract text from PDF/Excel here
             return LLMResponse(
                 content=f"抱歉，目前仅 Gemini 机器人支持直接分析 {filename} ({file_mime_type}) 文件。{provider} 暂时不支持。",
                 model=model,

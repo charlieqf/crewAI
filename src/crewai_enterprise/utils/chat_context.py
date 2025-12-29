@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass
 
 from src.crewai_enterprise.tools.chat_storage.chat_storage_tool import ChatStorageTool
@@ -228,6 +229,10 @@ class ChatContextManager:
             for msg in messages:
                 content = msg.get("content", "")
 
+                # Filter out raw file JSON payloads
+                if content.strip().startswith('{"uri":') and "filename" in content:
+                    continue
+
                 # Legacy support: strip [role] prefix if present (from old data)
                 if content.startswith("[user]"):
                     content = content[6:]
@@ -253,6 +258,69 @@ class ChatContextManager:
         except Exception as e:
             logger.warning(f"Error parsing storage result: {e}")
             return []
+
+    def save_file(
+        self,
+        chat_id: str,
+        sender_id: str,
+        sender_name: str,
+        file_uri: str,
+        filename: str,
+        mime_type: str,
+    ) -> None:
+        """
+        Save file context to persistent storage.
+        """
+        file_info = {
+            "uri": file_uri,
+            "filename": filename,
+            "mime": mime_type,
+            "timestamp": time.time()
+        }
+        
+        self.storage._run(
+            action="save",
+            chat_id=chat_id,
+            sender_id=sender_id,
+            sender_name=sender_name,
+            content=json.dumps(file_info, ensure_ascii=False),
+            message_type="file",
+            role="user",
+        )
+        logger.info(f"Saved persistent file context for {chat_id}: {filename}")
+
+    def get_active_file(self, chat_id: str, limit: int = 50) -> dict | None:
+        """
+        Get the most recent file context from storage history.
+        """
+        result = self.storage._run(
+            action="get_recent_json",
+            chat_id=chat_id,
+            limit=limit,
+        )
+        
+        if not result or result == "[]":
+            return None
+            
+        try:
+            messages = json.loads(result)
+            # Find the most recent file message (iterate backwards from list)
+            # Assuming list is returned oldest->newest or whatever, we just want LATEST file.
+            # ChatStorageTool returns Oldest...Newest usually in JSON mode? 
+            # Reversing ensures we see the LATEST message first.
+            for msg in reversed(messages):
+                content = msg.get("content", "")
+                if content.strip().startswith('{"uri":') and "filename" in content:
+                    try:
+                        data = json.loads(content)
+                        if "uri" in data:
+                            return data
+                    except:
+                        continue
+        except Exception:
+            pass
+            
+        return None
 
 
 # Global singleton with thread-safe access
