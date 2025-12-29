@@ -1152,7 +1152,17 @@ def _extract_file_info(data: dict) -> tuple[str | None, str, str]:
     """
     file_data = data.get("file", {})
     # Check multiple locations for filename
-    filename = file_data.get("filename") or file_data.get("name") or data.get("filename") or data.get("name")
+    filename = (
+        file_data.get("filename") or 
+        file_data.get("name") or 
+        file_data.get("title") or
+        file_data.get("file_name") or
+        data.get("filename") or 
+        data.get("name") or
+        data.get("title")
+    )
+    
+    logger.info(f"[AIBOT_FILE_EXTRACT] Found initial filename={filename} from keys in {list(file_data.keys())}")
     
     # Try to extract from URL if still unknown
     url = file_data.get("url") or data.get("url")
@@ -1173,6 +1183,8 @@ def _extract_file_info(data: dict) -> tuple[str | None, str, str]:
     
     if ext and not filename.endswith(f".{ext}"):
         filename = f"{filename}.{ext}"
+        
+    logger.info(f"[AIBOT_FILE_EXTRACT] Final filename={filename} ext={ext}")
         
     mime_type, _ = mimetypes.guess_type(filename)
     if not mime_type:
@@ -1202,7 +1214,7 @@ async def _handle_file_message(
     # Extract file info
     url, filename, mime_type = _extract_file_info(data)
     
-    logger.info(f"[AIBOT_FILE] bot={bot_type} user={user_name} file={filename} mime={mime_type}")
+    logger.info(f"[AIBOT_FILE] bot={bot_type} user={user_name} file={filename} mime={mime_type} raw_data={json.dumps(data, ensure_ascii=False)}")
     
     stream_id = _generate_stream_id()
     chat_id = _extract_chat_id(data, user_id)
