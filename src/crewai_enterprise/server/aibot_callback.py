@@ -1186,7 +1186,16 @@ async def _call_file_llm_async(
         router = get_router()
         aes_key = _get_bot_aes_key(bot_type)
         
-        # 1. Download and decrypt
+        # 1. Download and decrypt file
+        # Force text/plain for code files to ensure Gemini compatibility
+        import os
+        ext = os.path.splitext(filename)[1].lower()
+        if ext in ['.sql', '.py', '.js', '.ts', '.html', '.css', '.md', '.json', '.xml', '.sh', '.yaml', '.yml', '.c', '.cpp', '.java']:
+            mime_type = "text/plain"
+
+        if not aes_key:
+            raise ValueError(f"AES Key not found for {bot_type}")
+
         success, media_data = _decrypt_media(file_url, aes_key)
         if not success:
             raise ValueError(f"File download failed: {media_data}")
