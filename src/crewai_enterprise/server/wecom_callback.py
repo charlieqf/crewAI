@@ -237,6 +237,30 @@ def create_app() -> FastAPI:
     async def health_check() -> dict[str, str]:
         """Health check endpoint."""
         return {"status": "healthy", "service": "wecom-callback", "version": "0.3.0"}
+    
+    # Serve static files (generated HTML/code files)
+    from fastapi.responses import FileResponse
+    from pathlib import Path
+    
+    @app.get("/files/{chat_id}/{filename}")
+    async def serve_file(chat_id: str, filename: str):
+        """Serve generated files from local storage."""
+        file_base = Path("./data/files")
+        file_path = file_base / chat_id / filename
+        
+        if not file_path.exists():
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        # Security check: ensure the resolved path is under the base directory
+        try:
+            file_path = file_path.resolve()
+            file_base = file_base.resolve()
+            if not str(file_path).startswith(str(file_base)):
+                raise HTTPException(status_code=403, detail="Access denied")
+        except Exception:
+            raise HTTPException(status_code=403, detail="Invalid path")
+        
+        return FileResponse(file_path)
 
     # Register AI Bot routes for intelligent robots
     from src.crewai_enterprise.server.aibot_callback import register_aibot_routes
