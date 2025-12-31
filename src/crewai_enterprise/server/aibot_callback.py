@@ -410,17 +410,8 @@ async def _process_llm_file_output(
             logger.info(f"[AIBOT_FILE] File available at cloud link (robot response_url does not support file attachments)")
             
             # 5. Final text cleanup (replace the entire tag with info) - Use ORIGINAL filename
-            # Generate user-facing link (local server)
-            # Use Nginx proxy IP instead of internal server IP
-            server_url = f"http://113.125.202.173:8000/files/{chat_id}/{os.path.basename(file_info.file_path)}"
-            
             pattern_to_replace = re.escape(f'<FILE name="{original_filename}">') + r'[\s\S]*?' + re.escape('</FILE>')
-            link_display = f"\n\n[已生成文件: {filename}]\n下载链接: {server_url}"
-            
-            # Also show Qiniu link as backup if upload succeeded
-            if cloud_url:
-                link_display += f"\n备用链接(七牛云): {cloud_url}"
-            
+            link_display = f"\n\n[已生成文件: {filename}]\n云端链接: {qiniu_url_display}"
             cleaned_content = re.sub(pattern_to_replace, link_display, cleaned_content, flags=re.IGNORECASE)
             
         except Exception as e:
