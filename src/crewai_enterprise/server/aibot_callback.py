@@ -30,6 +30,7 @@ import time
 from typing import Any
 
 import requests
+import urllib3
 from Crypto.Cipher import AES
 from fastapi import APIRouter, BackgroundTasks, FastAPI, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse, Response
@@ -469,8 +470,26 @@ async def _call_llm_async(
                                 with open(signed_url[7:], "rb") as f:
                                     file_bytes = f.read()
                             else:
-                                download_res = requests.get(signed_url, timeout=30)
-                                download_res.raise_for_status()
+                                # Auditor Refinement: Security-first approach for cloud downloads
+                                verify_ssl = os.getenv("STORAGE_VERIFY_SSL", "true").lower() == "true"
+                                allow_fallback = os.getenv("STORAGE_ALLOW_HTTP_FALLBACK", "false").lower() == "true"
+                                
+                                if not verify_ssl:
+                                    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+                                try:
+                                    download_res = requests.get(signed_url, timeout=30, verify=verify_ssl)
+                                    download_res.raise_for_status()
+                                except (requests.exceptions.SSLError, requests.exceptions.ConnectionError) as ssl_err:
+                                    # Only fallback to HTTP if explicitly allowed (e.g. for test/internal environments)
+                                    if allow_fallback and "handshake failure" in str(ssl_err).lower() and signed_url.startswith("https://"):
+                                        http_url = signed_url.replace("https://", "http://", 1)
+                                        logger.warning(f"[AIBOT_CTX] SSL handshake failure, retrying with HTTP (opt-in fallback): {http_url[:100]}...")
+                                        download_res = requests.get(http_url, timeout=30)
+                                        download_res.raise_for_status()
+                                    else:
+                                        logger.error(f"[AIBOT_CTX] Download failed (SSL verify={verify_ssl}, fallback={allow_fallback}): {ssl_err}")
+                                        raise
                                 file_bytes = download_res.content
                             
                             response = await loop.run_in_executor(
@@ -489,12 +508,17 @@ async def _call_llm_async(
             except Exception as e:
                 logger.warning(f"[AIBOT_CTX] Failed to use file context (fallback to text): {e}")
                 use_file_context = False
+                # Auditor Suggestion: If file context was expected but failed, notify the user.
+                context_error_hint = f"\n\n(注：无法加载历史图片/文件，本次回答仅基于文字记录。错误：{str(e)[:50]}...)"
 
         if not use_file_context:
             # Run standard LLM call
             response = await loop.run_in_executor(
                 None, lambda: router.chat(provider=provider, messages=messages)
             )
+            # Apply error hint if context failed
+            if 'context_error_hint' in locals() and context_error_hint:
+                response.content += context_error_hint
 
         elapsed_ms = int((time.time() - start_time) * 1000)
 

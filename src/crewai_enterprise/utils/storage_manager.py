@@ -181,8 +181,9 @@ class QiniuProvider(StorageProvider):
         
         self.auth = Auth(self.access_key, self.secret_key)
         self.bucket_manager = BucketManager(self.auth)
+        self.protocol = os.getenv("STORAGE_QINIU_PROTOCOL", "https")
         
-        logger.info(f"QiniuProvider initialized: bucket={self.bucket}")
+        logger.info(f"QiniuProvider initialized: bucket={self.bucket}, protocol={self.protocol}")
     
     def upload(
         self,
@@ -208,7 +209,7 @@ class QiniuProvider(StorageProvider):
             raise Exception(f"Qiniu upload failed: {info}")
         
         # Generate URL
-        url = f"https://{self.domain}/{key}"
+        url = f"{self.protocol}://{self.domain}/{key}"
         
         logger.info(f"Uploaded {filename} to Qiniu: {key}")
         
@@ -232,7 +233,7 @@ class QiniuProvider(StorageProvider):
             return False
     
     def get_url(self, key: str, expires_in_seconds: int | None = None) -> str:
-        base_url = f"https://{self.domain}/{key}"
+        base_url = f"{self.protocol}://{self.domain}/{key}"
         
         if expires_in_seconds:
             # Generate private signed URL
