@@ -12,7 +12,7 @@ import os
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -195,7 +195,7 @@ class QiniuProvider(StorageProvider):
         
         # Generate unique key with timestamp
         ext = os.path.splitext(filename)[1]
-        timestamp = datetime.now().strftime("%Y%m%d")
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d")
         key = f"wecom/{timestamp}/{uuid.uuid4().hex}{ext}"
         
         # Generate upload token
@@ -303,7 +303,7 @@ class S3Provider(StorageProvider):
     ) -> UploadResult:
         # Generate unique key
         ext = os.path.splitext(filename)[1]
-        timestamp = datetime.now().strftime("%Y%m%d")
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d")
         key = f"wecom/{timestamp}/{uuid.uuid4().hex}{ext}"
         
         # Upload

@@ -954,8 +954,18 @@ async def _handle_mixed_message(
 
     Downloads and decrypts images, then sends to multimodal LLM for analysis.
     """
-    _cleanup_old_tasks()
+    wecom_msg_id = _extract_msg_id(data)
+    if wecom_msg_id and wecom_msg_id in _processed_messages:
+        existing_stream_id = _processed_messages[wecom_msg_id]
+        task = _stream_tasks.get(existing_stream_id)
+        if task:
+            logger.info(f"[AIBOT_DEDUP] bot={bot_type} msg_id={wecom_msg_id} returning existing stream_id={existing_stream_id}")
+            stream_json = _make_text_stream(existing_stream_id, task["content"], task["finished"])
+            encrypted = _encrypt_response(bot_type, stream_json, nonce, timestamp)
+            return Response(content=encrypted, media_type="text/plain")
 
+    _cleanup_old_tasks()
+    
     # Extract text from mixed message
     text_content = _extract_text_from_mixed(data)
     image_urls = _extract_image_urls_from_mixed(data)
@@ -995,6 +1005,12 @@ async def _handle_mixed_message(
         if success:
             image_base64 = base64.b64encode(result).decode("utf-8")
             logger.info(f"[AIBOT_MIXED] bot={bot_type} image decrypted successfully")
+            
+            # Use same stream_id logic to avoid duplicate uploads
+            stream_id = _generate_stream_id()
+            if wecom_msg_id:
+                _processed_messages[wecom_msg_id] = stream_id
+            
             # Upload to cloud storage (UCS Phase 1) - Fix: Persistence for mixed messages
             file_url, storage_key, _, _ = _upload_image_to_ucs(result)
         else:
@@ -1017,7 +1033,7 @@ async def _handle_mixed_message(
 
     # Process with image using vision API
     return await _handle_vision_message(
-        bot_type, data, nonce, timestamp, prompt, image_base64, user_id, user_name, file_url, storage_key
+        bot_type, data, nonce, timestamp, prompt, image_base64, user_id, user_name, file_url, storage_key, stream_id
     )
 
 
@@ -1031,6 +1047,16 @@ async def _handle_image_message(
 
     Downloads and decrypts the image, then sends to multimodal LLM for analysis.
     """
+    wecom_msg_id = _extract_msg_id(data)
+    if wecom_msg_id and wecom_msg_id in _processed_messages:
+        existing_stream_id = _processed_messages[wecom_msg_id]
+        task = _stream_tasks.get(existing_stream_id)
+        if task:
+            logger.info(f"[AIBOT_DEDUP] bot={bot_type} image msg_id={wecom_msg_id} returning cached response")
+            stream_json = _make_text_stream(existing_stream_id, task["content"], task["finished"])
+            encrypted = _encrypt_response(bot_type, stream_json, nonce, timestamp)
+            return Response(content=encrypted, media_type="text/plain")
+
     _cleanup_old_tasks()
 
     # Extract user info
@@ -1085,14 +1111,18 @@ async def _handle_image_message(
     # Image decrypted successfully
     image_base64 = base64.b64encode(result).decode("utf-8")
     prompt = "请描述并分析这张图片的内容"
-    
+    # Use same stream_id logic to avoid duplicate uploads
+    stream_id = _generate_stream_id()
+    if wecom_msg_id:
+        _processed_messages[wecom_msg_id] = stream_id
+
     # Upload to cloud storage (UCS Phase 1)
     file_url, storage_key, _, _ = _upload_image_to_ucs(result)
 
     logger.info(f"[AIBOT_IMAGE] bot={bot_type} image ready, sending to vision API")
 
     return await _handle_vision_message(
-        bot_type, data, nonce, timestamp, prompt, image_base64, user_id, user_name, file_url, storage_key
+        bot_type, data, nonce, timestamp, prompt, image_base64, user_id, user_name, file_url, storage_key, stream_id
     )
 
 
@@ -1107,6 +1137,7 @@ async def _handle_vision_message(
     user_name: str,
     file_url: str | None = None,
     storage_key: str | None = None,
+    existing_stream_id: str | None = None,
 ) -> Response:
     """Handle vision (image+text) message with multimodal LLM.
 
@@ -1122,17 +1153,17 @@ async def _handle_vision_message(
     # Check for duplicate message
     if wecom_msg_id and wecom_msg_id in _processed_messages:
         existing_stream_id = _processed_messages[wecom_msg_id]
-        if existing_stream_id in _stream_tasks:
-            task = _stream_tasks[existing_stream_id]
+        task = _stream_tasks.get(existing_stream_id)
+        if task:
+            logger.info(f"[AIBOT_VISION] Returning cached response for msgid={wecom_msg_id}")
             stream_json = _make_text_stream(
                 existing_stream_id, task["content"], task["finished"]
             )
             encrypted = _encrypt_response(bot_type, stream_json, nonce, timestamp)
-            logger.info(f"[AIBOT_VISION] Returning cached response for msgid={wecom_msg_id}")
             return Response(content=encrypted, media_type="text/plain")
 
     # Create stream task for tracking
-    stream_id = _generate_stream_id()
+    stream_id = existing_stream_id or _generate_stream_id()
     _stream_tasks[stream_id] = {
         "content": "正在分析图片...",
         "finished": False,
@@ -1347,14 +1378,23 @@ async def _handle_file_message(
     user_id = from_data.get("user_id", from_data.get("userid", "unknown"))
     user_name = from_data.get("name", from_data.get("alias", user_id))
     
+    wecom_msg_id = _extract_msg_id(data)
+    if wecom_msg_id and wecom_msg_id in _processed_messages:
+        existing_stream_id = _processed_messages[wecom_msg_id]
+        task = _stream_tasks.get(existing_stream_id)
+        if task:
+            logger.info(f"[AIBOT_DEDUP] bot={bot_type} file msg_id={wecom_msg_id} returning cached response")
+            stream_json = _make_text_stream(existing_stream_id, task["content"], task["finished"])
+            encrypted = _encrypt_response(bot_type, stream_json, nonce, timestamp)
+            return Response(content=encrypted, media_type="text/plain")
+    stream_id = _generate_stream_id()
+
     # Extract file info
     url, filename, mime_type = _extract_file_info(data)
     
     logger.info(f"[AIBOT_FILE] bot={bot_type} user={user_name} file={filename} mime={mime_type} raw_data={json.dumps(data, ensure_ascii=False)}")
     
-    stream_id = _generate_stream_id()
     chat_id = _extract_chat_id(data, user_id)
-    wecom_msg_id = _extract_msg_id(data)
     
     # Check bot support
     config = BOT_CONFIGS[bot_type]

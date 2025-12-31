@@ -69,6 +69,7 @@ class ChatContextManager:
         role: str = "user",
         wecom_msg_id: str | None = None,
         bot_type: str | None = None,
+        storage_key: str | None = None,
     ) -> None:
         """
         Add a message to the chat history.
@@ -97,6 +98,7 @@ class ChatContextManager:
             role=role,
             wecom_msg_id=wecom_msg_id,
             bot_type=bot_type,
+            storage_key=storage_key,
             message_type="text",
         )
         logger.debug(
@@ -271,6 +273,7 @@ class ChatContextManager:
         mime_type: str,
         wecom_msg_id: str | None = None,
         bot_type: str | None = None,
+        storage_key: str | None = None,
     ) -> None:
         """
         Save file context to persistent storage.

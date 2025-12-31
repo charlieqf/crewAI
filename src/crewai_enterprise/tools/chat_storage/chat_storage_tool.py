@@ -212,6 +212,8 @@ class ChatStorageTool(BaseTool):
         wecom_msg_id: str | None = None,
         date: str | None = None,
         limit: int = 50,
+        bot_type: str | None = None,
+        storage_key: str | None = None,
     ) -> str:
         """Execute the tool logic."""
 
@@ -229,6 +231,8 @@ class ChatStorageTool(BaseTool):
                 message_type,
                 role,
                 wecom_msg_id,
+                bot_type,
+                storage_key,
             )
         elif action == "get_by_date":
             return self._get_messages_by_date(chat_id, date)
