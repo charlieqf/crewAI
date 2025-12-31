@@ -65,7 +65,7 @@ BOT_CONFIGS: dict[str, dict[str, str]] = {
         "provider": "gemini",
         "token_env": "GEMINI_BOT_TOKEN",
         "aes_key_env": "GEMINI_BOT_ENCODING_AES_KEY",
-        "system_prompt": "你是Gemini,一个擅长长文本分析和理解的AI助手。请用中文回答。",
+        "system_prompt": "你是Gemini,一个擅长长文本分析和理解的AI助手。请用中文回答。如果你需要生成文件(如HTML, PDF, 代码)发送给用户,请使用以下格式包裹文件内容: <FILE name=\"文件名\">文件内容</FILE>。系统会自动提取并作为附件发送。",
     },
     "chatgpt": {
         "provider": "openai",
@@ -315,6 +315,133 @@ def _extract_quote_content(data: dict) -> tuple[str | None, str | None]:
     return None, None
 
 
+async def _process_llm_file_output(
+    bot_type: str,
+    chat_id: str,
+    content: str,
+    user_id: str | None = None,
+    user_name: str | None = None,
+    response_url: str | None = None,
+) -> str:
+    """Detect and process <FILE> tags in LLM output."""
+    import re
+    from src.crewai_enterprise.utils.file_storage import get_file_manager
+    from src.crewai_enterprise.utils.storage_manager import get_storage_manager
+    from src.crewai_enterprise.utils.chat_context import get_context_manager
+    
+    # Pattern to match <FILE name="filename">content</FILE>
+    # Use re.DOTALL to match across newlines
+    file_pattern = re.compile(r'<FILE\s+name="([^"]+)">([\s\S]*?)<\/FILE>', re.IGNORECASE)
+    
+    matches = file_pattern.findall(content)
+    if not matches:
+        return content
+        
+    cleaned_content = content
+    file_manager = get_file_manager()
+    storage = get_storage_manager()
+    context_manager = get_context_manager()
+    
+    def _sanitize_filename(name: str) -> str:
+        """Sanitize filename to prevent path traversal and remove weird characters."""
+        import os
+        # Only take the basename to prevent path traversal
+        name = os.path.basename(name)
+        # Remove any non-alphanumeric/dot/hyphen/underscore characters
+        import re
+        name = re.sub(r'[^\w\.\-\u4e00-\u9fa5]', '_', name)
+        # Limit length
+        if len(name) > 100:
+            name = name[:90] + "_" + name[-9:]
+        return name
+
+    for original_filename, file_content in matches:
+        try:
+            filename = _sanitize_filename(original_filename)
+            logger.info(f"[AIBOT_FILE] Processing generated file: {filename} (original: {original_filename}, {len(file_content)} chars)")
+            
+            # 1. Save to local storage
+            file_info = file_manager.save_file_from_bytes(
+                chat_id=chat_id,
+                content=file_content.encode("utf-8"),
+                filename=filename
+            )
+            
+            # 2. Upload to Qiniu (UCS)
+            cloud_url = None
+            cloud_key = None
+            try:
+                mime_type = "text/html" if filename.endswith(".html") else "text/plain"
+                upload_res = storage.upload_file(
+                    data=file_content.encode("utf-8"),
+                    filename=filename,
+                    content_type=mime_type
+                )
+                cloud_url = upload_res.url
+                cloud_key = upload_res.key
+                logger.info(f"[AIBOT_FILE] Uploaded to Qiniu: {cloud_url}")
+            except Exception as qiniu_err:
+                logger.error(f"[AIBOT_FILE] Qiniu upload failed: {qiniu_err}")
+                qiniu_url_display = "(上传云端失败)"
+            else:
+                qiniu_url_display = cloud_url
+
+            # 3. Save to conversation context (Auditor Refinement)
+            try:
+                # Use file:// prefix for local paths to ensure context manager compatibility
+                final_file_uri = cloud_url or f"file://{file_info.file_path}"
+                context_manager.save_file(
+                    chat_id=chat_id,
+                    sender_id=f"bot_{bot_type}",
+                    sender_name=bot_type,
+                    file_uri=final_file_uri,
+                    filename=filename,
+                    mime_type="text/html" if filename.endswith(".html") else "text/plain",
+                    bot_type=bot_type,
+                    storage_key=cloud_key
+                )
+                logger.info(f"[AIBOT_FILE] Saved generated file to context: {filename}")
+            except Exception as ctx_err:
+                logger.error(f"[AIBOT_FILE] Failed to save to context: {ctx_err}")
+            
+            # 4. If response_url is present, upload to WeCom and send file
+            if response_url:
+                try:
+                    media_id = file_manager.upload_wecom_media(file_info.file_path)
+                    
+                    # Send file message to response_url
+                    file_msg = {
+                        "msgtype": "file",
+                        "file": {"media_id": media_id}
+                    }
+                    
+                    # Robots' response_url usually needs no encryption for the POST
+                    resp = requests.post(response_url, json=file_msg, timeout=10)
+                    if resp.status_code >= 400:
+                        logger.error(f"[AIBOT_FILE] WeCom HTTP error: {resp.status_code} {resp.text}")
+                    else:
+                        try:
+                            resp_json = resp.json()
+                            if resp_json.get("errcode") != 0:
+                                logger.error(f"[AIBOT_FILE] WeCom API business error: {resp_json}")
+                            else:
+                                logger.info(f"[AIBOT_FILE] Sent file {filename} to WeCom media_id={media_id}")
+                        except Exception:
+                            logger.info(f"[AIBOT_FILE] Sent file {filename} to WeCom (non-json resp)")
+                except Exception as wecom_err:
+                    logger.error(f"[AIBOT_FILE] Failed to send file to WeCom: {wecom_err}")
+            
+            # 5. Final text cleanup (replace the entire tag with info) - Use ORIGINAL filename
+            pattern_to_replace = re.escape(f'<FILE name="{original_filename}">') + r'[\s\S]*?' + re.escape('</FILE>')
+            link_display = f"\n\n[已生成文件: {filename}]\n云端链接: {qiniu_url_display}"
+            cleaned_content = re.sub(pattern_to_replace, link_display, cleaned_content, flags=re.IGNORECASE)
+            
+        except Exception as e:
+            logger.error(f"[AIBOT_FILE] Error processing file {original_filename}: {e}")
+            
+    return cleaned_content
+
+
 async def _call_llm_async(
     stream_id: str,
     bot_type: str,
@@ -325,6 +452,7 @@ async def _call_llm_async(
     wecom_msg_id: str | None,
     quoted_msg_id: str | None = None,
     quoted_filename: str | None = None,
+    response_url: str | None = None,
 ) -> None:
     """Call the appropriate LLM asynchronously and update task result."""
     config = BOT_CONFIGS[bot_type]
@@ -355,7 +483,12 @@ async def _call_llm_async(
         # 1. Quoted File (Specific)
         file_ctx = None
         if quoted_msg_id:
+            # Try original ID first
             file_ctx = context_manager.get_active_file(chat_id, wecom_msg_id=quoted_msg_id)
+            if not file_ctx:
+                # Fallback: try derived image ID (file_{id}) to maintain vision quote matching
+                file_ctx = context_manager.get_active_file(chat_id, wecom_msg_id=f"file_{quoted_msg_id}")
+            
             if file_ctx:
                 logger.info(f"[AIBOT_CTX] Found quoted file by MsgId: {file_ctx['filename']}")
         
@@ -527,19 +660,29 @@ async def _call_llm_async(
             f"response_len={len(response.content)} content={response.content[:50]!r}..."
         )
 
+        # Post-process response for generated files (Auditor Refinement)
+        final_content = await _process_llm_file_output(
+            bot_type=bot_type,
+            chat_id=chat_id,
+            content=response.content,
+            user_id=user_id,
+            user_name=user_name,
+            response_url=response_url
+        )
+
         # Add assistant response to context
         context_manager.add_message(
             chat_id=chat_id,
             sender_id=f"bot_{bot_type}",
             sender_name=f"{bot_type}",
-            content=response.content,
+            content=final_content,
             role="assistant",
             bot_type=bot_type,
         )
 
         # Update task with completed response
         if stream_id in _stream_tasks:
-            _stream_tasks[stream_id]["content"] = response.content
+            _stream_tasks[stream_id]["content"] = final_content
             _stream_tasks[stream_id]["finished"] = True
             _stream_tasks[stream_id]["completed_at"] = time.time()
 
@@ -622,6 +765,7 @@ def register_aibot_routes(app: FastAPI) -> None:
 
             data = json.loads(decrypted_msg)
             msgtype = data.get("msgtype", "")
+            response_url = data.get("response_url")
 
             logger.info(
                 f"[AIBOT_RECV] bot={bot_type} msgtype={msgtype} "
@@ -629,18 +773,18 @@ def register_aibot_routes(app: FastAPI) -> None:
             )
 
             if msgtype == "text":
-                return await _handle_text_message(bot_type, data, nonce, timestamp)
+                return await _handle_text_message(bot_type, data, nonce, timestamp, response_url=response_url)
             elif msgtype == "stream":
                 return await _handle_stream_refresh(bot_type, data, nonce, timestamp)
             elif msgtype == "mixed":
                 # Handle mixed messages (text + image combination)
-                return await _handle_mixed_message(bot_type, data, nonce, timestamp)
+                return await _handle_mixed_message(bot_type, data, nonce, timestamp, response_url=response_url)
             elif msgtype == "image":
                 # Handle image-only messages
-                return await _handle_image_message(bot_type, data, nonce, timestamp)
+                return await _handle_image_message(bot_type, data, nonce, timestamp, response_url=response_url)
             elif msgtype == "file":
                 # Handle file messages (PDF, Excel, etc.)
-                return await _handle_file_message(bot_type, data, nonce, timestamp)
+                return await _handle_file_message(bot_type, data, nonce, timestamp, response_url=response_url)
             elif msgtype == "event":
                 # Handle events (e.g., bot added to group)
                 logger.info(f"[AIBOT_EVENT] bot={bot_type} event={data}")
@@ -664,6 +808,7 @@ async def _handle_text_message(
     data: dict,
     nonce: str,
     timestamp: str,
+    response_url: str | None = None,
 ) -> Response:
     """Handle text message: start LLM processing, return immediate 'thinking' response."""
     # Cleanup old tasks on each message to prevent unbounded growth
@@ -782,6 +927,7 @@ async def _handle_text_message(
             wecom_msg_id=wecom_msg_id,
             quoted_msg_id=quoted_msg_id,
             quoted_filename=quoted_filename,
+            response_url=response_url,
         )
     )
 
@@ -973,6 +1119,7 @@ async def _handle_mixed_message(
     data: dict,
     nonce: str,
     timestamp: str,
+    response_url: str | None = None,
 ) -> Response:
     """Handle mixed messages (image + text combination).
 
@@ -1014,7 +1161,7 @@ async def _handle_mixed_message(
         modified_data = data.copy()
         modified_data["text"] = {"content": text_content}
         modified_data["msgtype"] = "text"
-        return await _handle_text_message(bot_type, modified_data, nonce, timestamp)
+        return await _handle_text_message(bot_type, modified_data, nonce, timestamp, response_url=response_url)
 
     # Process with image - try to download and decrypt
     aes_key = _get_bot_aes_key(bot_type)
@@ -1053,11 +1200,11 @@ async def _handle_mixed_message(
         modified_data = data.copy()
         modified_data["text"] = {"content": prompt + error_note}
         modified_data["msgtype"] = "text"
-        return await _handle_text_message(bot_type, modified_data, nonce, timestamp)
+        return await _handle_text_message(bot_type, modified_data, nonce, timestamp, response_url=response_url)
 
     # Process with image using vision API
     return await _handle_vision_message(
-        bot_type, data, nonce, timestamp, prompt, image_base64, user_id, user_name, file_url, storage_key, stream_id
+        bot_type, data, nonce, timestamp, prompt, image_base64, user_id, user_name, file_url, storage_key, stream_id, response_url=response_url
     )
 
 
@@ -1066,6 +1213,7 @@ async def _handle_image_message(
     data: dict,
     nonce: str,
     timestamp: str,
+    response_url: str | None = None,
 ) -> Response:
     """Handle image-only messages.
 
@@ -1146,7 +1294,7 @@ async def _handle_image_message(
     logger.info(f"[AIBOT_IMAGE] bot={bot_type} image ready, sending to vision API")
 
     return await _handle_vision_message(
-        bot_type, data, nonce, timestamp, prompt, image_base64, user_id, user_name, file_url, storage_key, stream_id
+        bot_type, data, nonce, timestamp, prompt, image_base64, user_id, user_name, file_url, storage_key, stream_id, response_url=response_url
     )
 
 
@@ -1162,6 +1310,7 @@ async def _handle_vision_message(
     file_url: str | None = None,
     storage_key: str | None = None,
     existing_stream_id: str | None = None,
+    response_url: str | None = None,
 ) -> Response:
     """Handle vision (image+text) message with multimodal LLM.
 
@@ -1173,6 +1322,7 @@ async def _handle_vision_message(
 
     chat_id = _extract_chat_id(data, user_id)
     wecom_msg_id = _extract_msg_id(data)
+    _, quoted_msg_id = _extract_quote_content(data)
 
     # Check for duplicate message
     if wecom_msg_id and wecom_msg_id in _processed_messages:
@@ -1217,6 +1367,8 @@ async def _handle_vision_message(
                 mime_type = "image/bmp"
                 filename = "image.bmp"
 
+            # Fix: Use a derived message ID for the file context to avoid conflict with the user message (persistence dedup)
+            file_msg_id = f"file_{wecom_msg_id}" if wecom_msg_id else None
             get_context_manager().save_file(
                 chat_id=chat_id,
                 sender_id=user_id,
@@ -1224,11 +1376,11 @@ async def _handle_vision_message(
                 file_uri=file_url,
                 filename=filename,
                 mime_type=mime_type,
-                wecom_msg_id=wecom_msg_id,
+                wecom_msg_id=file_msg_id,
                 bot_type=bot_type,
                 storage_key=storage_key,
             )
-            logger.info(f"[AIBOT_VISION] Saved persistent image context for chat={chat_id}")
+            logger.info(f"[AIBOT_VISION] Saved persistent image context for chat={chat_id} (msgid={file_msg_id})")
         except Exception as e:
             logger.error(f"[AIBOT_VISION] Failed to save image context: {e}")
 
@@ -1244,6 +1396,9 @@ async def _handle_vision_message(
             chat_id=chat_id,
             user_id=user_id,
             user_name=user_name,
+            wecom_msg_id=wecom_msg_id,
+            quoted_msg_id=quoted_msg_id,
+            response_url=response_url,
         )
     )
 
@@ -1265,10 +1420,25 @@ async def _call_vision_llm_async(
     chat_id: str,
     user_id: str,
     user_name: str,
+    wecom_msg_id: str | None = None,
+    quoted_msg_id: str | None = None,
+    response_url: str | None = None,
 ) -> None:
     """Call vision LLM asynchronously and update task result."""
     try:
         router = get_router()
+        context_manager = get_context_manager()
+
+        # Add user message to context (Auditor parity)
+        context_manager.add_message(
+            chat_id=chat_id,
+            sender_id=user_id,
+            sender_name=user_name or user_id,
+            content=prompt,
+            role="user",
+            wecom_msg_id=wecom_msg_id,
+            bot_type=bot_type,
+        )
 
         logger.info(
             f"[AIBOT_VISION_REQ] bot={bot_type} provider={provider} "
@@ -1296,9 +1466,19 @@ async def _call_vision_llm_async(
             f"response_len={len(response.content)}"
         )
 
+        # Post-process response for generated files (Auditor Refinement)
+        final_content = await _process_llm_file_output(
+            bot_type=bot_type,
+            chat_id=chat_id,
+            content=response.content,
+            user_id=user_id,
+            user_name=user_name,
+            response_url=response_url
+        )
+
         # Update task with completed response
         if stream_id in _stream_tasks:
-            _stream_tasks[stream_id]["content"] = response.content
+            _stream_tasks[stream_id]["content"] = final_content
             _stream_tasks[stream_id]["finished"] = True
             _stream_tasks[stream_id]["completed_at"] = time.time()
 
@@ -1389,6 +1569,7 @@ async def _handle_file_message(
     data: dict,
     nonce: str,
     timestamp: str,
+    response_url: str | None = None,
 ) -> Response:
     """Handle file messages (PDF, Excel, Word).
     
@@ -1403,6 +1584,7 @@ async def _handle_file_message(
     user_name = from_data.get("name", from_data.get("alias", user_id))
     
     wecom_msg_id = _extract_msg_id(data)
+    _, quoted_msg_id = _extract_quote_content(data)
     if wecom_msg_id and wecom_msg_id in _processed_messages:
         existing_stream_id = _processed_messages[wecom_msg_id]
         task = _stream_tasks.get(existing_stream_id)
@@ -1483,6 +1665,8 @@ async def _handle_file_message(
             user_id=user_id,
             chat_id=chat_id,
             wecom_msg_id=wecom_msg_id,
+            quoted_msg_id=quoted_msg_id,
+            response_url=response_url,
         )
     )
     
@@ -1501,6 +1685,8 @@ async def _call_file_llm_async(
     user_id: str,
     chat_id: str,
     wecom_msg_id: str | None = None,
+    quoted_msg_id: str | None = None,
+    response_url: str | None = None,
 ) -> None:
     """Download file, upload to LLM, and generate analysis."""
     try:
@@ -1697,9 +1883,19 @@ async def _call_file_llm_async(
         elapsed_ms = int((time.time() - start_time) * 1000)
         logger.info(f"[AIBOT_FILE_RES] bot={bot_type} elapsed={elapsed_ms}ms")
         
-        # Update result
+        # Post-process response for generated files (Auditor Refinement)
+        final_content = await _process_llm_file_output(
+            bot_type=bot_type,
+            chat_id=chat_id,
+            content=response.content,
+            user_id=user_id,
+            user_name=None, # user_name not in scope here
+            response_url=response_url
+        )
+
+        # Update task with completed response
         if stream_id in _stream_tasks:
-            _stream_tasks[stream_id]["content"] = response.content
+            _stream_tasks[stream_id]["content"] = final_content
             _stream_tasks[stream_id]["finished"] = True
             _stream_tasks[stream_id]["completed_at"] = time.time()
             

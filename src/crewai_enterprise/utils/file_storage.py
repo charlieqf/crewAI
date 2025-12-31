@@ -241,6 +241,37 @@ class FileStorageManager:
             media_id=media_id,
         )
 
+    def upload_wecom_media(self, file_path: str, media_type: str = "file") -> str:
+        """
+        Upload a local file to WeCom and return media_id.
+        
+        Args:
+            file_path: Path to the local file
+            media_type: WeCom media type (image, voice, video, file)
+            
+        Returns:
+            media_id assigned by WeCom
+        """
+        token = self._get_access_token()
+        url = f"https://qyapi.weixin.qq.com/cgi-bin/media/upload?access_token={token}&type={media_type}"
+        
+        try:
+            filename = os.path.basename(file_path)
+            with open(file_path, "rb") as f:
+                files = {"media": (filename, f)}
+                response = requests.post(url, files=files, timeout=60)
+                response.raise_for_status()
+                data = response.json()
+        except Exception as e:
+            raise FileStorageError(f"Failed to upload media to WeCom: {e}") from e
+            
+        if data.get("errcode") == 0:
+            return data.get("media_id")
+        else:
+            raise FileStorageError(
+                f"WeCom media upload error - Code: {data.get('errcode')}, Msg: {data.get('errmsg')}"
+            )
+
     def save_file_from_bytes(
         self,
         chat_id: str,
