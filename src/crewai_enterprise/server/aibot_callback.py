@@ -379,12 +379,13 @@ async def _process_llm_file_output(
                 )
                 cloud_url = upload_res.url
                 cloud_key = upload_res.key
-                logger.info(f"[AIBOT_FILE] Uploaded to Qiniu: {cloud_url}")
+                # Generate a signed URL for the user to click (valid for 7 days by default in some providers, but usually 1hr)
+                # StorageManager.get_url provides the signed link
+                qiniu_url_display = storage.get_url(cloud_key)
+                logger.info(f"[AIBOT_FILE] Uploaded to Qiniu: {cloud_url}, Signed: {qiniu_url_display}")
             except Exception as qiniu_err:
                 logger.error(f"[AIBOT_FILE] Qiniu upload failed: {qiniu_err}")
                 qiniu_url_display = "(上传云端失败)"
-            else:
-                qiniu_url_display = cloud_url
 
             # 3. Save to conversation context (Auditor Refinement)
             try:
