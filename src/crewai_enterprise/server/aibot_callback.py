@@ -1819,7 +1819,7 @@ async def _call_file_llm_async(
         if db_file_uri and should_save:
             get_context_manager().save_file(
                 chat_id=chat_id,
-                user_id=user_id,
+                sender_id=user_id,
                 sender_name=user_id,
                 file_uri=db_file_uri,
                 filename=filename,
