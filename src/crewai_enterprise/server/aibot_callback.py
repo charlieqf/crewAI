@@ -379,10 +379,9 @@ async def _process_llm_file_output(
                 )
                 cloud_url = upload_res.url
                 cloud_key = upload_res.key
-                # Generate a signed URL for the user to click (valid for 1 hour = 3600 seconds)
-                # StorageManager.get_url provides the signed link
-                qiniu_url_display = storage.get_url(cloud_key, expires_in_seconds=3600)
-                logger.info(f"[AIBOT_FILE] Uploaded to Qiniu: {cloud_url}, Signed: {qiniu_url_display}")
+                # For public bucket, use direct URL (no signature needed)
+                qiniu_url_display = cloud_url
+                logger.info(f"[AIBOT_FILE] Uploaded to Qiniu: {cloud_url}")
             except Exception as qiniu_err:
                 logger.error(f"[AIBOT_FILE] Qiniu upload failed: {qiniu_err}")
                 qiniu_url_display = "(上传云端失败)"
@@ -405,32 +404,10 @@ async def _process_llm_file_output(
             except Exception as ctx_err:
                 logger.error(f"[AIBOT_FILE] Failed to save to context: {ctx_err}")
             
-            # 4. If response_url is present, upload to WeCom and send file
-            if response_url:
-                try:
-                    media_id = file_manager.upload_wecom_media(file_info.file_path)
-                    
-                    # Send file message to response_url
-                    file_msg = {
-                        "msgtype": "file",
-                        "file": {"media_id": media_id}
-                    }
-                    
-                    # Robots' response_url usually needs no encryption for the POST
-                    resp = requests.post(response_url, json=file_msg, timeout=10)
-                    if resp.status_code >= 400:
-                        logger.error(f"[AIBOT_FILE] WeCom HTTP error: {resp.status_code} {resp.text}")
-                    else:
-                        try:
-                            resp_json = resp.json()
-                            if resp_json.get("errcode") != 0:
-                                logger.error(f"[AIBOT_FILE] WeCom API business error: {resp_json}")
-                            else:
-                                logger.info(f"[AIBOT_FILE] Sent file {filename} to WeCom media_id={media_id}")
-                        except Exception:
-                            logger.info(f"[AIBOT_FILE] Sent file {filename} to WeCom (non-json resp)")
-                except Exception as wecom_err:
-                    logger.error(f"[AIBOT_FILE] Failed to send file to WeCom: {wecom_err}")
+            # Note: WeCom intelligent robot response_url does NOT support file message type
+            # Only text/markdown messages are supported, so we skip file attachment sending
+            # The cloud link in the text response is sufficient
+            logger.info(f"[AIBOT_FILE] File available at cloud link (robot response_url does not support file attachments)")
             
             # 5. Final text cleanup (replace the entire tag with info) - Use ORIGINAL filename
             pattern_to_replace = re.escape(f'<FILE name="{original_filename}">') + r'[\s\S]*?' + re.escape('</FILE>')
