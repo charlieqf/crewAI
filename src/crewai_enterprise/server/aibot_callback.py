@@ -368,13 +368,21 @@ async def _process_llm_file_output(
             )
             
             # 2. Upload to Qiniu (UCS)
+            # Workaround: Qiniu blocks .html files on test domain, but allows .htm
+            # Convert .html -> .htm for upload, keep original filename for user display
             cloud_url = None
             cloud_key = None
             try:
-                mime_type = "text/html" if filename.endswith(".html") else "text/plain"
+                upload_filename = filename
+                if filename.lower().endswith(".html"):
+                    # Change extension to .htm for Qiniu upload
+                    upload_filename = filename[:-5] + ".htm"  # Remove '.html', add '.htm'
+                    logger.info(f"[AIBOT_FILE] Converting {filename} -> {upload_filename} for Qiniu upload")
+                
+                mime_type = "text/html" if filename.endswith(".html") or filename.endswith(".htm") else "text/plain"
                 upload_res = storage.upload_file(
                     data=file_content.encode("utf-8"),
-                    filename=filename,
+                    filename=upload_filename,  # Use .htm for upload
                     content_type=mime_type
                 )
                 cloud_url = upload_res.url
