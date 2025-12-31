@@ -68,6 +68,7 @@ class ChatContextManager:
         content: str,
         role: str = "user",
         wecom_msg_id: str | None = None,
+        bot_type: str | None = None,
     ) -> None:
         """
         Add a message to the chat history.
@@ -95,6 +96,7 @@ class ChatContextManager:
             content=content,
             role=role,
             wecom_msg_id=wecom_msg_id,
+            bot_type=bot_type,
             message_type="text",
         )
         logger.debug(
@@ -268,6 +270,7 @@ class ChatContextManager:
         filename: str,
         mime_type: str,
         wecom_msg_id: str | None = None,
+        bot_type: str | None = None,
     ) -> None:
         """
         Save file context to persistent storage.
@@ -288,6 +291,8 @@ class ChatContextManager:
             message_type="file",
             role="user",
             wecom_msg_id=wecom_msg_id,
+            bot_type=bot_type,
+            storage_key=storage_key,
         )
         logger.info(f"Saved persistent file context for {chat_id}: {filename} (msg_id={wecom_msg_id})")
 
@@ -324,9 +329,13 @@ class ChatContextManager:
             # Reversing ensures we see the LATEST message first.
             for msg in reversed(messages):
                 content = msg.get("content", "")
+                storage_key = msg.get("storage_key")
                 if content.strip().startswith('{"uri":') and "filename" in content:
                     try:
                         data = json.loads(content)
+                        # Add storage_key to the file context data
+                        if storage_key:
+                            data["storage_key"] = storage_key
                         # Filter logic
                         if wecom_msg_id:
                             if msg.get("wecom_msg_id") == wecom_msg_id:

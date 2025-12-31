@@ -31,3 +31,10 @@ openai>=1.0.0
 
 # CrewAI (required for ChatStorageTool)
 crewai>=0.1.0
+
+# Cloud Storage (UCS)
+qiniu>=7.10.0
+boto3>=1.28.0
+
+# Document Analysis Fallback
+pypdf>=3.15.0

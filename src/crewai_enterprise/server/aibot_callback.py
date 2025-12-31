@@ -37,6 +37,7 @@ from fastapi.responses import PlainTextResponse, Response
 from src.crewai_enterprise.utils.wecom_json_crypto import WXBizJsonMsgCrypt
 from src.crewai_enterprise.utils.llm_router import LLMError, get_router
 from src.crewai_enterprise.utils.chat_context import get_context_manager
+from src.crewai_enterprise.utils.storage_manager import get_storage_manager
 
 
 # Configure logging
@@ -52,9 +53,8 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 # Global storage for streaming tasks and processed messages
 # In production, use Redis instead of memory
-_stream_tasks: dict[str, dict] = {}
+_stream_tasks: dict[str, dict[str, Any]] = {}
 _processed_messages: dict[str, str] = {}  # msgid -> stream_id (dedup)
-
 
 
 # Bot configurations
@@ -79,14 +79,6 @@ BOT_CONFIGS: dict[str, dict[str, str]] = {
         "system_prompt": "你是Grok,一个风趣幽默且知识渊博的AI助手。请用中文回答。",
     },
 }
-
-# ============================================================================
-# WARNING: In-memory caches - NOT suitable for multi-worker/multi-instance!
-# For production with multiple Uvicorn workers or load-balanced instances,
-# replace these with Redis or a shared database.
-# ============================================================================
-_stream_tasks: dict[str, dict[str, Any]] = {}
-_processed_messages: dict[str, str] = {}  # msg_id -> stream_id
 
 
 def _generate_stream_id() -> str:
@@ -350,6 +342,7 @@ async def _call_llm_async(
             content=content,
             role="user",
             wecom_msg_id=wecom_msg_id,
+            bot_type=bot_type,
         )
 
         # Get conversation history
@@ -375,9 +368,9 @@ async def _call_llm_async(
              file_ctx = context_manager.get_active_file(chat_id, limit=50)
 
         use_file_context = False
-        if file_ctx and provider == "gemini":
+        if file_ctx:
              use_file_context = True
-             logger.info(f"[AIBOT_CTX] Using file context for chat={chat_id}: {file_ctx['filename']}")
+             logger.info(f"[AIBOT_CTX] Found file context for chat={chat_id}: {file_ctx['filename']} (UCS={not (file_ctx['uri'].startswith('content:') or file_ctx['uri'].startswith('base64:'))})")
 
         logger.info(
             f"[AIBOT_LLM_REQ] bot={bot_type} provider={provider} chat={chat_id} "
@@ -430,25 +423,69 @@ async def _call_llm_async(
                             file_mime_type=file_ctx["mime"],
                             filename=filename,
                             file_uri=None,
-                            system_prompt=system_prompt,
+                            system_prompt=None, # Already in history
                         )
                     )
                 else:
-                    # Legacy Cloud URI Context (should rarely be hit now)
+                    # Cloud URI Context (UCS Phase 1)
+                    # For Qiniu/S3, we might need to download it first if the LLM doesn't support direct URLs
+                    # Or for Gemini, if it's already a Gemini File API URI, use it directly.
+                    
                     full_prompt = f"对话历史:\n{history_text}\n\n(注意：用户之前上传了文件 {filename}，请基于该文件回答)"
                     
-                    response = await loop.run_in_executor(
-                        None,
-                        lambda: router.chat_with_file(
-                            provider=provider,
-                            text=full_prompt,
-                            file_data=None, 
-                            file_mime_type=file_ctx["mime"],
-                            filename=filename,
-                            file_uri=file_uri,
-                            system_prompt=system_prompt,
+                    is_gemini_uri = file_uri.startswith("https://generativelanguage.googleapis.com")
+                    
+                    if provider == "gemini" and is_gemini_uri:
+                        # Use existing Gemini File API URI
+                        response = await loop.run_in_executor(
+                            None,
+                            lambda: router.chat_with_file(
+                                provider=provider,
+                                text=full_prompt,
+                                file_data=None, 
+                                file_mime_type=file_ctx["mime"],
+                                filename=filename,
+                                file_uri=file_uri,
+                            )
                         )
-                    )
+                    else:
+                        try:
+                            # Fix: Use signed URL for private buckets (Auditor Refinement)
+                            storage = get_storage_manager()
+                            storage_key = file_ctx.get("storage_key")
+                            
+                            if storage_key:
+                                # Genuine cloud file with key -> Generate signed URL (1 hour)
+                                signed_url = storage.get_url(storage_key, expires_in_seconds=3600)
+                                logger.info(f"[AIBOT_CTX] Using signed URL for cloud access: {signed_url[:100]}...")
+                            else:
+                                # Legacy message (no key) -> Fallback to using URI directly
+                                signed_url = file_uri
+                                logger.info(f"[AIBOT_CTX] Fallback: using direct file URI (legacy context): {signed_url[:100]}...")
+                            
+                            # Use requests to download
+                            # For local file://, use open()
+                            if signed_url.startswith("file://"):
+                                with open(signed_url[7:], "rb") as f:
+                                    file_bytes = f.read()
+                            else:
+                                download_res = requests.get(signed_url, timeout=30)
+                                download_res.raise_for_status()
+                                file_bytes = download_res.content
+                            
+                            response = await loop.run_in_executor(
+                                None,
+                                lambda: router.chat_with_file(
+                                    provider=provider,
+                                    text=full_prompt,
+                                    file_data=file_bytes, 
+                                    file_mime_type=file_ctx["mime"],
+                                    filename=filename,
+                                )
+                            )
+                        except Exception as download_err:
+                            logger.error(f"[AIBOT_CTX] Failed to download cloud file: {download_err}")
+                            raise download_err
             except Exception as e:
                 logger.warning(f"[AIBOT_CTX] Failed to use file context (fallback to text): {e}")
                 use_file_context = False
@@ -473,6 +510,7 @@ async def _call_llm_async(
             sender_name=f"{bot_type}",
             content=response.content,
             role="assistant",
+            bot_type=bot_type,
         )
 
         # Update task with completed response
@@ -869,6 +907,43 @@ def _extract_image_urls_from_mixed(data: dict) -> list[str]:
     return urls
 
 
+def _upload_image_to_ucs(image_bytes: bytes) -> tuple[str | None, str | None, str, str]:
+    """Upload image to cloud storage and detect correct MIME type/extension.
+    
+    Returns: (cloud_url, storage_key, mime_type, filename)
+    """
+    mime_type = "image/jpeg"
+    ext = ".jpg"
+    
+    if image_bytes.startswith(b'\x89PNG\r\n\x1a\n'):
+        mime_type = "image/png"
+        ext = ".png"
+    elif image_bytes.startswith(b'GIF8'):
+        mime_type = "image/gif"
+        ext = ".gif"
+    elif image_bytes.startswith(b'\x42\x4d'):
+        mime_type = "image/bmp"
+        ext = ".bmp"
+    elif image_bytes.startswith(b'\xff\xd8\xff'):
+        mime_type = "image/jpeg"
+        ext = ".jpg"
+        
+    filename = f"upload_{int(time.time())}{ext}"
+    cloud_url = None
+    storage_key = None
+    
+    try:
+        storage = get_storage_manager()
+        upload_res = storage.upload_file(image_bytes, filename, content_type=mime_type)
+        cloud_url = upload_res.url
+        storage_key = upload_res.key
+        logger.info(f"[AIBOT_UCS] Uploaded image to cloud: {cloud_url} ({mime_type}, key={storage_key})")
+    except Exception as e:
+        logger.error(f"[AIBOT_UCS] Cloud upload failed: {e}")
+        
+    return cloud_url, storage_key, mime_type, filename
+
+
 async def _handle_mixed_message(
     bot_type: str,
     data: dict,
@@ -911,6 +986,8 @@ async def _handle_mixed_message(
     aes_key = _get_bot_aes_key(bot_type)
     image_base64 = None
     image_error = None
+    file_url = None
+    storage_key = None
 
     # Try the first image
     if image_urls:
@@ -918,6 +995,8 @@ async def _handle_mixed_message(
         if success:
             image_base64 = base64.b64encode(result).decode("utf-8")
             logger.info(f"[AIBOT_MIXED] bot={bot_type} image decrypted successfully")
+            # Upload to cloud storage (UCS Phase 1) - Fix: Persistence for mixed messages
+            file_url, storage_key, _, _ = _upload_image_to_ucs(result)
         else:
             image_error = result
             logger.warning(f"[AIBOT_MIXED] bot={bot_type} image decrypt failed: {result}")
@@ -938,7 +1017,7 @@ async def _handle_mixed_message(
 
     # Process with image using vision API
     return await _handle_vision_message(
-        bot_type, data, nonce, timestamp, prompt, image_base64, user_id, user_name
+        bot_type, data, nonce, timestamp, prompt, image_base64, user_id, user_name, file_url, storage_key
     )
 
 
@@ -1006,11 +1085,14 @@ async def _handle_image_message(
     # Image decrypted successfully
     image_base64 = base64.b64encode(result).decode("utf-8")
     prompt = "请描述并分析这张图片的内容"
+    
+    # Upload to cloud storage (UCS Phase 1)
+    file_url, storage_key, _, _ = _upload_image_to_ucs(result)
 
-    logger.info(f"[AIBOT_IMAGE] bot={bot_type} image decrypted, sending to vision API")
+    logger.info(f"[AIBOT_IMAGE] bot={bot_type} image ready, sending to vision API")
 
     return await _handle_vision_message(
-        bot_type, data, nonce, timestamp, prompt, image_base64, user_id, user_name
+        bot_type, data, nonce, timestamp, prompt, image_base64, user_id, user_name, file_url, storage_key
     )
 
 
@@ -1023,6 +1105,8 @@ async def _handle_vision_message(
     image_base64: str,
     user_id: str,
     user_name: str,
+    file_url: str | None = None,
+    storage_key: str | None = None,
 ) -> Response:
     """Handle vision (image+text) message with multimodal LLM.
 
@@ -1061,6 +1145,37 @@ async def _handle_vision_message(
 
     if wecom_msg_id:
         _processed_messages[wecom_msg_id] = stream_id
+
+    # Save persistent context (UCS Phase 1)
+    if file_url:
+        try:
+            # Fix: Use correct metadata for persistent context
+            mime_type = "image/jpeg"
+            filename = "image.jpg"
+            if ".png" in file_url:
+                mime_type = "image/png"
+                filename = "image.png"
+            elif ".gif" in file_url:
+                mime_type = "image/gif"
+                filename = "image.gif"
+            elif ".bmp" in file_url:
+                mime_type = "image/bmp"
+                filename = "image.bmp"
+
+            get_context_manager().save_file(
+                chat_id=chat_id,
+                sender_id=user_id,
+                sender_name=user_name,
+                file_uri=file_url,
+                filename=filename,
+                mime_type=mime_type,
+                wecom_msg_id=wecom_msg_id,
+                bot_type=bot_type,
+                storage_key=storage_key,
+            )
+            logger.info(f"[AIBOT_VISION] Saved persistent image context for chat={chat_id}")
+        except Exception as e:
+            logger.error(f"[AIBOT_VISION] Failed to save image context: {e}")
 
     # Start vision LLM call asynchronously
     asyncio.create_task(
@@ -1243,12 +1358,14 @@ async def _handle_file_message(
     
     # Check bot support
     config = BOT_CONFIGS[bot_type]
-    provider = config["provider"]
-    
-    if provider != "gemini":
+    provider = config.get("provider", "openai")
+
+    # Support check: All bots now support at least PDF/Text via fallback
+    # But Gemini is still the preferred provider for native multi-modal docs.
+    if provider != "gemini" and mime_type != "application/pdf" and not mime_type.startswith("text/"):
         response_text = (
             f"收到文件：{filename}\n\n"
-            f"抱歉，目前仅 Gemini 机器人支持文档深度分析（PDF/Excel/Word）。{bot_type} 暂不支持此功能。"
+            f"抱歉，目前的“大文档原生分析”能力仅在 Gemini 系列机器人上可用。{bot_type} 目前仅额外支持 PDF 和 纯文本分析。"
         )
         _stream_tasks[stream_id] = {
             "content": response_text,
@@ -1439,14 +1556,44 @@ async def _call_file_llm_async(
                 except:
                     pass
 
-        # Save context for future turns (PERSISTENT)
-        if file_uri:
-            get_context_manager().save_file(
-                chat_id, user_id, user_id, file_uri, filename, mime_type, wecom_msg_id
-            )
-            logger.info(f"[AIBOT_CTX] Saved persistent file context for chat={chat_id}")
+        # 2.5 Cloud Storage Upload (UCS Phase 1)
+        cloud_url = None
+        cloud_key = None
+        try:
+            storage = get_storage_manager()
+            upload_res = storage.upload_file(file_bytes, filename, content_type=mime_type)
+            cloud_url = upload_res.url
+            cloud_key = upload_res.key
+            logger.info(f"[AIBOT_FILE] Uploaded file to cloud: {cloud_url} (key={cloud_key})")
+        except Exception as e:
+            logger.error(f"[AIBOT_FILE] Cloud upload failed: {e}")
 
-        # 3. Call LLM
+        # 3. Save context for future turns (PERSISTENT - UCS Phase 1)
+        # We ALWAYS store the cloud URL in the DB if available, for cross-bot access.
+        # If cloud upload failed, we fallback to storing the temporary file_uri.
+        # Fix: Prevent DB bloat if fallback is a large Base64 blob.
+        db_file_uri = cloud_url or file_uri
+        should_save = True
+        if not cloud_url and db_file_uri and db_file_uri.startswith("base64:"):
+            if len(db_file_uri) > 1 * 1024 * 1024: # Limit to 1MB total (approx 750KB data)
+                logger.warning(f"[AIBOT_CTX] Skipping DB persistence for large Base64 fallback ({len(db_file_uri)} chars)")
+                should_save = False
+
+        if db_file_uri and should_save:
+            get_context_manager().save_file(
+                chat_id=chat_id,
+                user_id=user_id,
+                sender_name=user_id,
+                file_uri=db_file_uri,
+                filename=filename,
+                mime_type=mime_type,
+                wecom_msg_id=wecom_msg_id,
+                bot_type=bot_type,
+                storage_key=cloud_key,
+            )
+            logger.info(f"[AIBOT_CTX] Saved persistent file context for chat={chat_id} (UCS={bool(cloud_url)})")
+
+        # 4. Call LLM
         if is_inline_text:
             # Chat directly with text content
             # Ensure file_uri is not None before slicing
@@ -1461,11 +1608,11 @@ async def _call_file_llm_async(
             )
         else:
             # Chat with Cloud URI or Base64 URI
-            real_file_data = None
+            real_file_data = file_bytes # Fix: Always pass file_bytes if we have it (for non-Gemini PDF fallback)
             real_file_uri = file_uri
             
             if file_uri and file_uri.startswith("base64:"):
-                # Decode for immediate use
+                # Use data from URI if it's already base64 (redundant but safe)
                 real_file_data = base64.b64decode(file_uri[7:])
                 real_file_uri = None
             
@@ -1477,6 +1624,7 @@ async def _call_file_llm_async(
                     file_data=real_file_data,
                     file_uri=real_file_uri,
                     file_mime_type=mime_type,
+                    filename=filename, # Include filename for better context
                     system_prompt=system_prompt,
                 )
             )

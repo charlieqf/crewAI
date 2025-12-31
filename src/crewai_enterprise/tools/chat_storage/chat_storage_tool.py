@@ -167,6 +167,14 @@ class ChatStorageTool(BaseTool):
             cursor.execute("ALTER TABLE chat_messages ADD COLUMN wecom_msg_id TEXT")
         except sqlite3.OperationalError:
             pass  # Column already exists
+        try:
+            cursor.execute("ALTER TABLE chat_messages ADD COLUMN bot_type TEXT")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+        try:
+            cursor.execute("ALTER TABLE chat_messages ADD COLUMN storage_key TEXT")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
         self._sqlite_conn.commit()
         logger.info(f"SQLite initialized: {self.db_path}")
 
@@ -244,6 +252,8 @@ class ChatStorageTool(BaseTool):
         message_type: str,
         role: str = "user",
         wecom_msg_id: str | None = None,
+        bot_type: str | None = None,
+        storage_key: str | None = None,
     ) -> str:
         """Save a chat message to the storage backend(s)."""
         if not sender_id or not content:
@@ -261,6 +271,8 @@ class ChatStorageTool(BaseTool):
             "content": content,
             "role": role,
             "message_type": message_type,
+            "bot_type": bot_type,
+            "storage_key": storage_key,
             "timestamp": timestamp.isoformat(),
         }
 
@@ -306,8 +318,8 @@ class ChatStorageTool(BaseTool):
             try:
                 cursor.execute(
                     """
-                    INSERT INTO chat_messages (message_id, wecom_msg_id, chat_id, sender_id, sender_name, content, role, message_type, timestamp)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO chat_messages (message_id, wecom_msg_id, chat_id, sender_id, sender_name, content, role, message_type, bot_type, storage_key, timestamp)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         message_id,
@@ -318,6 +330,8 @@ class ChatStorageTool(BaseTool):
                         content,
                         role,
                         message_type,
+                        bot_type,
+                        storage_key,
                         timestamp,
                     ),
                 )
@@ -414,6 +428,7 @@ class ChatStorageTool(BaseTool):
                             "role": msg.get("role", "user"),
                             "timestamp": msg.get("timestamp", ""),
                             "wecom_msg_id": msg.get("wecom_msg_id"),
+                            "storage_key": msg.get("storage_key"),
                         }
                     )
                 messages.reverse()  # Oldest first
@@ -425,7 +440,7 @@ class ChatStorageTool(BaseTool):
             cursor = self._sqlite_conn.cursor()
             cursor.execute(
                 """
-                SELECT sender_name, content, timestamp, role, wecom_msg_id
+                SELECT sender_name, content, timestamp, role, wecom_msg_id, storage_key
                 FROM chat_messages
                 WHERE chat_id = ?
                 ORDER BY timestamp DESC
@@ -435,7 +450,7 @@ class ChatStorageTool(BaseTool):
             )
             rows = cursor.fetchall()
             for row in reversed(rows):
-                sender_name, content, timestamp, role, wecom_msg_id = row
+                sender_name, content, timestamp, role, wecom_msg_id, storage_key = row
                 # Same stable schema as Redis path
                 messages.append(
                     {
@@ -444,6 +459,7 @@ class ChatStorageTool(BaseTool):
                         "role": role or "user",  # Default for legacy rows
                         "timestamp": str(timestamp),
                         "wecom_msg_id": wecom_msg_id,
+                        "storage_key": storage_key,
                     }
                 )
 

@@ -480,13 +480,79 @@ class LLMRouter:
                 system_prompt, model, max_tokens, temperature,
                 file_data=file_data
             )
+        elif file_mime_type.startswith("image/"):
+            # If it's an image, we can use chat_with_image for any provider
+            img_b64 = None
+            if file_data:
+                img_b64 = base64.b64encode(file_data).decode("utf-8")
+            elif file_uri and file_uri.startswith("base64:"):
+                img_b64 = file_uri[7:]
+            
+            if img_b64:
+                return self.chat_with_image(
+                    provider=provider,
+                    text=text,
+                    image_base64=img_b64,
+                    image_mime_type=file_mime_type,
+                    system_prompt=system_prompt,
+                    model=model,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
+            else:
+                raise LLMError(f"Image data or base64 URI required for {provider} vision.")
+        elif file_mime_type == "application/pdf":
+            # PDF Fallback for non-Gemini (Extract Text)
+            logger.info(f"[LLM_ROUTER] Attempting PDF text extraction fallback for {provider}")
+            if not file_data and file_uri and file_uri.startswith("base64:"):
+                file_data = base64.b64decode(file_uri[7:])
+            
+            if file_data:
+                extracted_text = self._extract_text_from_pdf(file_data)
+                full_prompt = (
+                    f"(注意：用户上传了 PDF 文件 {filename}，已为您提取文本内容如下，请基于此回答):\n"
+                    f"```\n{extracted_text[:10000]}\n```\n\n用户提问: {text}"
+                )
+                return self.chat(
+                    provider=provider,
+                    messages=[{"role": "user", "content": full_prompt}],
+                    model=model,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
+            else:
+                raise LLMError(f"PDF data required for {provider} text extraction fallback.")
         else:
             return LLMResponse(
-                content=f"抱歉，目前仅 Gemini 机器人支持直接分析 {filename} ({file_mime_type}) 文件。{provider} 暂时不支持。",
+                content=f"抱歉，目前机器人的“大文件原生分析”能力仅在 Gemini 机器人上可用。{provider} 机器人目前仅额外支持分析图片和 PDF 文本。",
                 model=model,
                 provider=provider,
                 usage={}
             )
+
+    def _extract_text_from_pdf(self, file_data: bytes) -> str:
+        """Extract text from PDF bytes using pypdf."""
+        try:
+            import io
+            from pypdf import PdfReader
+            
+            reader = PdfReader(io.BytesIO(file_data))
+            text_parts = []
+            for page in reader.pages:
+                parsed = page.extract_text()
+                if parsed:
+                    text_parts.append(parsed)
+            
+            combined = "\n".join(text_parts).strip()
+            if not combined:
+                return "<PDF appears to be empty or contains only images/non-text content>"
+            return combined
+        except ImportError:
+            logger.error("pypdf not installed, cannot extract PDF text")
+            return "<Error: pypdf library is required for PDF text extraction on this bot type.>"
+        except Exception as e:
+            logger.error(f"PDF text extraction failed: {e}")
+            return f"<Error extracting text from PDF: {str(e)}>"
 
     def _upload_gemini_file(
         self,

@@ -1,0 +1,7 @@
+# Optional dependencies for cloud storage providers
+
+# Qiniu Cloud Storage (七牛云) - for China mainland deployment
+qiniu>=7.12.0
+
+# AWS S3 - for global deployment
+boto3>=1.34.0
