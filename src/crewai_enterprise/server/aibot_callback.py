@@ -65,7 +65,7 @@ BOT_CONFIGS: dict[str, dict[str, str]] = {
         "provider": "gemini",
         "token_env": "GEMINI_BOT_TOKEN",
         "aes_key_env": "GEMINI_BOT_ENCODING_AES_KEY",
-        "system_prompt": "你是Gemini,一个擅长长文本分析和理解的AI助手。请用中文回答。如果你需要生成文件(如HTML, PDF, 代码)发送给用户,请使用以下格式包裹文件内容: <FILE name=\"文件名\">文件内容</FILE>。系统会自动提取并作为附件发送。",
+        "system_prompt": "你是Gemini,一个擅长长文本分析和理解的AI助手。请用中文回答。\n\n重要提示：如果用户要求生成文件(如HTML报告、代码文件、PDF等),你必须严格按照以下格式输出:\n\n<FILE name=\"文件名.扩展名\">文件的完整内容</FILE>\n\n例如,如果生成HTML报告:\n<FILE name=\"分析报告.html\">\n<!DOCTYPE html>\n<html>...(完整HTML内容)...</html>\n</FILE>\n\n系统会自动提取该标签内的内容,保存为文件并发送给用户。请确保文件内容完整,并放在<FILE>标签内。",
     },
     "chatgpt": {
         "provider": "openai",
@@ -379,9 +379,9 @@ async def _process_llm_file_output(
                 )
                 cloud_url = upload_res.url
                 cloud_key = upload_res.key
-                # Generate a signed URL for the user to click (valid for 7 days by default in some providers, but usually 1hr)
+                # Generate a signed URL for the user to click (valid for 1 hour = 3600 seconds)
                 # StorageManager.get_url provides the signed link
-                qiniu_url_display = storage.get_url(cloud_key)
+                qiniu_url_display = storage.get_url(cloud_key, expires_in_seconds=3600)
                 logger.info(f"[AIBOT_FILE] Uploaded to Qiniu: {cloud_url}, Signed: {qiniu_url_display}")
             except Exception as qiniu_err:
                 logger.error(f"[AIBOT_FILE] Qiniu upload failed: {qiniu_err}")
