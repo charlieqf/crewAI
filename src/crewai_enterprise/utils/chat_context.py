@@ -363,6 +363,89 @@ class ChatContextManager:
             pass
             
         return None
+    
+    def get_custom_prompt(self, chat_id: str, bot_type: str) -> str | None:
+        """
+        Get custom system prompt for a specific chat and bot.
+        
+        Args:
+            chat_id: Chat/group ID
+            bot_type: Bot identifier (gemini, chatgpt, grok)
+            
+        Returns:
+            Custom prompt string, or None if not set
+        """
+        try:
+            conn = self.storage._sqlite_conn
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT custom_prompt FROM custom_prompts
+                WHERE chat_id = ? AND bot_type = ?
+            """, (chat_id, bot_type))
+            result = cursor.fetchone()
+            return result[0] if result else None
+        except Exception as e:
+            logger.error(f"[PROMPT] Failed to get custom prompt: {e}")
+            return None
+    
+    def set_custom_prompt(
+        self, 
+        chat_id: str, 
+        user_id: str, 
+        bot_type: str, 
+        custom_prompt: str
+    ) -> bool:
+        """
+        Set or update custom system prompt for a specific chat and bot.
+        
+        Args:
+            chat_id: Chat/group ID
+            user_id: User who is setting the prompt
+            bot_type: Bot identifier (gemini, chatgpt, grok)
+            custom_prompt: The custom prompt content
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            conn = self.storage._sqlite_conn
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT OR REPLACE INTO custom_prompts 
+                (chat_id, bot_type, user_id, custom_prompt, updated_at)
+                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """, (chat_id, bot_type, user_id, custom_prompt))
+            conn.commit()
+            logger.info(f"[PROMPT] Set custom prompt for {bot_type} in {chat_id}")
+            return True
+        except Exception as e:
+            logger.error(f"[PROMPT] Failed to set custom prompt: {e}")
+            return False
+    
+    def delete_custom_prompt(self, chat_id: str, bot_type: str) -> bool:
+        """
+        Delete custom system prompt (revert to default).
+        
+        Args:
+            chat_id: Chat/group ID
+            bot_type: Bot identifier (gemini, chatgpt, grok)
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            conn = self.storage._sqlite_conn
+            cursor = conn.cursor()
+            cursor.execute("""
+                DELETE FROM custom_prompts
+                WHERE chat_id = ? AND bot_type = ?
+            """, (chat_id, bot_type))
+            conn.commit()
+            logger.info(f"[PROMPT] Deleted custom prompt for {bot_type} in {chat_id}")
+            return True
+        except Exception as e:
+            logger.error(f"[PROMPT] Failed to delete custom prompt: {e}")
+            return False
 
 
 # Global singleton with thread-safe access

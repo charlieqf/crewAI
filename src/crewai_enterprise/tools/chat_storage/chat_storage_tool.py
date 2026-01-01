@@ -175,6 +175,24 @@ class ChatStorageTool(BaseTool):
             cursor.execute("ALTER TABLE chat_messages ADD COLUMN storage_key TEXT")
         except sqlite3.OperationalError:
             pass  # Column already exists
+        
+        # Create custom_prompts table for prompt management
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS custom_prompts (
+                chat_id TEXT NOT NULL,
+                bot_type TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                custom_prompt TEXT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (chat_id, bot_type)
+            )
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_custom_prompts_user
+            ON custom_prompts(user_id)
+        """)
+        
         self._sqlite_conn.commit()
         logger.info(f"SQLite initialized: {self.db_path}")
 

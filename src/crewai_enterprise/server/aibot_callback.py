@@ -71,13 +71,13 @@ BOT_CONFIGS: dict[str, dict[str, str]] = {
         "provider": "openai",
         "token_env": "CHATGPT_BOT_TOKEN",
         "aes_key_env": "CHATGPT_BOT_ENCODING_AES_KEY",
-        "system_prompt": "你是ChatGPT,一个友好的AI助手。请用简洁清晰的中文回答问题。",
+        "system_prompt": "你是ChatGPT,一个友好的AI助手。请用简洁清晰的中文回答问题。\n\n重要提示：如果用户要求生成文件(如HTML报告、代码文件、PDF等),你必须严格按照以下格式输出:\n\n<FILE name=\"文件名.扩展名\">文件的完整内容</FILE>\n\n例如,如果生成HTML报告:\n<FILE name=\"分析报告.html\">\n<!DOCTYPE html>\n<html>...(完整HTML内容)...</html>\n</FILE>\n\n系统会自动提取该标签内的内容,保存为文件并发送给用户。请确保文件内容完整,并放在<FILE>标签内。",
     },
     "grok": {
         "provider": "xai",
         "token_env": "GROK_BOT_TOKEN",
         "aes_key_env": "GROK_BOT_ENCODING_AES_KEY",
-        "system_prompt": "你是Grok,一个风趣幽默且知识渊博的AI助手。请用中文回答。",
+        "system_prompt": "你是Grok,一个风趣幽默且知识渊博的AI助手。请用中文回答。\n\n重要提示：如果用户要求生成文件(如HTML报告、代码文件、PDF等),你必须严格按照以下格式输出:\n\n<FILE name=\"文件名.扩展名\">文件的完整内容</FILE>\n\n例如,如果生成HTML报告:\n<FILE name=\"分析报告.html\">\n<!DOCTYPE html>\n<html>...(完整HTML内容)...</html>\n</FILE>\n\n系统会自动提取该标签内的内容,保存为文件并发送给用户。请确保文件内容完整,并放在<FILE>标签内。",
     },
 }
 
@@ -428,6 +428,65 @@ async def _process_llm_file_output(
     return cleaned_content
 
 
+def _handle_prompt_command(
+    command: str,
+    args: str,
+    bot_type: str,
+    chat_id: str,
+    user_id: str,
+) -> dict | None:
+    """Handle prompt management commands.
+    
+    Args:
+        command: Command name (show_prompt, set_prompt, reset_prompt)
+        args: Command arguments (for set_prompt)
+        bot_type: Bot identifier
+        chat_id: Chat ID
+        user_id: User ID
+    
+    Returns:
+        dict with 'content' key containing response message, or None if command not recognized
+    """
+    context_manager = get_context_manager()
+    
+    if command == "show_prompt":
+        # Show current prompt
+        custom_prompt = context_manager.get_custom_prompt(chat_id, bot_type)
+        if custom_prompt:
+            response = f"📝 当前使用的自定义 Prompt:\n\n{custom_prompt}\n\n💡 使用 /reset_prompt 可以恢复默认设置"
+        else:
+            default_prompt = BOT_CONFIGS[bot_type]["system_prompt"]
+            response = f"📝 当前使用默认 Prompt:\n\n{default_prompt}\n\n💡 使用 /set_prompt <内容> 可以自定义"
+        return {"content": response}
+    
+    elif command == "set_prompt":
+        # Set custom prompt
+        if not args or len(args.strip()) < 10:
+            return {"content": "❌ 请提供有效的 prompt 内容\n\n用法：/set_prompt 你是一个专业的Python开发专家..."}
+        
+        if len(args) > 2000:
+            return {"content": "❌ Prompt 内容过长，请限制在 2000 字符以内"}
+        
+        success = context_manager.set_custom_prompt(chat_id, user_id, bot_type, args.strip())
+        if success:
+            response = f"✅ 已设置自定义 Prompt\n\n预览:\n{args.strip()[:200]}{'...' if len(args) > 200 else ''}\n\n💡 使用 /show_prompt 查看完整内容"
+        else:
+            response = "❌ 设置失败，请稍后重试"
+        return {"content": response}
+    
+    elif command == "reset_prompt":
+        # Reset to default prompt
+        success = context_manager.delete_custom_prompt(chat_id, bot_type)
+        default_prompt = BOT_CONFIGS[bot_type]["system_prompt"]
+        if success:
+            response = f"✅ 已恢复默认 Prompt\n\n{default_prompt[:200]}{'...' if len(default_prompt) > 200 else ''}"
+        else:
+            response = "❌ 重置失败，或当前已在使用默认 Prompt"
+        return {"content": response}
+    
+    return None
+
+
 async def _call_llm_async(
     stream_id: str,
     bot_type: str,
@@ -441,9 +500,39 @@ async def _call_llm_async(
     response_url: str | None = None,
 ) -> None:
     """Call the appropriate LLM asynchronously and update task result."""
+    
+    
+    # Check for prompt management commands
+    # Commands can appear after @mention, so search for / anywhere in content
+    content_stripped = content.strip()
+    slash_index = content_stripped.find("/")
+    
+    if slash_index != -1:
+        # Extract command part (everything from / onwards)
+        command_part = content_stripped[slash_index:]
+        parts = command_part.split(maxsplit=1)
+        command = parts[0][1:]  # Remove leading /
+        args = parts[1] if len(parts) > 1 else ""
+        
+        cmd_result = _handle_prompt_command(command, args, bot_type, chat_id, user_id)
+        if cmd_result:
+            # Send command response directly
+            await _send_stream_response(stream_id, bot_type, cmd_result["content"], finish=True, response_url=response_url)
+            logger.info(f"[PROMPT_CMD] Handled command /{command} for {bot_type} in {chat_id}")
+            return
+    
     config = BOT_CONFIGS[bot_type]
     provider = config["provider"]
-    system_prompt = config["system_prompt"]
+    
+    # Prompt priority: Custom > Default
+    context_manager = get_context_manager()
+    custom_prompt = context_manager.get_custom_prompt(chat_id, bot_type)
+    if custom_prompt:
+        system_prompt = custom_prompt
+        logger.info(f"[PROMPT] Using custom prompt for {bot_type} in {chat_id}")
+    else:
+        system_prompt = config["system_prompt"]
+        logger.info(f"[PROMPT] Using default prompt for {bot_type}")
 
     try:
         router = get_router()
