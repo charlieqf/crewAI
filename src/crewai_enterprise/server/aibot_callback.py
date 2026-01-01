@@ -456,7 +456,7 @@ def _handle_prompt_command(
             response = f"📝 当前使用的自定义 Prompt:\n\n{custom_prompt}\n\n💡 使用 /reset_prompt 可以恢复默认设置"
         else:
             default_prompt = BOT_CONFIGS[bot_type]["system_prompt"]
-            response = f"📝 当前使用默认 Prompt:\n\n{default_prompt}\n\n💡 使用 /set_prompt <内容> 可以自定义"
+            response = f"📝 当前使用默认 Prompt:\n\n{default_prompt}\n\n💡 使用 /set_prompt <内容> 可以自定义\n💡 使用 /reset_prompt 可以恢复默认（如果已自定义）"
         return {"content": response}
     
     elif command == "set_prompt":
