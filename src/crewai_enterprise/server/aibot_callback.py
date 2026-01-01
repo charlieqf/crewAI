@@ -516,8 +516,12 @@ async def _call_llm_async(
         
         cmd_result = _handle_prompt_command(command, args, bot_type, chat_id, user_id)
         if cmd_result:
-            # Send command response directly
-            await _send_stream_response(stream_id, bot_type, cmd_result["content"], finish=True, response_url=response_url)
+            # Update stream task with command response
+            if stream_id in _stream_tasks:
+                _stream_tasks[stream_id]["content"] = cmd_result["content"]
+                _stream_tasks[stream_id]["finished"] = True
+                _stream_tasks[stream_id]["completed_at"] = time.time()
+            
             logger.info(f"[PROMPT_CMD] Handled command /{command} for {bot_type} in {chat_id}")
             return
     
