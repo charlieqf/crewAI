@@ -60,23 +60,26 @@ _processed_messages: dict[str, str] = {}  # msgid -> stream_id (dedup)
 
 # Bot configurations
 # EncodingAESKey and Token must match WeCom admin console
-BOT_CONFIGS: dict[str, dict[str, str]] = {
+BOT_CONFIGS: dict[str, dict[str, str | bool]] = {
     "gemini": {
         "provider": "gemini",
         "token_env": "GEMINI_BOT_TOKEN",
         "aes_key_env": "GEMINI_BOT_ENCODING_AES_KEY",
+        "supports_file_analysis": True,  # Gemini supports native file analysis
         "system_prompt": "你是Gemini,一个擅长长文本分析和理解的AI助手。请用中文回答。\n\n重要提示：如果用户要求生成文件(如HTML报告、代码文件、PDF等),你必须严格按照以下格式输出:\n\n<FILE name=\"文件名.扩展名\">文件的完整内容</FILE>\n\n例如,如果生成HTML报告:\n<FILE name=\"分析报告.html\">\n<!DOCTYPE html>\n<html>...(完整HTML内容)...</html>\n</FILE>\n\n系统会自动提取该标签内的内容,保存为文件并发送给用户。请确保文件内容完整,并放在<FILE>标签内。",
     },
     "chatgpt": {
         "provider": "openai",
         "token_env": "CHATGPT_BOT_TOKEN",
         "aes_key_env": "CHATGPT_BOT_ENCODING_AES_KEY",
+        "supports_file_analysis": False,  # ChatGPT does not support large file native analysis
         "system_prompt": "你是ChatGPT,一个友好的AI助手。请用简洁清晰的中文回答问题。\n\n重要提示：如果用户要求生成文件(如HTML报告、代码文件、PDF等),你必须严格按照以下格式输出:\n\n<FILE name=\"文件名.扩展名\">文件的完整内容</FILE>\n\n例如,如果生成HTML报告:\n<FILE name=\"分析报告.html\">\n<!DOCTYPE html>\n<html>...(完整HTML内容)...</html>\n</FILE>\n\n系统会自动提取该标签内的内容,保存为文件并发送给用户。请确保文件内容完整,并放在<FILE>标签内。",
     },
     "grok": {
         "provider": "xai",
         "token_env": "GROK_BOT_TOKEN",
         "aes_key_env": "GROK_BOT_ENCODING_AES_KEY",
+        "supports_file_analysis": False,  # Grok does not support large file native analysis
         "system_prompt": "你是Grok,一个风趣幽默且知识渊博的AI助手。请用中文回答。\n\n重要提示：如果用户要求生成文件(如HTML报告、代码文件、PDF等),你必须严格按照以下格式输出:\n\n<FILE name=\"文件名.扩展名\">文件的完整内容</FILE>\n\n例如,如果生成HTML报告:\n<FILE name=\"分析报告.html\">\n<!DOCTYPE html>\n<html>...(完整HTML内容)...</html>\n</FILE>\n\n系统会自动提取该标签内的内容,保存为文件并发送给用户。请确保文件内容完整,并放在<FILE>标签内。",
     },
 }
@@ -449,7 +452,35 @@ def _handle_prompt_command(
     """
     context_manager = get_context_manager()
     
-    if command == "show_prompt":
+    if command == "help":
+        # Show help message with all available commands
+        help_text = """🤖 **AI Bot 使用指南**
+
+**💬 Prompt 管理命令：**
+• `/show_prompt` - 查看当前系统提示词
+• `/set_prompt <内容>` - 自定义系统提示词
+• `/reset_prompt` - 恢复默认系统提示词
+
+**📁 文件上下文管理：**
+• `/new` - 清除文件上下文，开始新对话
+• Quote文件消息 - 明确引用特定文件
+• 自动上下文：文件上传后10分钟内自动使用
+
+**📝 文件分析能力：**
+• Gemini：✅ 支持大文件原生分析（PDF等）
+• ChatGPT：❌ 仅支持图片和文本对话
+• Grok：❌ 仅支持图片和文本对话
+
+**💡 使用技巧：**
+1. 发送文件后10分钟内无需重复引用
+2. 使用 /new 切换话题，避免文件干扰
+3. 超过10分钟需重新发送或Quote文件
+4. 自定义 Prompt 可让AI扮演特定角色
+
+有问题随时使用 /help 查看本帮助！"""
+        return {"content": help_text}
+    
+    elif command == "show_prompt":
         # Show current prompt
         custom_prompt = context_manager.get_custom_prompt(chat_id, bot_type)
         if custom_prompt:
@@ -482,6 +513,20 @@ def _handle_prompt_command(
             response = f"✅ 已恢复默认 Prompt\n\n{default_prompt[:200]}{'...' if len(default_prompt) > 200 else ''}"
         else:
             response = "❌ 重置失败，或当前已在使用默认 Prompt"
+        return {"content": response}
+    
+    elif command == "new":
+        # Clear file context and start new conversation
+        try:
+            # Clear file contexts for this chat
+            success = context_manager.clear_file_context(chat_id)
+            if success:
+                response = "✅ 已清除文件上下文，开始新对话\n\n💡 之前的文件将不再自动使用，如需引用请重新发送或 Quote"
+            else:
+                response = "✅ 已清除上下文\n\n💡 当前没有活跃的文件上下文"
+        except Exception as e:
+            logger.error(f"[PROMPT_CMD] Failed to clear context: {e}")
+            response = "❌ 清除失败，请稍后重试"
         return {"content": response}
     
     return None
@@ -576,14 +621,33 @@ async def _call_llm_async(
              if file_ctx:
                  logger.info(f"[AIBOT_CTX] Found quoted file by Filename: {file_ctx['filename']}")
 
-        # 2. Latest File (Sticky/Global)
+        # 2. Latest File (Sticky/Global) - with 10-minute time window
         if not file_ctx:
              file_ctx = context_manager.get_active_file(chat_id, limit=50)
+             
+             # Check if file is within 10-minute window
+             if file_ctx:
+                file_timestamp = file_ctx.get("timestamp", 0)
+                elapsed_minutes = (time.time() - file_timestamp) / 60
+                
+                if elapsed_minutes > 10:
+                    logger.info(f"[AIBOT_CTX] File expired (age: {elapsed_minutes:.1f}min > 10min), ignoring sticky context")
+                    file_ctx = None  # Expired, don't use
 
         use_file_context = False
         if file_ctx:
-             use_file_context = True
-             logger.info(f"[AIBOT_CTX] Found file context for chat={chat_id}: {file_ctx['filename']} (UCS={not (file_ctx['uri'].startswith('content:') or file_ctx['uri'].startswith('base64:'))})")
+            # Check if provider supports file analysis
+            supports_files = config.get("supports_file_analysis", False)
+            
+            if supports_files:
+                use_file_context = True
+                logger.info(f"[AIBOT_CTX] Found file context for chat={chat_id}: {file_ctx['filename']} (UCS={not (file_ctx['uri'].startswith('content:') or file_ctx['uri'].startswith('base64:'))})")
+            else:
+                logger.info(
+                    f"[AIBOT_CTX] Skipping file context - {bot_type} does not support "
+                    f"native file analysis (file: {file_ctx['filename']})"
+                )
+                file_ctx = None  # Clear it, don't use
 
         logger.info(
             f"[AIBOT_LLM_REQ] bot={bot_type} provider={provider} chat={chat_id} "

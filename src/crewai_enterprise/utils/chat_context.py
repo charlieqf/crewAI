@@ -446,6 +446,31 @@ class ChatContextManager:
         except Exception as e:
             logger.error(f"[PROMPT] Failed to delete custom prompt: {e}")
             return False
+    
+    def clear_file_context(self, chat_id: str) -> bool:
+        """
+        Clear all file contexts for a specific chat.
+        
+        Args:
+            chat_id: Chat/group ID
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            conn = self.storage._sqlite_conn
+            cursor = conn.cursor()
+            cursor.execute("""
+                DELETE FROM chat_messages
+                WHERE chat_id = ? AND message_type = 'file'
+            """, (chat_id,))
+            rows_deleted = cursor.rowcount
+            conn.commit()
+            logger.info(f"[CTX] Cleared {rows_deleted} file context(s) for chat {chat_id}")
+            return True
+        except Exception as e:
+            logger.error(f"[CTX] Failed to clear file context: {e}")
+            return False
 
 
 # Global singleton with thread-safe access
