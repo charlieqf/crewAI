@@ -26,6 +26,7 @@ import json
 import logging
 import mimetypes
 import os
+import re
 import time
 from typing import Any
 
@@ -532,6 +533,75 @@ def _handle_prompt_command(
     return None
 
 
+def _extract_urls(text: str) -> list[str]:
+    """Extract all URLs from text.
+    
+    Args:
+        text: Input text to search for URLs
+        
+    Returns:
+        List of URLs found in text
+    """
+    url_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+'
+    return re.findall(url_pattern, text)
+
+
+async def _fetch_url_content(url: str) -> str | None:
+    """Fetch content from URL asynchronously.
+    
+    Args:
+        url: URL to fetch
+        
+    Returns:
+        Text content from URL, or None if fetch failed
+    """
+    try:
+        logger.info(f"[URL_FETCH] Fetching content from: {url}")
+        
+        # Fetch URL content in thread pool to avoid blocking
+        loop = asyncio.get_running_loop()
+        response = await loop.run_in_executor(
+            None,
+            lambda: requests.get(
+                url, 
+                timeout=10,
+                headers={
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                }
+            )
+        )
+        
+        if response.status_code == 200:
+            # Try to extract text content
+            content_type = response.headers.get('content-type', '')
+            
+            if 'text/html' in content_type:
+                # Simple HTML text extraction (remove tags)
+                import html
+                text = response.text
+                # Remove script and style tags
+                text = re.sub(r'<script[^>]*>.*?</script>', '', text, flags=re.DOTALL | re.IGNORECASE)
+                text = re.sub(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL | re.IGNORECASE)
+                # Remove HTML tags
+                text = re.sub(r'<[^>]+>', ' ', text)
+                # Clean up whitespace
+                text = re.sub(r'\s+', ' ', text).strip()
+                content = html.unescape(text)
+            else:
+                # Plain text or other
+                content = response.text
+            
+            logger.info(f"[URL_FETCH] Successfully fetched {len(content)} chars from {url}")
+            return content[:10000]  # Limit to 10000 chars
+        else:
+            logger.warning(f"[URL_FETCH] HTTP {response.status_code} from {url}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"[URL_FETCH] Failed to fetch {url}: {e}")
+        return None
+
+
 async def _call_llm_async(
     stream_id: str,
     bot_type: str,
@@ -598,11 +668,35 @@ async def _call_llm_async(
             bot_type=bot_type,
         )
 
+        # Detect and fetch URL content if present
+        urls = _extract_urls(content)
+        url_contents = []
+        if urls:
+            logger.info(f"[URL_DETECT] Found {len(urls)} URL(s) in message")
+            for url in urls[:3]:  # Limit to first 3 URLs to avoid overload
+                url_content = await _fetch_url_content(url)
+                if url_content:
+                    url_contents.append({
+                        "url": url,
+                        "content": url_content[:8000]  # Limit to 8000 chars per URL
+                    })
+        
         # Get conversation history
         messages = context_manager.get_messages_for_llm(
             chat_id,
             system_prompt=system_prompt,
         )
+        
+        # If URLs were fetched, prepend their content to the user's message context
+        if url_contents:
+            url_context = "\n\n---\n\n".join([
+                f"**网页内容来自 {uc['url']}:**\n\n{uc['content']}" 
+                for uc in url_contents
+            ])
+            # Prepend URL content to the latest user message
+            if messages and messages[-1]["role"] == "user":
+                messages[-1]["content"] = f"{url_context}\n\n---\n\n用户问题：{messages[-1]['content']}"
+                logger.info(f"[URL_CTX] Added {len(url_contents)} URL(s) content to context")
 
         # 1. Quoted File (Specific)
         file_ctx = None
