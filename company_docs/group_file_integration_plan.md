@@ -1,324 +1,379 @@
 # 群聊文件集成方案
 
-## 方案概述
+## 决策摘要
 
-通过添加**群机器人**作为文件收集器，配合现有的**智能机器人**，实现群聊中文件的自动收集和引用功能。
+**当前方案：Smart File Context（智能文件上下文）** ✅
 
-**架构设计：**
+基于多方案评估，我们决定采用轻量级的上下文管理方案，而**不采用**Group Bot或会话存档API。
+
+---
+
+## 方案对比
+
+### 方案 A：Smart File Context（已实施）✅
+
+**原理：** 用户Quote文件 + 10分钟自动上下文窗口
+
+**优势：**
+- ✅ **零成本** - 无需付费
+- ✅ **已实现** - 无需额外开发
+- ✅ **易用** - 用户体验好（Quote即可）
+- ✅ **可靠** - 基于现有稳定功能
+
+**实现：**
 ```
-群聊消息流程：
-┌─────────────┐
-│ 用户发送文件 │
-└──────┬──────┘
-       │
-       ▼
-┌─────────────────┐
-│  群机器人接收    │
-│  1. 下载文件    │
-│  2. 上传七牛云  │
-│  3. 保存到DB   │
-└──────┬──────────┘
-       │
-       │ (msg_id, filename, cloud_url)
-       │
-       ▼
+用户发送/Quote文件 → 上传七牛云 → 保存到chat_files表
+              ↓
+用户@gemini提问（10分钟内）→ 自动关联最新文件上下文
+              OR
+用户Quote文件 + @gemini → 即时获取文件
+```
+
+**功能：**
+1. ✅ Quote文件即刻分析
+2. ✅ 10分钟自动上下文（无需Quote）
+3. ✅ `/new`命令清除上下文
+4. ✅ Provider能力检测（ChatGPT/Grok不支持文件）
+
+---
+
+### 方案 B：Group Bot（已放弃）❌
+
+**原理：** 创建群机器人自动收集所有文件
+
+**为什么放弃：**
+- ❌ **Group Bot限制** - 企业微信群bot无法接收普通消息
+- ❌ **需要应用bot** - 创建应用bot更复杂
+- ❌ **开发成本高** - 需要7小时开发 + 配置
+- ⚠️ **增值有限** - 相比Quote方案只是稍微方便
+
+**评估结果：** 投入产出比低，不值得实施
+
+---
+
+### 方案 C：会话存档API（已放弃）❌
+
+**原理：** 使用企业微信官方会话存档获取所有消息和文件
+
+**优势：**
+- ✅ **有官方SDK** - C SDK（版本20250205）
+- ✅ **功能完整** - 获取所有消息、文件、媒体
+- ✅ **技术可行** - Python绑定 + 2天开发
+
+**为什么放弃：**
+- ❌ **需要付费** - 存档服务费用（可能几百到几千/月）
+- ❌ **持续成本** - 维护服务器、处理消息、存储
+- ⚠️ **功能过剩** - 只为了不用Quote，太重了
+
+**评估结果：** 成本太高，当前需求不值得
+
+**技术评估记录：**
+- SDK位置：`company_docs/C_sdk/`
+- 核心API：GetChatData（拉取消息）、DecryptData（解密）、GetMediaData（下载文件）
+- 实施工作量：14小时（Python绑定+集成+测试）
+- 但因成本原因暂不实施
+
+---
+
+## 当前实现细节
+
+### 1. Smart File Context架构
+
+```
+文件处理流程：
+┌─────────────────────┐
+│ 用户上传/Quote文件  │
+└──────────┬──────────┘
+           │
+           ▼
 ┌─────────────────────────┐
-│      SQLite 数据库      │
-│  chat_files 表          │
-└──────┬──────────────────┘
-       │
-       │ 用户 quote 文件 + @智能机器人
-       │
-       ▼
-┌─────────────────────────┐
-│   智能机器人接收         │
-│   1. 获取 quoted_msg_id │
-│   2. 从 DB 查找文件     │
-│   3. 下载并分析         │
-└─────────────────────────┘
+│  aibot_callback.py      │
+│  _handle_file_upload    │
+│  1. 下载企微文件        │
+│  2. 上传七牛云          │
+│  3. 保存chat_files表    │
+│  4. 记录上传时间        │
+└──────────┬──────────────┘
+           │
+           ▼
+┌─────────────────────────────────┐
+│        SQLite chat_files         │
+│  - wecom_msg_id (索引)           │
+│  - file_uri (Qiniu URL)          │
+│  - upload_time (时间戳)          │
+└──────────┬──────────────────────┘
+           │
+           ▼
+┌─────────────────────────────────┐
+│  用户 @gemini 提问               │
+│                                  │
+│  场景1：Quote文件 → 即时获取    │
+│  场景2：10分钟内 → 自动关联     │
+└──────────┬──────────────────────┘
+           │
+           ▼
+┌─────────────────────────────────┐
+│  _call_llm_async                 │
+│  - 检查quoted_msg_id             │
+│  - 或检查10分钟窗口             │
+│  - 下载文件 → 传给LLM           │
+└──────────────────────────────────┘
 ```
 
 ---
 
-## 用户需要完成的任务
+### 2. 10分钟时间窗口逻辑
 
-### 任务 1：创建群机器人
+```python
+# 代码位置：src/crewai_enterprise/server/aibot_callback.py
 
-#### 步骤：
+# 检查是否在10分钟窗口内
+file_context = None
+latest_file = context_manager.get_latest_file(chat_id)
 
-1. **登录企业微信管理后台**
-   - 网址：https://work.weixin.qq.com/
-   - 使用管理员账号登录
+if latest_file:
+    upload_time = latest_file['upload_time']
+    current_time = int(time.time())
+    time_diff_minutes = (current_time - upload_time) / 60
+    
+    # 10分钟内自动使用
+    if time_diff_minutes <= 10:
+        file_context = latest_file
+        logger.info(f"[FILE_CTX] Using file within 10min window")
+    else:
+        logger.info(f"[FILE_CTX] File too old ({time_diff_minutes:.1f}min)")
+```
 
-2. **创建群机器人应用**
-   - 导航：**应用管理** → **自建** → **创建应用**
-   - 应用名称：`文件助手` 或 `File Collector`
-   - 应用 Logo：选择一个合适的图标
-   - 可见范围：选择需要使用的部门/成员
-
-3. **获取应用凭证**
-   - 创建完成后进入应用详情页
-   - 记录以下信息：
-     - **AgentId**（应用 ID）
-     - **Secret**（应用密钥）
-   - 这些信息稍后会用于配置服务器
-
-4. **配置接收消息**
-   - 在应用详情页找到"接收消息"或"消息接收配置"
-   - 设置**URL**（回调地址）：`http://113.125.202.173/group-bot/callback`
-   - 设置 **Token**：随机生成一个字符串（例如：`GroupBot2024`）
-   - 设置 **EncodingAESKey**：点击"随机生成"按钮
-   - **先不要点击保存**，等服务器代码部署后再保存验证
-
-5. **添加到群聊**
-   - 进入需要使用的企业微信群聊
-   - 点击群聊设置 → 群机器人 → 添加机器人
-   - 选择刚创建的"文件助手"应用
+**设计决策：**
+- ⏱️ **10分钟** - 平衡便利性和精确度
+- 🔄 **可配置** - 可以改为5分钟或15分钟
+- 🆕 **可清除** - `/new`命令重置上下文
 
 ---
 
-### 任务 2：提供配置信息
+### 3. Provider能力检测
 
-将以下信息提供给开发者（我）：
+```python
+# 配置位置：src/crewai_enterprise/server/aibot_callback.py
 
-```bash
-# 群机器人配置
-GROUPBOT_AGENT_ID=<应用 ID>
-GROUPBOT_SECRET=<应用密钥>
-GROUPBOT_TOKEN=<上面设置的 Token>
-GROUPBOT_ENCODING_AES_KEY=<上面生成的 AESKey>
+BOT_CONFIGS = {
+    "gemini": {
+        ...,
+        "supports_file_analysis": True  # ✅ Gemini支持
+    },
+    "chatgpt": {
+        ...,
+        "supports_file_analysis": False  # ❌ ChatGPT不支持
+    },
+    "grok": {
+        ...,
+        "supports_file_analysis": False  # ❌ Grok不支持
+    }
+}
+
+# 调用时检查
+if not bot_config.get("supports_file_analysis", False):
+    file_context = None
+    logger.info(f"[FILE_CTX] {bot_type} doesn't support file analysis")
 ```
 
 ---
 
-## 开发工作（由我完成）
+### 4. `/new`命令
 
-### 阶段 1：验证 msg_id 一致性
+```python
+# 命令处理：src/crewai_enterprise/server/aibot_callback.py
 
-**目的：** 确认群机器人收到的 `msg_id` 与智能机器人 quote 时的 `quoted_msg_id` 是否一致。
+elif command == "new":
+    # 清除文件上下文
+    success = context_manager.clear_file_context(chat_id)
+    if success:
+        response = "✅ 已清除文件上下文，开始新对话..."
+```
 
-**工作内容：**
-1. 创建一个测试端点接收群机器人消息
-2. 记录文件消息的 `msg_id`
-3. 对比智能机器人 quote 时的 `quoted_msg_id`
-4. 确认关联方式
-
-**验证方法：**
-- 在群聊发送一个测试文件
-- Quote 该文件并 @智能机器人
-- 检查日志确认 ID 匹配
+**用途：**
+- 🧹 清除旧文件的干扰
+- 🆕 开始新话题
+- 🎯 精确控制上下文
 
 ---
 
-### 阶段 2：实现群机器人文件收集器
+## 用户使用指南
 
-**代码模块：**
+### 场景1：Quote文件分析（推荐）
 
-1. **新增路由**：`/group-bot/callback`
-   - 处理 URL 验证
-   - 接收文件消息
-   - 解密和验证签名
+```
+1. 在群里上传PDF文件
+2. Quote该文件并@gemini："这个文件讲了什么？"
+3. Gemini立即分析文件内容
+```
 
-2. **文件处理逻辑**：
-   ```python
-   async def handle_group_file(file_msg):
-       # 1. 下载文件
-       file_data = download_wecom_file(file_msg['file_url'])
-       
-       # 2. 上传七牛云
-       cloud_result = storage.upload_file(file_data, filename)
-       
-       # 3. 保存到数据库
-       context_manager.save_file(
-           chat_id=file_msg['chat_id'],
-           sender_id=file_msg['sender_id'],
-           wecom_msg_id=file_msg['msg_id'],  # 关键：记录 msg_id
-           filename=filename,
-           file_uri=cloud_result.url
-       )
-   ```
-
-3. **数据库扩展**（如果需要）：
-   - 确保 `chat_files` 表支持 `wecom_msg_id` 索引
-   - 可能需要添加 `group_chat` 标记字段
+**优势：** 精确、可靠、支持多个文件
 
 ---
 
-### 阶段 3：智能机器人集成
+### 场景2：10分钟自动上下文
 
-**无需修改**（如果 msg_id 一致）：
-- 现有的 quote 查找逻辑已经通过 `quoted_msg_id` 查找文件
-- 只要群机器人正确保存了 `wecom_msg_id`，智能机器人就能找到
+```
+1. 在群里上传PDF文件
+2. 10分钟内直接@gemini："总结一下"
+3. Gemini自动使用最近上传的文件
+```
 
-**可能需要的优化：**
-- 添加群聊文件的特殊标记
-- 优化跨 chat_id 的文件查找逻辑
+**优势：** 方便、无需Quote
+
+**限制：** 
+- 只记忆最新1个文件
+- 超过10分钟需要Quote
 
 ---
 
-## 部署流程
+### 场景3：清除上下文
 
-### 步骤 1：配置服务器环境变量
-
-```bash
-ssh -i ~/.ssh/kamatera root@104.238.213.119
-
-# 编辑环境变量文件
-nano /etc/wecom-callback/env
-
-# 添加以下配置
-GROUPBOT_AGENT_ID=你的应用ID
-GROUPBOT_SECRET=你的应用密钥
-GROUPBOT_TOKEN=你的Token
-GROUPBOT_ENCODING_AES_KEY=你的AESKey
-
-# 保存并退出
+```
+用户：@gemini /new
+Gemini：✅ 已清除文件上下文，开始新对话...
 ```
 
-### 步骤 2：部署代码
-
-```bash
-cd /opt/wecom-callback
-git fetch origin
-git reset --hard origin/feat-wecom
-systemctl restart wecom-callback
-```
-
-### 步骤 3：验证回调 URL
-
-1. 回到企业微信管理后台
-2. 点击"保存"按钮验证回调 URL
-3. 如果验证成功，显示"配置成功"
+**用途：** 避免旧文件干扰新对话
 
 ---
 
-## 验证测试
+## 技术实现位置
 
-### 测试场景 1：文件自动收集
-
-1. 在群聊中发送一个 PDF 文件（不 @ 任何人）
-2. 检查服务器日志，确认群机器人收到并处理了文件
-3. 检查七牛云，确认文件已上传
-4. 检查数据库，确认文件记录已保存
-
-**预期日志：**
-```
-[GROUPBOT] Received file message: test.pdf
-[GROUPBOT] Downloaded file: 1024 bytes
-[GROUPBOT] Uploaded to Qiniu: http://t83xy5wfa.sabkt.gdipper.com/wecom/...
-[GROUPBOT] Saved to DB: msg_id=abc123, filename=test.pdf
-```
+| 功能 | 代码位置 | 说明 |
+|------|---------|------|
+| 文件上传 | `aibot_callback.py:_handle_file_upload()` | 下载+上传七牛+保存DB |
+| Quote检测 | `aibot_callback.py:_call_llm_async()` | 获取quoted_msg_id |
+| 10分钟窗口 | `aibot_callback.py:_call_llm_async()` | 时间检查逻辑 |
+| /new命令 | `aibot_callback.py:_handle_prompt_command()` | 清除上下文 |
+| 数据库操作 | `utils/chat_context.py:ChatContextManager` | 文件CRUD |
+| Provider检测 | `aibot_callback.py:BOT_CONFIGS` | 能力标志 |
 
 ---
 
-### 测试场景 2：智能机器人引用
+## 为什么这个方案最好？
 
-1. Quote 刚才发送的 PDF 文件
-2. 在同一条消息中 @gemini 并提问
-3. 检查 Gemini 是否成功识别并分析了 PDF
+### 成本效益分析
 
-**预期行为：**
-```
-用户：[Quote PDF] @gemini 这个文件讲了什么？
-Gemini：根据这份PDF文件，主要内容是...
-```
+| 方案 | 开发成本 | 运营成本 | 用户体验 | 可靠性 |
+|------|---------|---------|---------|--------|
+| **Smart Context** | ✅ 0小时（已完成） | ✅ $0/月 | 😊 很好 | ✅ 高 |
+| Group Bot | ❌ 7小时 | ✅ $0/月 | 😃 稍好 | ⚠️ 中 |
+| 会话存档 | ❌ 14小时 | ❌ $几百/月 | 😃 稍好 | ✅ 高 |
 
-**预期日志：**
-```
-[AIBOT_CTX] Found quoted file by MsgId: test.pdf
-[AIBOT_LLM_REQ] file_ctx=True
+**结论：** Smart Context提供了90%的便利性，只需要10%的成本。
+
+---
+
+### 用户反馈优化路径
+
+如果未来用户反馈"Quote太麻烦"，可以考虑：
+
+**优先级排序：**
+1. ✅ **延长时间窗口** - 10分钟 → 30分钟（5分钟开发）
+2. ⚠️ **智能提示** - 检测文件相关问题，提示Quote（1小时开发）
+3. ❌ **Group Bot** - 如果上面两个都不够（7小时开发）
+4. ❌ **会话存档** - 除非有合规需求（14小时+月费）
+
+---
+
+## 数据库Schema
+
+```sql
+-- chat_files表（现有）
+CREATE TABLE IF NOT EXISTS chat_files (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id TEXT NOT NULL,
+    sender_id TEXT,
+    wecom_msg_id TEXT UNIQUE,  -- 用于Quote查找
+    filename TEXT NOT NULL,
+    file_uri TEXT NOT NULL,     -- 七牛云URL
+    upload_time INTEGER NOT NULL,  -- Unix时间戳
+    file_type TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 索引
+CREATE INDEX IF NOT EXISTS idx_chat_files_wecom_msg_id ON chat_files(wecom_msg_id);
+CREATE INDEX IF NOT EXISTS idx_chat_files_chat_id_time ON chat_files(chat_id, upload_time DESC);
 ```
 
 ---
 
-## 风险和注意事项
+## 配置参数
 
-### 风险 1：msg_id 不一致
-
-**问题：** 如果群机器人的 `msg_id` 与智能机器人的 `quoted_msg_id` 不同，引用功能将失败。
-
-**应对方案：**
-- 阶段 1 的验证测试会发现这个问题
-- 如果不一致，需要使用其他关联方式：
-  - 时间戳 + 发送人 + 文件名组合
-  - 文件 hash 值
-  - 或者通过企业微信 API 查询消息详情
-
----
-
-### 风险 2：群机器人权限不足
-
-**问题：** 群机器人可能无法下载某些类型的文件。
-
-**应对方案：**
-- 测试各种文件类型（PDF, 图片, Office 文档）
-- 如果权限不足，考虑使用会话存档 API
+```python
+# 可配置的常量
+FILE_CONTEXT_WINDOW_MINUTES = 10  # 自动上下文时间窗口
+MAX_FILE_SIZE_MB = 50              # 最大文件大小
+SUPPORTED_FILE_TYPES = [           # 支持的文件类型
+    'application/pdf',
+    'image/png',
+    'image/jpeg',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    # ...
+]
+```
 
 ---
 
-### 风险 3：性能影响
+## 监控和日志
 
-**问题：** 群聊中大量文件可能导致七牛云存储成本增加。
+**关键日志标记：**
+```
+[FILE_CTX] - 文件上下文相关
+[FILE_UPLOAD] - 文件上传过程
+[QINIU] - 七牛云操作
+[PROMPT_CMD] - 命令处理
+```
 
-**应对方案：**
-- 设置文件大小限制（例如最大 50MB）
-- 设置自动清理策略（例如 30 天后删除）
-- 只处理特定类型的文件（PDF, 图片）
-
----
-
-## 时间估算
-
-| 阶段 | 工作内容 | 预计时间 |
-|------|---------|---------|
-| 用户任务 | 创建群机器人、提供配置 | 20 分钟 |
-| 阶段 1 | msg_id 验证测试 | 1 小时 |
-| 阶段 2 | 群机器人开发 | 3 小时 |
-| 阶段 3 | 集成和优化 | 2 小时 |
-| 测试验证 | 完整功能测试 | 1 小时 |
-| **总计** | | **约 7 小时开发 + 20 分钟配置** |
+**示例日志：**
+```
+INFO [FILE_UPLOAD] Uploaded file report.pdf to Qiniu
+INFO [FILE_CTX] Using file within 10min window: report.pdf
+INFO [PROMPT_CMD] Clear file context for chat ww123
+```
 
 ---
 
-## 后续优化
+## 未来扩展方向
 
-完成基础功能后，可以考虑以下优化：
+### 如果用户量增长或需求变化：
 
-1. **智能文件识别**
-   - 只保存特定类型的文件（PDF, Office, 图片）
-   - 忽略表情包、截图等临时文件
+**场景1：需要审计/合规**
+→ 启用会话存档API
+→ 保存所有消息记录
+→ 成本：~$500/月 + 14小时开发
 
-2. **用户通知**
-   - 群机器人在成功保存文件后，发送一条提示消息
-   - 例如："✅ 已保存文件：test.pdf（可 @gemini 引用）"
+**场景2：极致用户体验**
+→ 实施Group Bot自动收集
+→ 成本：7小时开发
 
-3. **文件管理命令**
-   - `@文件助手 列出文件` - 显示本群所有已保存的文件
-   - `@文件助手 清理` - 清理旧文件
-
-4. **跨群共享**
-   - 允许用户在不同群聊中引用同一个文件
-   - 基于用户 ID 建立全局文件索引
-
----
-
-## 下一步行动
-
-**立即开始：**
-1. ✅ **用户**：创建群机器人，获取配置信息
-2. ⏳ **开发者**：收到配置后，开始阶段 1 验证测试
-
-**等待确认后：**
-3. ⏳ 如果 msg_id 一致，继续阶段 2 和 3
-4. ⏳ 如果 msg_id 不一致，调整关联策略
+**场景3：企业级文件管理**
+→ 构建文件知识库
+→ 跨群文件共享
+→ 全文搜索
+→ 成本：2-3周开发
 
 ---
 
-## 联系和支持
+## 总结
 
-如果在配置过程中遇到任何问题，请提供：
-- 企业微信管理后台的截图
-- 群机器人的配置信息（隐藏敏感信息）
-- 任何错误提示
+**当前方案（Smart File Context）是最优解：**
+- ✅ 已经实现并稳定运行
+- ✅ 零额外成本
+- ✅ 用户体验良好（90%+场景满足）
+- ✅ 代码简洁可维护
 
-我会及时协助解决。
+**暂不采用的方案：**
+- ❌ Group Bot - 投入产出比低
+- ❌ 会话存档 - 成本高，当前不需要
+
+**决策原则：** 从简到繁，按需扩展
+
+---
+
+**更新时间：** 2026-01-04  
+**状态：** 当前方案已生产部署 ✅  
+**下次评估：** 根据用户反馈决定

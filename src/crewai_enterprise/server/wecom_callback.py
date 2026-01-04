@@ -34,6 +34,9 @@ from src.crewai_enterprise.server.handlers import (
     process_file_message,
 )
 
+# Import archive callback router
+from src.crewai_enterprise.server import archive_callback
+
 
 logger = logging.getLogger(__name__)
 
@@ -63,8 +66,13 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="WeCom Callback Server",
         description="Receives and processes Enterprise WeChat callback messages for CrewAI agents.",
-        version="0.3.0",  # Version bump for refactored structure
+        version="0.4.0",  # Version bump for archive callback support
     )
+    
+    # Include archive callback router
+    app.include_router(archive_callback.router)
+    logger.info("[APP] Archive callback router registered")
+
 
     # Lazy initialization for crypto
     _crypto: WeComCrypto | None = None
