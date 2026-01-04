@@ -576,23 +576,50 @@ async def _fetch_url_content(url: str) -> str | None:
             content_type = response.headers.get('content-type', '')
             
             if 'text/html' in content_type:
-                # Simple HTML text extraction (remove tags)
-                import html
-                text = response.text
-                # Remove script and style tags
-                text = re.sub(r'<script[^>]*>.*?</script>', '', text, flags=re.DOTALL | re.IGNORECASE)
-                text = re.sub(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL | re.IGNORECASE)
-                # Remove HTML tags
-                text = re.sub(r'<[^>]+>', ' ', text)
-                # Clean up whitespace
-                text = re.sub(r'\s+', ' ', text).strip()
-                content = html.unescape(text)
+                try:
+                    from bs4 import BeautifulSoup
+                    
+                    soup = BeautifulSoup(response.text, 'html.parser')
+                    
+                    # Remove script, style, nav, footer, header tags
+                    for element in soup(['script', 'style', 'nav', 'footer', 'header', 'aside', 'iframe']):
+                        element.decompose()
+                    
+                    # Try to find main content area
+                    # Common article containers
+                    main_content = None
+                    for selector in ['article', 'main', '[role="main"]', '.post-content', '.article-content', '.entry-content']:
+                        main_content = soup.select_one(selector)
+                        if main_content:
+                            break
+                    
+                    # If no specific article container found, use body
+                    if not main_content:
+                        main_content = soup.body or soup
+                    
+                    # Extract text
+                    text = main_content.get_text(separator='\n', strip=True)
+                    
+                    # Clean up excessive whitespace
+                    lines = [line.strip() for line in text.split('\n') if line.strip()]
+                    content = '\n'.join(lines)
+                    
+                except ImportError:
+                    # Fallback to simple extraction if BeautifulSoup not available
+                    logger.warning("[URL_FETCH] BeautifulSoup not available, using simple extraction")
+                    import html
+                    text = response.text
+                    text = re.sub(r'<script[^>]*>.*?</script>', '', text, flags=re.DOTALL | re.IGNORECASE)
+                    text = re.sub(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL | re.IGNORECASE)
+                    text = re.sub(r'<[^>]+>', ' ', text)
+                    text = re.sub(r'\s+', ' ', text).strip()
+                    content = html.unescape(text)
             else:
                 # Plain text or other
                 content = response.text
             
             logger.info(f"[URL_FETCH] Successfully fetched {len(content)} chars from {url}")
-            return content[:10000]  # Limit to 10000 chars
+            return content[:20000]  # Increased limit to 20000 chars
         else:
             logger.warning(f"[URL_FETCH] HTTP {response.status_code} from {url}")
             return None
