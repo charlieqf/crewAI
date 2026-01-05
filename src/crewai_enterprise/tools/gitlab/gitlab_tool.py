@@ -86,9 +86,9 @@ class GitLabTool(BaseTool):
     gitlab_url: str = Field(..., exclude=True, description="GitLab server URL")
     private_token: str = Field(..., exclude=True, description="GitLab Private Access Token")
     
-    # python-gitlab client
     _gl: Any = PrivateAttr()
     fixed_branch: Optional[str] = Field(None, description="If set, all actions will use this branch/ref and ignore input 'ref'")
+    fixed_project_id: Optional[str] = Field(None, description="If set, all actions will use this project_id and ignore input 'project_id'")
     
     def __init__(self, **data):
         super().__init__(**data)
@@ -115,6 +115,11 @@ class GitLabTool(BaseTool):
         if self.fixed_branch:
             ref = self.fixed_branch
             logger.info(f"GitLabTool: Enforcing fixed branch '{ref}'")
+        
+        # Enforce fixed_project_id if configured
+        if self.fixed_project_id:
+            project_id = self.fixed_project_id
+            logger.info(f"GitLabTool: Enforcing fixed project_id '{project_id}'")
         try:
             # projects.get can take id or 'namespace/project'
             project = self._gl.projects.get(project_id)
