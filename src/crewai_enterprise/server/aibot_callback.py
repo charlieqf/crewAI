@@ -560,41 +560,59 @@ def _handle_prompt_command(
         inline_question = args_parts[1] if len(args_parts) > 1 else None
         
         project_path = project_input
+        branch = "main"
         
-        # Check if it's a URL
+        # Check if it's a URL and extract project path + branch
+        # Pattern for tree view: /-/tree/branch_name
+        # Pattern for blob view: /-/blob/branch_name/file_path
         url_match = re.match(r"https?://[^\s/]+/(.+?)(?:/-/.*)?$", project_input)
         if url_match:
             project_path = url_match.group(1)
-            # Remove trailing /-/xxx parts if present
-            if "/-/" in project_path:
+            
+            # Handle branch extraction from /-/tree/ or /-/blob/
+            if "/-/tree/" in project_input:
+                # Format: domain/project/-/tree/branch
+                parts = project_input.split("/-/tree/")
+                project_path = url_match.group(1).split("/-/tree/")[0]
+                branch = parts[1].split("/")[0] if len(parts) > 1 else "main"
+            elif "/-/blob/" in project_input:
+                # Format: domain/project/-/blob/branch/file
+                parts = project_input.split("/-/blob/")
+                project_path = url_match.group(1).split("/-/blob/")[0]
+                branch = parts[1].split("/")[0] if len(parts) > 1 else "main"
+            elif "/-/" in project_path:
                 project_path = project_path.split("/-/")[0]
+
         # Extract GitLab base URL from input
         gitlab_url_match = re.match(r"(https?://[^/]+)", project_input)
         gitlab_base_url = gitlab_url_match.group(1) if gitlab_url_match else os.getenv("GITLAB_URL", "https://gitlab.goldenstand.com")
         
-        # Save project context with URL
+        # Save project context with URL and branch
         _user_project_context[chat_id] = {
             "project_path": project_path,
-            "gitlab_url": gitlab_base_url
+            "gitlab_url": gitlab_base_url,
+            "branch": branch
         }
         
-        logger.info(f"[CODEBASE_CMD] Set project context for {chat_id}: {project_path} @ {gitlab_base_url}")
+        logger.info(f"[CODEBASE_CMD] Set project context for {chat_id}: {project_path} (branch: {branch}) @ {gitlab_base_url}")
         
         # If there's an inline question, return it for further processing
         if inline_question:
             return {
-                "content": f"🔍 正在分析 `{project_path}` 代码库...",
+                "content": f"🔍 正在分析 `{project_path}` 代码库 (分支: `{branch}`)...",
                 "continue_with_question": inline_question,
-                "project_path": project_path
+                "project_path": project_path,
+                "branch": branch
             }
         
         # No question, just confirm context set
         response = (
-            f"✅ 已设置代码库上下文: `{project_path}`\n\n"
+            f"✅ 已设置代码库上下文: `{project_path}`\n"
+            f"📌 当前分支: `{branch}`\n\n"
             f"现在你可以直接提问，例如:\n"
-            f"- \"登录功能在哪里实现的？\"\n"
-            f"- \"遇到 KeyError 报错是什么原因？\"\n"
-            f"- \"abc.py 脚本怎么调用？\"\n\n"
+            f"- \"这些表名在哪些文件中出现过？\"\n"
+            f"- \"creditor_code 字段是在哪里处理的？\"\n"
+            f"- \"项目的原始权益人判断逻辑在哪里？\"\n\n"
             f"_提示: 发送截图也可以分析代码问题_"
         )
         return {"content": response}
@@ -748,7 +766,8 @@ async def _call_llm_async(
                             gitlab_url=gitlab_base_url,
                             private_token=gitlab_token,
                             project_id=project_path,
-                            query=inline_question
+                            query=inline_question,
+                            branch=cmd_result.get("branch", "main")
                         )
                         
                         loop = asyncio.get_running_loop()
@@ -923,7 +942,8 @@ async def _call_llm_async(
                     private_token=gitlab_token,
                     project_id=project_path,  # Use string, not dict
                     query=content_stripped,
-                    context="" # Add extra context if needed
+                    context="", # Add extra context if needed
+                    branch=active_project.get("branch", "main")
                 )
                 
                 loop = asyncio.get_running_loop()
