@@ -139,14 +139,20 @@ EOF
 fi
 
 # -----------------------------------------------------------------------------
-# 6. 创建 systemd 服务
+# 6. 配置系统环境与 systemd 服务
 # -----------------------------------------------------------------------------
 echo ""
-echo ">>> 6. 配置 systemd 服务..."
+echo ">>> 6. 配置 systemd 服务与 DNS..."
+
+# 确保内部 GitLab 解析
+if ! grep -q "gitlab.goldenstand.com" /etc/hosts; then
+    echo "10.0.0.118 gitlab.goldenstand.com" >> /etc/hosts
+    echo "Added gitlab.goldenstand.com to /etc/hosts"
+fi
 
 cat > /etc/systemd/system/wecom-callback.service << EOF
 [Unit]
-Description=WeCom Callback Server
+Description=WeCom Callback Server with VPN Support
 After=network.target
 
 [Service]
@@ -154,9 +160,13 @@ Type=simple
 User=root
 WorkingDirectory=$APP_DIR
 EnvironmentFile=$ENV_FILE
+
+# 启动前确保 VPN 已连接
+ExecStartPre=-/root/setup_vpn_linux.sh connect
+
 ExecStart=$APP_DIR/venv/bin/python -m uvicorn src.crewai_enterprise.server.wecom_callback:app --host 0.0.0.0 --port 8000
 Restart=always
-RestartSec=5
+RestartSec=10
 
 # 日志 - 使用 journal 而不是文件追加，避免重复
 StandardOutput=journal

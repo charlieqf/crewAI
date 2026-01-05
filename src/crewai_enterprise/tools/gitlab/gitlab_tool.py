@@ -1,14 +1,13 @@
 """
 GitLabTool - GitLab integration tool for CrewAI agents.
 
-Enables automated code review by fetching commit diffs and posting comments.
+Enables automated code review by fetching commit diffs, reading files, searching code,
+listing directories, and posting comments using the python-gitlab library.
 """
-import json
 import logging
-from typing import Literal, Optional, Type
-from urllib.parse import quote
+from typing import Literal, Optional, Type, Any
 
-import requests
+import gitlab
 from pydantic import BaseModel, Field, PrivateAttr
 
 from crewai.tools import BaseTool
@@ -30,13 +29,20 @@ class GitLabAPIError(Exception):
 # --- Input Schema ---
 class GitLabToolInput(BaseModel):
     """Input schema for GitLabTool."""
-    action: Literal["get_diff", "get_mr_changes", "post_comment"] = Field(
+    action: Literal[
+        "get_diff", 
+        "get_mr_changes", 
+        "post_comment", 
+        "get_file", 
+        "search_code", 
+        "list_files"
+    ] = Field(
         ..., 
-        description="The action to perform: 'get_diff' (get commit diff), 'get_mr_changes' (get MR changes), 'post_comment' (post comment on commit)"
+        description="The action to perform: 'get_diff', 'get_mr_changes', 'post_comment', 'get_file', 'search_code', 'list_files'"
     )
     project_id: str = Field(
         ..., 
-        description="The GitLab project ID or URL-encoded path (e.g., '123' or 'group/project')"
+        description="The GitLab project ID or path (e.g., '123' or 'group/project')"
     )
     commit_sha: Optional[str] = Field(
         None, 
@@ -50,6 +56,22 @@ class GitLabToolInput(BaseModel):
         None, 
         description="The comment text for post_comment action"
     )
+    file_path: Optional[str] = Field(
+        None,
+        description="The full path to the file for get_file action"
+    )
+    ref: Optional[str] = Field(
+        "main",
+        description="The branch, tag or commit SHA to use (default: main)"
+    )
+    query: Optional[str] = Field(
+        None,
+        description="The search query for search_code action"
+    )
+    path: Optional[str] = Field(
+        None,
+        description="The directory path for list_files action"
+    )
 
 
 # --- Tool Implementation ---
@@ -57,25 +79,23 @@ class GitLabTool(BaseTool):
     """A tool to interact with GitLab for automated code review."""
     
     name: str = "GitLab Tool"
-    description: str = "A tool to fetch commit diffs and post review comments on GitLab."
+    description: str = "A tool to fetch commit diffs, read files, search code, and post review comments on GitLab."
     args_schema: Type[BaseModel] = GitLabToolInput
     
     # Configuration
-    gitlab_url: str = Field(..., exclude=True, description="GitLab server URL (e.g., http://gitlab.example.com)")
+    gitlab_url: str = Field(..., exclude=True, description="GitLab server URL")
     private_token: str = Field(..., exclude=True, description="GitLab Private Access Token")
     
-    def _get_headers(self) -> dict:
-        """Get request headers with authentication."""
-        return {
-            "PRIVATE-TOKEN": self.private_token,
-            "Content-Type": "application/json"
-        }
+    # python-gitlab client
+    _gl: Any = PrivateAttr()
     
-    def _encode_project_id(self, project_id: str) -> str:
-        """URL encode project path if it contains slashes."""
-        if "/" in project_id:
-            return quote(project_id, safe="")
-        return project_id
+    def __init__(self, **data):
+        super().__init__(**data)
+        try:
+            self._gl = gitlab.Gitlab(self.gitlab_url, private_token=self.private_token)
+        except Exception as e:
+            logger.error(f"Failed to initialize GitLab client: {e}")
+            raise GitLabAuthenticationError(f"Failed to initialize GitLab client: {e}")
 
     def _run(
         self, 
@@ -83,113 +103,174 @@ class GitLabTool(BaseTool):
         project_id: str,
         commit_sha: Optional[str] = None,
         mr_iid: Optional[int] = None,
-        comment: Optional[str] = None
+        comment: Optional[str] = None,
+        file_path: Optional[str] = None,
+        ref: str = "main",
+        query: Optional[str] = None,
+        path: Optional[str] = None
     ) -> str:
         """Execute the tool logic."""
+        try:
+            # projects.get can take id or 'namespace/project'
+            project = self._gl.projects.get(project_id)
+        except gitlab.exceptions.GitlabAuthenticationError as e:
+            raise GitLabAuthenticationError(f"Authentication failed: {e}")
+        except gitlab.exceptions.GitlabGetError as e:
+            raise GitLabAPIError(f"Project not found or access denied: {project_id}. Error: {e}")
         
         if action == "get_diff":
-            return self._get_commit_diff(project_id, commit_sha)
+            return self._get_commit_diff(project, commit_sha)
         elif action == "get_mr_changes":
-            return self._get_mr_changes(project_id, mr_iid)
+            return self._get_mr_changes(project, mr_iid)
         elif action == "post_comment":
-            return self._post_comment(project_id, commit_sha, comment)
+            return self._post_comment(project, commit_sha, comment)
+        elif action == "get_file":
+            if not file_path:
+                raise ValueError("file_path is required for get_file action")
+            return self._get_file_content(project, file_path, ref)
+        elif action == "search_code":
+            if not query:
+                raise ValueError("query is required for search_code action")
+            return self._search_code(project, query, ref)
+        elif action == "list_files":
+            return self._list_repository_tree(project, path or "", ref)
         else:
             raise ValueError(f"Unknown action: {action}")
 
-    def _get_commit_diff(self, project_id: str, commit_sha: str) -> str:
+    def _get_commit_diff(self, project: Any, commit_sha: Optional[str]) -> str:
         """Get the diff for a specific commit."""
         if not commit_sha:
             raise GitLabAPIError("commit_sha is required for get_diff action")
         
-        encoded_project = self._encode_project_id(project_id)
-        url = f"{self.gitlab_url}/api/v4/projects/{encoded_project}/repository/commits/{commit_sha}/diff"
-        
         try:
-            response = requests.get(url, headers=self._get_headers(), timeout=30)
-            
-            if response.status_code == 401:
-                raise GitLabAuthenticationError("Invalid GitLab token or insufficient permissions")
-            
-            response.raise_for_status()
-            diff_data = response.json()
+            commit = project.commits.get(commit_sha)
+            diffs = commit.diff()
             
             # Format the diff for readability
-            formatted_diff = []
-            for file_diff in diff_data:
-                formatted_diff.append(f"File: {file_diff.get('new_path', 'unknown')}")
-                formatted_diff.append(file_diff.get('diff', ''))
+            formatted_diff = [f"Commit: {commit_sha}", f"Message: {commit.message}", "-"*20]
+            for diff in diffs:
+                formatted_diff.append(f"File: {diff.get('new_path', 'unknown')}")
+                # python-gitlab diff dict structure usually mirrors the API response
+                diff_content = diff.get('diff', '')
+                formatted_diff.append(diff_content)
                 formatted_diff.append("---")
             
-            logger.info(f"Retrieved diff for commit {commit_sha} in project {project_id}")
+            logger.info(f"Retrieved diff for commit {commit_sha} in project {project.id}")
             return "\n".join(formatted_diff)
             
-        except requests.exceptions.RequestException as e:
-            if "401" in str(e):
-                raise GitLabAuthenticationError(f"Authentication failed: {e}") from e
-            raise GitLabAPIError(f"Failed to get commit diff: {e}") from e
+        except gitlab.exceptions.GitlabGetError as e:
+            raise GitLabAPIError(f"Commit not found: {commit_sha}. Error: {e}")
 
-    def _get_mr_changes(self, project_id: str, mr_iid: int) -> str:
+    def _get_mr_changes(self, project: Any, mr_iid: Optional[int]) -> str:
         """Get the changes in a Merge Request."""
         if not mr_iid:
             raise GitLabAPIError("mr_iid is required for get_mr_changes action")
         
-        encoded_project = self._encode_project_id(project_id)
-        url = f"{self.gitlab_url}/api/v4/projects/{encoded_project}/merge_requests/{mr_iid}/changes"
-        
         try:
-            response = requests.get(url, headers=self._get_headers(), timeout=30)
+            mr = project.mergerequests.get(mr_iid)
+            changes = mr.changes()
             
-            if response.status_code == 401:
-                raise GitLabAuthenticationError("Invalid GitLab token or insufficient permissions")
-            
-            response.raise_for_status()
-            mr_data = response.json()
-            
-            # Format the MR changes
-            changes = mr_data.get("changes", [])
-            formatted = [f"MR !{mr_iid}: {mr_data.get('title', 'No title')}"]
-            formatted.append(f"Source: {mr_data.get('source_branch', '')} -> {mr_data.get('target_branch', '')}")
-            formatted.append(f"Files changed: {len(changes)}")
+            formatted = [f"MR !{mr_iid}: {mr.title}"]
+            formatted.append(f"Source: {mr.source_branch} -> {mr.target_branch}")
+            formatted.append(f"Files changed: {len(changes.get('changes', []))}")
             formatted.append("---")
             
-            for change in changes:
+            for change in changes.get('changes', []):
                 formatted.append(f"File: {change.get('new_path', 'unknown')}")
                 formatted.append(change.get('diff', '')[:500])  # Truncate long diffs
                 formatted.append("---")
             
-            logger.info(f"Retrieved changes for MR !{mr_iid} in project {project_id}")
+            logger.info(f"Retrieved changes for MR !{mr_iid} in project {project.id}")
             return "\n".join(formatted)
             
-        except requests.exceptions.RequestException as e:
-            if "401" in str(e):
-                raise GitLabAuthenticationError(f"Authentication failed: {e}") from e
-            raise GitLabAPIError(f"Failed to get MR changes: {e}") from e
+        except gitlab.exceptions.GitlabGetError as e:
+            raise GitLabAPIError(f"MR not found: {mr_iid}. Error: {e}")
 
-    def _post_comment(self, project_id: str, commit_sha: str, comment: str) -> str:
+    def _post_comment(self, project: Any, commit_sha: Optional[str], comment: Optional[str]) -> str:
         """Post a comment on a commit."""
         if not commit_sha:
             raise GitLabAPIError("commit_sha is required for post_comment action")
         if not comment:
             raise GitLabAPIError("comment is required for post_comment action")
         
-        encoded_project = self._encode_project_id(project_id)
-        url = f"{self.gitlab_url}/api/v4/projects/{encoded_project}/repository/commits/{commit_sha}/comments"
-        
-        payload = {"note": comment}
-        
         try:
-            response = requests.post(url, headers=self._get_headers(), json=payload, timeout=30)
+            commit = project.commits.get(commit_sha)
+            # Use 'note' as per API
+            result = commit.comments.create({'note': comment})
             
-            if response.status_code == 401:
-                raise GitLabAuthenticationError("Invalid GitLab token or insufficient permissions")
+            # result is a Comment object, we can access attributes
+            logger.info(f"Posted comment on commit {commit_sha} in project {project.id}")
+            return f"Comment posted successfully. Note ID: {getattr(result, 'id', 'unknown')}"
             
-            response.raise_for_status()
-            result = response.json()
+        except gitlab.exceptions.GitlabError as e:
+            raise GitLabAPIError(f"Failed to post comment: {e}")
+
+    def _get_file_content(self, project: Any, file_path: str, ref: str) -> str:
+        """Get repository file content."""
+        try:
+            f = project.files.get(file_path=file_path, ref=ref)
+            # project.files.get returns a File object with content in base64
+            # python-gitlab's decode() returns bytes
+            content_bytes = f.decode()
             
-            logger.info(f"Posted comment on commit {commit_sha} in project {project_id}")
-            return f"Comment posted successfully. Comment ID: {result.get('id', 'unknown')}"
+            # Handle case where decode() might return string in some versions
+            if isinstance(content_bytes, str):
+                content = content_bytes
+            else:
+                try:
+                    content = content_bytes.decode('utf-8')
+                except UnicodeDecodeError:
+                    logger.warning(f"File {file_path} is binary or non-UTF-8")
+                    return f"File: {file_path}\n{'='*60}\n[Binary or non-UTF-8 content - size: {len(content_bytes)} bytes]"
             
-        except requests.exceptions.RequestException as e:
-            if "401" in str(e):
-                raise GitLabAuthenticationError(f"Authentication failed: {e}") from e
-            raise GitLabAPIError(f"Failed to post comment: {e}") from e
+            return f"File: {file_path}\n{'='*60}\n{content}"
+        except gitlab.exceptions.GitlabGetError:
+            raise GitLabAPIError(f"File not found: {file_path} at ref {ref}")
+        except Exception as e:
+            raise GitLabAPIError(f"Error reading file {file_path}: {e}")
+
+    def _search_code(self, project: Any, query: str, ref: str = "main") -> str:
+        """Search code in the project.
+        
+        Args:
+            project: GitLab project object
+            query: Search query string
+            ref: Branch, tag, or commit to search in (default: main)
+        """
+        try:
+            # scope='blobs' searches file content, ref specifies the branch
+            results = project.search('blobs', query, ref=ref) 
+            
+            formatted = [f"Search results for '{query}':"]
+            
+            # Limit results - iterate lazily instead of loading all
+            count = 0
+            for item in results:
+                if count >= 10:
+                    break
+                formatted.append(f"\nFile: {item.get('path', 'unknown')}")
+                # 'data' usually contains the matching line or snippet
+                snippet = item.get('data', '')
+                if isinstance(snippet, str):
+                    formatted.append(f"Match: {snippet[:200]}")
+                else:
+                    formatted.append(f"Match: {str(snippet)[:200]}")
+                count += 1
+            
+            return "\n".join(formatted)
+        except Exception as e:
+            raise GitLabAPIError(f"Search failed: {e}")
+
+    def _list_repository_tree(self, project: Any, path: str, ref: str) -> str:
+        """List files in directory."""
+        try:
+            items = project.repository_tree(path=path, ref=ref, recursive=False)
+            
+            formatted = [f"Directory: {path or '/'}"]
+            for item in items:
+                icon = "📁" if item['type'] == 'tree' else "📄"
+                formatted.append(f"{icon} {item['name']}")
+            
+            return "\n".join(formatted)
+        except Exception as e:
+            raise GitLabAPIError(f"Failed to list directory: {e}")

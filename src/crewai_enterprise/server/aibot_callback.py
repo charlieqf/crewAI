@@ -40,6 +40,12 @@ from src.crewai_enterprise.utils.wecom_json_crypto import WXBizJsonMsgCrypt
 from src.crewai_enterprise.utils.llm_router import LLMError, get_router
 from src.crewai_enterprise.utils.chat_context import get_context_manager
 from src.crewai_enterprise.utils.storage_manager import get_storage_manager
+from src.crewai_enterprise.flows.code_review_flow import CodeReviewFlow
+from src.crewai_enterprise.flows.codebase_qa_flow import CodebaseQAFlow
+
+# Global cache for user project context (chat_id -> {project_path, gitlab_url})
+# In production, this should be in Redis
+_user_project_context: dict[str, dict[str, str]] = {}
 
 
 # Configure logging
@@ -439,11 +445,11 @@ def _handle_prompt_command(
     chat_id: str,
     user_id: str,
 ) -> dict | None:
-    """Handle prompt management commands.
+    """Handle prompt management and bot commands.
     
     Args:
-        command: Command name (show_prompt, set_prompt, reset_prompt)
-        args: Command arguments (for set_prompt)
+        command: Command name (show_prompt, set_prompt, reset_prompt, new, codebase, help)
+        args: Command arguments (for set_prompt, codebase)
         bot_type: Bot identifier
         chat_id: Chat ID
         user_id: User ID
@@ -467,6 +473,11 @@ def _handle_prompt_command(
 • Quote文件消息 - 明确引用特定文件
 • 自动上下文：文件上传后10分钟内自动使用
 
+**💻 代码库分析：**
+• `/codebase <gitlab_url>` - 设置代码库上下文
+• 之后可直接提问代码相关问题
+• 发送截图也可自动分析代码问题
+
 **📝 文件分析能力：**
 • Gemini：✅ 支持大文件原生分析（PDF等）
 • ChatGPT：❌ 仅支持图片和文本对话
@@ -477,6 +488,7 @@ def _handle_prompt_command(
 2. 使用 /new 切换话题，避免文件干扰
 3. 超过10分钟需重新发送或Quote文件
 4. 自定义 Prompt 可让AI扮演特定角色
+5. 审查代码: 发送 GitLab Commit URL
 
 有问题随时使用 /help 查看本帮助！"""
         return {"content": help_text}
@@ -528,6 +540,63 @@ def _handle_prompt_command(
         except Exception as e:
             logger.error(f"[PROMPT_CMD] Failed to clear context: {e}")
             response = "❌ 清除失败，请稍后重试"
+        return {"content": response}
+    
+    elif command == "codebase":
+        # Set GitLab project context for Codebase QA
+        # Supports: /codebase <url> [optional question]
+        if not args.strip():
+            response = (
+                "❌ 用法: `/codebase <gitlab_url> [问题]`\n\n"
+                "示例:\n"
+                "- `/codebase https://gitlab.example.com/team/myproject`\n"
+                "- `/codebase https://gitlab.example.com/team/myproject 登录功能在哪里？`"
+            )
+            return {"content": response}
+        
+        # Parse args: first part is URL/path, rest is optional question
+        args_parts = args.strip().split(maxsplit=1)
+        project_input = args_parts[0]
+        inline_question = args_parts[1] if len(args_parts) > 1 else None
+        
+        project_path = project_input
+        
+        # Check if it's a URL
+        url_match = re.match(r"https?://[^\s/]+/(.+?)(?:/-/.*)?$", project_input)
+        if url_match:
+            project_path = url_match.group(1)
+            # Remove trailing /-/xxx parts if present
+            if "/-/" in project_path:
+                project_path = project_path.split("/-/")[0]
+        # Extract GitLab base URL from input
+        gitlab_url_match = re.match(r"(https?://[^/]+)", project_input)
+        gitlab_base_url = gitlab_url_match.group(1) if gitlab_url_match else os.getenv("GITLAB_URL", "https://gitlab.goldenstand.com")
+        
+        # Save project context with URL
+        _user_project_context[chat_id] = {
+            "project_path": project_path,
+            "gitlab_url": gitlab_base_url
+        }
+        
+        logger.info(f"[CODEBASE_CMD] Set project context for {chat_id}: {project_path} @ {gitlab_base_url}")
+        
+        # If there's an inline question, return it for further processing
+        if inline_question:
+            return {
+                "content": f"🔍 正在分析 `{project_path}` 代码库...",
+                "continue_with_question": inline_question,
+                "project_path": project_path
+            }
+        
+        # No question, just confirm context set
+        response = (
+            f"✅ 已设置代码库上下文: `{project_path}`\n\n"
+            f"现在你可以直接提问，例如:\n"
+            f"- \"登录功能在哪里实现的？\"\n"
+            f"- \"遇到 KeyError 报错是什么原因？\"\n"
+            f"- \"abc.py 脚本怎么调用？\"\n\n"
+            f"_提示: 发送截图也可以分析代码问题_"
+        )
         return {"content": response}
     
     return None
@@ -658,7 +727,66 @@ async def _call_llm_async(
         
         cmd_result = _handle_prompt_command(command, args, bot_type, chat_id, user_id)
         if cmd_result:
-            # Update stream task with command response
+            # Check if command wants to continue with a question (e.g., /codebase url question)
+            if cmd_result.get("continue_with_question"):
+                inline_question = cmd_result["continue_with_question"]
+                project_path = cmd_result["project_path"]
+                
+                # Update stream with initial status
+                if stream_id in _stream_tasks:
+                    _stream_tasks[stream_id]["content"] = cmd_result["content"]
+                
+                # Trigger CodebaseQAFlow immediately
+                # Get gitlab_url from cached context (set by _handle_prompt_command)
+                cached_context = _user_project_context.get(chat_id)
+                gitlab_base_url = cached_context["gitlab_url"] if cached_context else os.getenv("GITLAB_URL", "https://gitlab.goldenstand.com")
+                gitlab_token = os.getenv("GITLAB_TOKEN")
+                
+                if gitlab_token:
+                    try:
+                        flow = CodebaseQAFlow(
+                            gitlab_url=gitlab_base_url,
+                            private_token=gitlab_token,
+                            project_id=project_path,
+                            query=inline_question
+                        )
+                        
+                        loop = asyncio.get_running_loop()
+                        qa_result = await loop.run_in_executor(None, flow.kickoff)
+                        
+                        if stream_id in _stream_tasks:
+                            _stream_tasks[stream_id]["content"] = str(qa_result)
+                            _stream_tasks[stream_id]["finished"] = True
+                            _stream_tasks[stream_id]["completed_at"] = time.time()
+                        
+                        # Add to context
+                        get_context_manager().add_message(
+                            chat_id=chat_id,
+                            sender_id=f"bot_{bot_type}_qa",
+                            sender_name=f"{bot_type} QA",
+                            content=str(qa_result),
+                            role="assistant",
+                            bot_type=bot_type,
+                        )
+                        
+                        logger.info(f"[CODEBASE_CMD] Completed inline QA for {chat_id}")
+                        return
+                        
+                    except Exception as e:
+                        logger.error(f"[CODEBASE_CMD] Inline QA failed: {e}")
+                        if stream_id in _stream_tasks:
+                            _stream_tasks[stream_id]["content"] = f"❌ 代码分析失败: {e}"
+                            _stream_tasks[stream_id]["finished"] = True
+                            _stream_tasks[stream_id]["completed_at"] = time.time()
+                        return
+                else:
+                    if stream_id in _stream_tasks:
+                        _stream_tasks[stream_id]["content"] = "❌ GITLAB_TOKEN 未配置"
+                        _stream_tasks[stream_id]["finished"] = True
+                        _stream_tasks[stream_id]["completed_at"] = time.time()
+                    return
+            
+            # Regular command - just return the response
             if stream_id in _stream_tasks:
                 _stream_tasks[stream_id]["content"] = cmd_result["content"]
                 _stream_tasks[stream_id]["finished"] = True
@@ -666,6 +794,152 @@ async def _call_llm_async(
             
             logger.info(f"[PROMPT_CMD] Handled command /{command} for {bot_type} in {chat_id}")
             return
+
+    # Check for GitLab Code Review Request
+    # Pattern: https://<any-domain>/<path>/-/commit/<sha>
+    # Accepts: gitlab.*, git.*, or any domain with /-/commit/ structure
+    # SHA can be 7-40 characters, case-insensitive
+    gitlab_pattern = r"(https?://)([^\s/]+)/([^\s]+)/-/commit/([a-fA-F0-9]{7,40})"
+    gitlab_match = re.search(gitlab_pattern, content_stripped, re.IGNORECASE)
+    
+    # Trigger if URL found and content contains "review" or "审查", or if it's JUST the URL
+    # But NOT if negative keywords are present
+    has_positive_keyword = (
+        "review" in content_stripped.lower() 
+        or "审查" in content_stripped
+        or "审核" in content_stripped
+        or "检查" in content_stripped
+        or "看看" in content_stripped
+        or "帮我看" in content_stripped
+    )
+    has_negative_keyword = (
+        "不要审查" in content_stripped
+        or "别审查" in content_stripped
+        or "不用审查" in content_stripped
+        or "don't review" in content_stripped.lower()
+        or "no review" in content_stripped.lower()
+    )
+    is_url_only = len(content_stripped) == len(gitlab_match.group(0)) if gitlab_match else False
+    
+    is_review_request = gitlab_match and (
+        (has_positive_keyword and not has_negative_keyword)
+        or is_url_only
+    )
+    
+    if is_review_request:
+        try:
+            protocol = gitlab_match.group(1)
+            domain = gitlab_match.group(2)
+            project_path = gitlab_match.group(3)
+            commit_sha = gitlab_match.group(4)
+            gitlab_base_url = f"{protocol}{domain}"
+            
+            logger.info(f"[GITLAB_REVIEW] Detected review request: {gitlab_base_url} {project_path} {commit_sha}")
+            
+            # Save project context for future QA (including the GitLab host)
+            _user_project_context[chat_id] = {
+                "project_path": project_path,
+                "gitlab_url": gitlab_base_url
+            }
+            
+            # Update status to "Reviewing"
+            if stream_id in _stream_tasks:
+                _stream_tasks[stream_id]["content"] = "🔍 正在进行多Agent代码审查，请稍候...\n(架构/性能/测试专家正在分析)"
+            
+            # Get token from env
+            gitlab_token = os.getenv("GITLAB_TOKEN")
+            if not gitlab_token:
+                raise ValueError("GITLAB_TOKEN environment variable not set")
+            
+            # Run Flow
+            flow = CodeReviewFlow(
+                gitlab_url=gitlab_base_url,
+                private_token=gitlab_token,
+                project_id=project_path,
+                commit_sha=commit_sha
+            )
+            
+            # Run in executor to avoid blocking asyncio loop
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(None, flow.kickoff)
+            
+            final_response = f"✅ 代码审查完成\n\n{result}"
+            
+            # Update task
+            if stream_id in _stream_tasks:
+                _stream_tasks[stream_id]["content"] = final_response
+                _stream_tasks[stream_id]["finished"] = True
+                _stream_tasks[stream_id]["completed_at"] = time.time()
+                
+            return
+            
+        except Exception as e:
+            logger.error(f"[GITLAB_REVIEW] Error during review: {e}")
+            error_msg = f"❌ 代码审查失败: {str(e)}"
+            if stream_id in _stream_tasks:
+                _stream_tasks[stream_id]["content"] = error_msg
+                _stream_tasks[stream_id]["finished"] = True
+                _stream_tasks[stream_id]["error"] = True
+                _stream_tasks[stream_id]["error"] = True
+            return
+
+    # Check for Codebase QA (General Questions)
+    # Trigger if:
+    # 1. We have a project context for this chat
+    # 2. Content looks like a question or issue
+    # 3. Not a simple greeting or irrelevant command
+    active_project = _user_project_context.get(chat_id)
+    
+    # Heuristics for a code question: MUST contain code-related keywords or question patterns
+    # Relaxed length check removed to avoid hijacking normal chat
+    code_keywords = ["哪里", "怎么", "报错", "在哪", "如何", "什么原因", "怎么调用", "怎么用",
+                     "error", "exception", "failed", "how to", "where", "what causes", "how do i"]
+    has_question_mark = "?" in content_stripped or "？" in content_stripped
+    has_code_keyword = any(k in content_stripped.lower() for k in code_keywords)
+    
+    is_code_question = active_project and (has_code_keyword or has_question_mark)
+    
+    # If vision message (image_base64 is present in scope via closure or separate handler?) 
+    # Wait, _call_llm_async is generic. The vision handler calls _handle_vision_message.
+    # We need to handle this inside the main flow or separate?
+    # Actually, the user wants @gemini [screenshot]. That goes to _handle_vision_message.
+    # We should handle text-based QA here first.
+    
+    if is_code_question and not gitlab_match:
+        # Use GitLab URL from cached context (not hardcoded env)
+        project_path = active_project["project_path"]
+        gitlab_base_url = active_project["gitlab_url"]
+        gitlab_token = os.getenv("GITLAB_TOKEN")
+        
+        if gitlab_token:
+            logger.info(f"[GITLAB_QA] Detected code question for {project_path}: {content_stripped[:50]}...")
+            
+            if stream_id in _stream_tasks:
+                _stream_tasks[stream_id]["content"] = f"🤖 正在查阅代码库 ({project_path})..."
+
+            try:
+                flow = CodebaseQAFlow(
+                    gitlab_url=gitlab_base_url,
+                    private_token=gitlab_token,
+                    project_id=project_path,  # Use string, not dict
+                    query=content_stripped,
+                    context="" # Add extra context if needed
+                )
+                
+                loop = asyncio.get_running_loop()
+                result = await loop.run_in_executor(None, flow.kickoff)
+                
+                final_response = f"{result}\n\n(基于项目: {project_path})"
+                
+                if stream_id in _stream_tasks:
+                    _stream_tasks[stream_id]["content"] = final_response
+                    _stream_tasks[stream_id]["finished"] = True
+                    _stream_tasks[stream_id]["completed_at"] = time.time()
+                return
+            except Exception as e:
+                logger.error(f"[GITLAB_QA] QA failed: {e}")
+                # Fallback to normal LLM if QA fails
+                pass 
     
     config = BOT_CONFIGS[bot_type]
     provider = config["provider"]
@@ -1745,6 +2019,59 @@ async def _call_vision_llm_async(
             _stream_tasks[stream_id]["content"] = final_content
             _stream_tasks[stream_id]["finished"] = True
             _stream_tasks[stream_id]["completed_at"] = time.time()
+
+            # Check for Codebase QA Context (Screenshot Diagnosis)
+            active_project = _user_project_context.get(chat_id)
+            if active_project:
+                # If we have a project context, use the image description to query the codebase
+                image_desc = response.content
+                project_path = active_project["project_path"]
+                gitlab_base_url = active_project["gitlab_url"]
+                logger.info(f"[GITLAB_VISA] Detected project context {project_path}, triggering Codebase QA with image description")
+                
+                gitlab_token = os.getenv("GITLAB_TOKEN")
+                
+                if gitlab_token:
+                    try:
+                        # Append QA status to current response
+                        if stream_id in _stream_tasks:
+                            current_content = _stream_tasks[stream_id]["content"]
+                            _stream_tasks[stream_id]["content"] = f"{current_content}\n\n🤖 正在查阅代码库分析截图原因..."
+                            _stream_tasks[stream_id]["finished"] = False # Re-open stream
+                        
+                        flow = CodebaseQAFlow(
+                            gitlab_url=gitlab_base_url,
+                            private_token=gitlab_token,
+                            project_id=project_path,  # Use string, not dict
+                            query="请根据这张图片的描述，分析可能的原因或相关代码位置。",
+                            context=f"图片描述:\n{image_desc}"
+                        )
+                        
+                        loop = asyncio.get_running_loop()
+                        qa_result = await loop.run_in_executor(None, flow.kickoff)
+                        
+                        # Combine Vision + Codebase QA results
+                        final_response = f"{qa_result}\n\n---\n(图片初步分析: {image_desc})"
+                        
+                        # Update task with final result
+                        if stream_id in _stream_tasks:
+                            _stream_tasks[stream_id]["content"] = final_response
+                            _stream_tasks[stream_id]["finished"] = True
+                            
+                        # Update chat context with final result
+                        get_context_manager().add_message(
+                           chat_id=chat_id,
+                           sender_id=f"bot_{bot_type}_qa", # Virtual sender to distinguish
+                           sender_name=f"{bot_type} QA",
+                           content=final_response,
+                           role="assistant",
+                           bot_type=bot_type,
+                        )
+                        
+                    except Exception as e:
+                        logger.error(f"[GITLAB_VISA] QA failed: {e}")
+                        # Fallback: keep original vision response
+                        pass
 
     except LLMError as e:
         logger.error(f"[AIBOT_VISION_ERR] bot={bot_type} error={e}")
