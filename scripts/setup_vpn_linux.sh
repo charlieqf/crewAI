@@ -130,6 +130,8 @@ noipdefault
 defaultroute
 usepeerdns
 connect-delay 5000
+persist
+maxfail 0
 lcp-echo-interval 20
 lcp-echo-failure 3
 name ${VPN_USER}
