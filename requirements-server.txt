@@ -30,7 +30,7 @@ google-generativeai>=0.3.0
 # anthropic>=0.3.0
 
 # CrewAI (required for ChatStorageTool)
-crewai>=0.1.0
+crewai[google-genai]>=0.1.0
 
 # Cloud Storage (UCS)
 qiniu>=7.10.0
