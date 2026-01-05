@@ -1305,6 +1305,7 @@ def register_aibot_routes(app: FastAPI) -> None:
         nonce: str = Query(...),
     ) -> Response:
         """Handle incoming messages from WeCom intelligent robot."""
+        logger.info(f"--- [AIBOT_ENTRY] bot={bot_type} signature={msg_signature[:10]}... timestamp={timestamp} ---")
         if bot_type not in BOT_CONFIGS:
             raise HTTPException(status_code=404, detail=f"Unknown bot: {bot_type}")
 
