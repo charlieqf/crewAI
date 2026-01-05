@@ -38,7 +38,7 @@ def create_arch_reviewer_agent(gitlab_tool) -> Agent:
         Your output MUST include specific architectural suggestions and security warnings, citing line numbers when necessary.
         IMPORTANT: Always give your final answer in Chinese (中文回答).""",
         tools=[gitlab_tool],
-        llm="gemini-3-flash",
+        llm="gemini-3-flash-preview",
         verbose=True,
         allow_delegation=False,
     )
@@ -73,7 +73,7 @@ def create_perf_reviewer_agent(gitlab_tool) -> Agent:
         Your suggestions should include specific optimization strategies, e.g., "Recommend using Set instead of List for lookup to reduce complexity from O(n) to O(1)".
         IMPORTANT: Always give your final answer in Chinese (中文回答).""",
         tools=[gitlab_tool],
-        llm="gemini-3-flash",
+        llm="gemini-3-flash-preview",
         verbose=True,
         allow_delegation=False,
     )
@@ -109,7 +109,7 @@ def create_test_reviewer_agent(gitlab_tool) -> Agent:
         If tests are missing, you MUST strictly point this out and reject approval until tests are added.
         IMPORTANT: Always give your final answer in Chinese (中文回答).""",
         tools=[gitlab_tool],
-        llm="gemini-3-flash",
+        llm="gemini-3-flash-preview",
         verbose=True,
         allow_delegation=False,
     )
@@ -145,7 +145,7 @@ def create_summary_agent() -> Agent:
         - 💡 Best Practice Suggestions (Nice to have)
         
         IMPORTANT: Always give your final answer in Chinese (中文回答).""",
-        llm="gemini-3-flash",
+        llm="gemini-3-flash-preview",
         verbose=True,
         allow_delegation=False,
     )
