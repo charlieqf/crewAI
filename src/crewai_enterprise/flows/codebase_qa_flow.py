@@ -43,24 +43,20 @@ class CodebaseQAFlow(Flow):
         
         # 2. Define Task
         qa_task = Task(
-            description=f"""
-            Answer user question about Project: {self.project_id}.
+            description=f"""Analyze the codebase to answer the following question: 
+            "{self.query}"
             
-            User Question: {self.query}
+            Context provided: {self.context}
             
-            Additional Context (e.g., image description): 
-            {self.context}
+            Strict Guidelines:
+            1. You MUST use search_code to find files matching internal names (tables, fields, etc.).
+            2. For every file you intend to mention in your final answer, you MUST first call get_file to read its actual content.
+            3. NEVER assume a function exists just because the filename matches or a search snippet looks relevant.
+            4. If the user asks for Python only, ignore Java/SQL results in your logic analysis but you may mention they exist if relevant.
+            5. If you cannot find a Python implementation but find Java/SQL, report exactly that. DO NOT invent a Python version.
+            6. Your final answer must list the files you actually READ and the specific functions/lines you found.
             
-            IMPORTANT: Always use ref="{self.branch}" when calling get_file, list_files, or search_code to ensure you're viewing the correct branch.
-            
-            Action Guide:
-            1. Extract keywords from the question (class names, function names, error messages).
-            2. Use list_files with ref="{self.branch}" to view root directory structure to infer code organization.
-            3. Use search_code to search for keywords.
-            4. Use get_file with ref="{self.branch}" to read relevant code.
-            5. If it's an error, try to find where the error message is defined or thrown.
-            
-            Provide a clear, evidence-based answer.
+            Target Branch: {self.branch}
             """,
             agent=qa_agent,
             expected_output="Detailed answer to user's question including code references and potential solutions"
