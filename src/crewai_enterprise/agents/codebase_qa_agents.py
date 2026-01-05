@@ -34,7 +34,7 @@ def create_codebase_qa_agent(gitlab_tool) -> Agent:
         - Provide copy-paste ready code snippets or commands.
         - IMPORTANT: Always give your final answer in Chinese (中文回答).""",
         tools=[gitlab_tool],
-        llm="gemini/gemini-3-flash-preview", # Gemini is good at long context
+        llm="gemini/gemini-1.5-flash", # Gemini is good at long context
         verbose=True,
         allow_delegation=False,
     )

@@ -22,10 +22,10 @@ Updated to use `python-gitlab` SDK with the following capabilities:
 
 | Agent | LLM | Focus |
 |-------|-----|-------|
-| Architecture & Security | Claude | Design patterns, security risks |
-| Performance | Gemini | Algorithm complexity, resource usage |
-| Testing (Disabled) | GPT-4 | Test coverage, maintainability |
-| Summary | Gemini | Aggregates findings into final report |
+| Architecture & Security | Gemini 3 Flash | Design patterns, security risks |
+| Performance | Gemini 3 Flash | Algorithm complexity, resource usage |
+| Testing (Disabled) | Gemini 3 Flash | Test coverage, maintainability |
+| Summary | Gemini 3 Flash | Aggregates findings into final report |
 
 ### C. Codebase QA Agent
 **File:** `src/crewai_enterprise/agents/codebase_qa_agents.py`
@@ -97,4 +97,6 @@ python -m unittest tests/tools/test_gitlab_tool.py
 
 ## 4. Dependencies
 
-- `python-gitlab>=4.0.0` (added to `requirements-server.txt`)
+- `python-gitlab>=4.0.0`
+- `crewai[google-genai]>=0.1.0` (required for Google Gemini native integration)
+- `google-generativeai>=0.3.0`
