@@ -37,6 +37,8 @@ class CodebaseQAFlow(Flow):
         """Execute the QA process."""
         
         # 1. Create Agent
+        # Lock the tool to the specific branch to prevent agent hallucinations/accidental master searches
+        self.gitlab_tool.fixed_branch = self.branch
         qa_agent = create_codebase_qa_agent(self.gitlab_tool)
         
         # 2. Define Task

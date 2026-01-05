@@ -88,6 +88,7 @@ class GitLabTool(BaseTool):
     
     # python-gitlab client
     _gl: Any = PrivateAttr()
+    fixed_branch: Optional[str] = Field(None, description="If set, all actions will use this branch/ref and ignore input 'ref'")
     
     def __init__(self, **data):
         super().__init__(**data)
@@ -110,6 +111,10 @@ class GitLabTool(BaseTool):
         path: Optional[str] = None
     ) -> str:
         """Execute the tool logic."""
+        # Enforce fixed_branch if configured
+        if self.fixed_branch:
+            ref = self.fixed_branch
+            logger.info(f"GitLabTool: Enforcing fixed branch '{ref}'")
         try:
             # projects.get can take id or 'namespace/project'
             project = self._gl.projects.get(project_id)

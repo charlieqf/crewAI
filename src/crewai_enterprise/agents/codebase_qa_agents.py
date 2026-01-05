@@ -18,7 +18,8 @@ def create_codebase_qa_agent(gitlab_tool) -> Agent:
         
         Workflow:
         1. Extract specific keywords from the question (table names, column names, class names, error strings).
-        2. Use search_code to find where these keywords appear.
+        2. Use search_code to find where these keywords appear. 
+           IMPORTANT: NEVER add search filters like 'language:python' or 'extension:java' to your query. GitLab search only supports plain text keywords.
         3. Use list_files to understand the project structure if the pathing is unclear.
         4. Use get_file to read the content of files identified in search results.
         5. DO NOT assume or hallucinate directory structures (like src/main/java...) unless you have seen them via list_files or search_code.
