@@ -729,7 +729,7 @@ async def _call_llm_async(
     response_url: str | None = None,
 ) -> None:
     """Call the appropriate LLM asynchronously and update task result."""
-    
+    print(f"[LLM_ASYNC_START] stream_id={stream_id} content={content[:50]!r}", flush=True)
     
     # Check for prompt management commands
     # Commands can appear after @mention, so search for / anywhere in content
@@ -1305,7 +1305,7 @@ def register_aibot_routes(app: FastAPI) -> None:
         nonce: str = Query(...),
     ) -> Response:
         """Handle incoming messages from WeCom intelligent robot."""
-        logger.info(f"--- [AIBOT_ENTRY] bot={bot_type} signature={msg_signature[:10]}... timestamp={timestamp} ---")
+        print(f"--- [AIBOT_ENTRY] bot={bot_type} signature={msg_signature[:10]}... timestamp={timestamp} ---", flush=True)
         if bot_type not in BOT_CONFIGS:
             raise HTTPException(status_code=404, detail=f"Unknown bot: {bot_type}")
 
@@ -1370,6 +1370,7 @@ async def _handle_text_message(
     response_url: str | None = None,
 ) -> Response:
     """Handle text message: start LLM processing, return immediate 'thinking' response."""
+    print(f"[AIBOT_TEXT_START] bot={bot_type} data_keys={list(data.keys())}", flush=True)
     # Cleanup old tasks on each message to prevent unbounded growth
     _cleanup_old_tasks()
 
