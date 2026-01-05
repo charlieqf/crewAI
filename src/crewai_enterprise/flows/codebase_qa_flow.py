@@ -52,10 +52,11 @@ class CodebaseQAFlow(Flow):
             Strict Guidelines:
             1. You MUST use search_code to find files matching internal names (tables, fields, etc.).
             2. For every file you intend to mention in your final answer, you MUST first call get_file to read its actual content.
-            3. NEVER assume a function exists just because the filename matches or a search snippet looks relevant.
-            4. If the user asks for Python only, ignore Java/SQL results in your logic analysis but you may mention they exist if relevant.
-            5. If you cannot find a Python implementation but find Java/SQL, report exactly that. DO NOT invent a Python version.
-            6. Your final answer must list the files you actually READ and the specific functions/lines you found.
+            3. NEVER assume a function or file exists. Only use filenames returned by search_code or list_files.
+            4. If a file is not found (404), DO NOT mention it in your final answer unless the user specifically asked about that file.
+            5. If the user asks for Python only, ignore Java/SQL results in your logic analysis but you may mention they exist if relevant.
+            6. If you cannot find a Python implementation but find Java/SQL, report exactly that. DO NOT invent a Python version or guess where it might be.
+            7. Your final answer must ONLY list the files you actually READ successfully and what you found in them.
             
             Target Branch: {self.branch}
             """,

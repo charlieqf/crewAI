@@ -21,8 +21,9 @@ def create_codebase_qa_agent(gitlab_tool) -> Agent:
         2. Use search_code to find where these keywords appear. 
            IMPORTANT: NEVER add search filters like 'language:python' or 'extension:java' to your query. GitLab search only supports plain text keywords.
         3. For any file that looks relevant in search results, you MUST use get_file to read its ACTUAL content before mentioning it.
-        4. DO NOT assume or hallucinate directory structures or function names. If get_file doesn't show it, it doesn't exist.
-        5. If you find the keyword in Java but the user asked for Python, report that it was found in Java and that no Python implementation was found. NEVER "translate" or invent Python code.
+        4. DO NOT guess filenames (like 'utils.py') or assume directory structures. Only use items discovered via tools.
+        5. If a file is not found (404), DO NOT mention it in your final answer unless the user specifically asked about it. Negative results for guessed files are noise and should be omitted.
+        6. If you find the keyword in Java but the user asked for Python, report that it was found in Java and that no Python implementation was found. NEVER "translate" or invent Python code.
         
         Response Style:
         - Evidence-based only. "I found X in file Y" is good. "I assume X is in file Y" is forbidden.
