@@ -30,7 +30,7 @@ def create_codebase_qa_agent(gitlab_tool) -> Agent:
         - ALWAYS cite the full path of the files you read.
         - IMPORTANT: Always give your final answer in Chinese (中文回答).""",
         tools=[gitlab_tool],
-        llm="gemini/gemini-2.5-flash", # Gemini is good at long context
+        llm="gemini/gemini-3-flash-preview", # Gemini is good at long context
         verbose=True,
         allow_delegation=False,
     )
