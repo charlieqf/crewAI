@@ -98,21 +98,21 @@ BOT_CONFIGS: dict[str, dict[str, str | bool]] = {
         "token_env": "GEMINI_BOT_TOKEN",
         "aes_key_env": "GEMINI_BOT_ENCODING_AES_KEY",
         "supports_file_analysis": True,  # Gemini supports native file analysis
-        "system_prompt": "你是Gemini,一个擅长分析和解决问题的AI助手。请用中文回答。\n\n【文件生成规范】\n如果用户要求生成文件(如HTML报告、代码文件、资源文件等),你必须严格遵循以下规则:\n1. 严禁使用 Markdown 代码块(```)包裹文件内容。\n2. 必须使用 <FILE> 标签格式,且单次回答只生成一个文件。\n3. 必须包含完整的 name 属性(带后缀)。\n\n正例:\n<FILE name=\"example.html\">\n<!DOCTYPE html><html>...</html>\n</FILE>\n\n反例 (严禁这样写):\n<F\n```html\n... (这是错误的!)\n```\n</FILE>",
+        "system_prompt": "你是Gemini,一个极其专业且严谨的AI助手。请以中文回答。\n\n【界面分析与复现指令】\n1. 如果用户提供了截图，你必须仔细分析界面的布局、色彩、组件和文字内容。\n2. 如果用户要求“复现”或“生成文件”，你必须生成一个 HTML 文件来还原该截图。\n\n【文件生成格式 - 绝对指令】\n你必须将生成的文件内容放在 <FILE> 标签中，严禁简写，严禁使用 Markdown 代码块：\n\n<FILE name=\"文件名.html\">\n文件完整内容(直接写，不要用 ``` 包裹)\n</FILE>",
     },
     "chatgpt": {
         "provider": "openai",
         "token_env": "CHATGPT_BOT_TOKEN",
         "aes_key_env": "CHATGPT_BOT_ENCODING_AES_KEY",
         "supports_file_analysis": False,  # ChatGPT does not support large file native analysis
-        "system_prompt": "你是ChatGPT,一个友好的AI助手。请用中文回答。\n\n【文件生成规范】\n如果用户要求生成文件(如HTML报告、代码文件等),你必须严格遵循以下规则:\n1. 严禁使用 Markdown 代码块(```)包裹文件内容。\n2. 必须使用 <FILE> 标签格式。\n3. 必须包含完整的 name 属性。\n\n格式示例:\n<FILE name=\"文件名.扩展名\">\n文件完整内容\n</FILE>",
+        "system_prompt": "你是ChatGPT,一个专业的AI助手。请以中文回答。\n\n生成文件必须使用格式：\n<FILE name=\"文件名.扩展名\">\n内容\n</FILE>",
     },
     "grok": {
         "provider": "xai",
         "token_env": "GROK_BOT_TOKEN",
         "aes_key_env": "GROK_BOT_ENCODING_AES_KEY",
         "supports_file_analysis": False,  # Grok does not support large file native analysis
-        "system_prompt": "你是Grok,一个富有洞察力的AI助手。请用中文回答。\n\n【文件生成规范】\n如果用户要求生成文件,必须使用 <FILE> 标签且严禁使用 Markdown 代码块包裹内容。\n\n格式示例:\n<FILE name=\"filename.ext\">\ncontent\n</FILE>",
+        "system_prompt": "你是Grok,一个专业的AI助手。请以中文回答。\n\n生成文件必须使用格式：\n<FILE name=\"文件名.扩展名\">\n内容\n</FILE>",
     },
 }
 
@@ -1175,12 +1175,12 @@ async def _call_llm_async(
                         None,
                         lambda: router.chat_with_file(
                             provider=provider,
-                            text=full_prompt,
+                            text=messages[-1]["content"],
                             file_data=file_bytes,
                             file_mime_type=file_ctx["mime"],
                             filename=filename,
-                            file_uri=None,
-                            system_prompt=None, # Already in history
+                            history=messages[:-1],
+                            system_prompt=system_prompt,
                         )
                     )
                 else:
@@ -1198,11 +1198,13 @@ async def _call_llm_async(
                             None,
                             lambda: router.chat_with_file(
                                 provider=provider,
-                                text=full_prompt,
+                                text=messages[-1]["content"],
                                 file_data=None, 
                                 file_mime_type=file_ctx["mime"],
                                 filename=filename,
                                 file_uri=file_uri,
+                                history=messages[:-1],
+                                system_prompt=system_prompt,
                             )
                         )
                     else:
@@ -1252,10 +1254,12 @@ async def _call_llm_async(
                                 None,
                                 lambda: router.chat_with_file(
                                     provider=provider,
-                                    text=full_prompt,
+                                    text=messages[-1]["content"],
                                     file_data=file_bytes, 
                                     file_mime_type=file_ctx["mime"],
                                     filename=filename,
+                                    history=messages[:-1],
+                                    system_prompt=system_prompt,
                                 )
                             )
                         except Exception as download_err:
@@ -2072,6 +2076,9 @@ async def _call_vision_llm_async(
 
         start_time = time.time()
 
+        # Fetch history for vision LLM call
+        messages = context_manager.get_messages_for_llm(chat_id, system_prompt=system_prompt)
+
         # Run vision LLM call in thread pool
         loop = asyncio.get_running_loop()
         response = await loop.run_in_executor(
@@ -2081,6 +2088,7 @@ async def _call_vision_llm_async(
                 text=prompt,
                 image_base64=image_base64,
                 system_prompt=system_prompt,
+                history=messages[:-1],
             )
         )
 
@@ -2536,30 +2544,29 @@ async def _call_file_llm_async(
             )
         else:
             # Chat with Cloud URI or Base64 URI
-            real_file_data = file_bytes # Fix: Always pass file_bytes if we have it (for non-Gemini PDF fallback)
+            real_file_data = file_bytes
             real_file_uri = file_uri
             
-            if file_uri and file_uri.startswith("base64:"):
-                # Use data from URI if it's already base64 (redundant but safe)
-                real_file_data = base64.b64decode(file_uri[7:])
-                real_file_uri = None
+            # Fetch history for file LLM call
+            from src.crewai_enterprise.utils.chat_context import get_context_manager
+            messages = get_context_manager().get_messages_for_llm(chat_id, system_prompt=system_prompt)
             
             response = await loop.run_in_executor(
                 None,
                 lambda: router.chat_with_file(
                     provider=provider,
-                    text=prompt, 
+                    text=messages[-1]["content"],
                     file_data=real_file_data,
                     file_uri=real_file_uri,
                     file_mime_type=mime_type,
-                    filename=filename, # Include filename for better context
-                    system_prompt=system_prompt,
+                    filename=filename,
+                    history=messages[:-1],
+                    system_prompt=system_prompt
                 )
             )
 
         
         elapsed_ms = int((time.time() - start_time) * 1000)
-        logger.info(f"[AIBOT_FILE_RES] bot={bot_type} elapsed={elapsed_ms}ms")
         
         # Post-process response for generated files (Auditor Refinement)
         final_content = await _process_llm_file_output(

@@ -258,6 +258,7 @@ class LLMRouter:
         model: str | None = None,
         max_tokens: int = 2048,
         temperature: float = 0.7,
+        history: list[dict] | None = None,
     ) -> LLMResponse:
         """
         Chat with an image (multimodal).
@@ -271,9 +272,7 @@ class LLMRouter:
             model: Model name (uses default if not specified)
             max_tokens: Maximum tokens in response
             temperature: Sampling temperature
-
-        Returns:
-            LLMResponse with content and metadata
+            history: Optional conversation history
         """
         if provider not in self.PROVIDERS:
             raise LLMError(f"Unknown provider: {provider}")
@@ -288,14 +287,16 @@ class LLMRouter:
         if provider == "gemini":
             return self._call_gemini_vision(
                 api_key, text, image_base64, image_mime_type,
-                system_prompt, model, max_tokens, temperature
+                system_prompt, model, max_tokens, temperature,
+                history=history
             )
         else:
             # OpenAI-compatible vision API
             return self._call_openai_vision(
                 provider, api_key, config["base_url"],
                 text, image_base64, image_mime_type,
-                system_prompt, model, max_tokens, temperature
+                system_prompt, model, max_tokens, temperature,
+                history=history
             )
 
     def _call_openai_vision(
@@ -310,8 +311,9 @@ class LLMRouter:
         model: str,
         max_tokens: int,
         temperature: float,
+        history: list[dict] | None = None,
     ) -> LLMResponse:
-        """Call OpenAI-compatible vision API."""
+        """Call OpenAI-compatible vision API with history."""
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
@@ -321,19 +323,22 @@ class LLMRouter:
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
 
+        if history:
+            messages.extend(history)
+
         # OpenAI vision format: content is array of objects
-        messages.append({
-            "role": "user",
-            "content": [
-                {"type": "text", "text": text},
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:{image_mime_type};base64,{image_base64}"
-                    }
+        user_content = [
+            {"type": "text", "text": text},
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:{image_mime_type};base64,{image_base64}"
                 }
-            ]
-        })
+            }
+        ]
+        
+        # Add current user message
+        messages.append({"role": "user", "content": user_content})
 
         payload = {
             "model": model,
@@ -371,14 +376,51 @@ class LLMRouter:
         model: str,
         max_tokens: int,
         temperature: float,
+        history: list[dict] | None = None,
     ) -> LLMResponse:
-        """Call Google Gemini Vision API."""
+        """Call Google Gemini Vision API with history."""
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
 
-        # Build content with text and image
+        # Build contents from history and current prompt
+        contents = []
+        
+        # 1. Process system prompt and history
+        system_content = system_prompt + "\n" if system_prompt else ""
+        raw_history = history or []
+        
+        final_history = []
+        for msg in raw_history:
+            if msg["role"] == "system":
+                system_content += msg["content"] + "\n"
+            else:
+                final_history.append(msg)
+
+        # 2. Convert history to Gemini contents
+        for msg in final_history:
+            role = "user" if msg["role"] == "user" else "model"
+            if contents and contents[-1]["role"] == role:
+                contents[-1]["parts"][0]["text"] += "\n" + msg["content"]
+            else:
+                contents.append({"role": role, "parts": [{"text": msg["content"]}]})
+
+        # 3. Handle system prompt - prepend to first user message
+        if system_content:
+            first_user = None
+            for c in contents:
+                if c["role"] == "user":
+                    first_user = c
+                    break
+            
+            if first_user:
+                first_user["parts"][0]["text"] = system_content + "\n" + first_user["parts"][0]["text"]
+            else:
+                # Will prepend to current prompt later
+                pass
+
+        # 4. Build current user part with text and image
         user_text = text
-        if system_prompt:
-            user_text = system_prompt + "\n\n" + text
+        if system_content and not any(c["role"] == "user" for c in contents):
+            user_text = system_content + "\n" + text
 
         parts = [
             {"text": user_text},
@@ -390,8 +432,13 @@ class LLMRouter:
             }
         ]
 
+        if contents and contents[-1]["role"] == "user":
+            contents[-1]["parts"].extend(parts)
+        else:
+            contents.append({"role": "user", "parts": parts})
+
         payload = {
-            "contents": [{"role": "user", "parts": parts}],
+            "contents": contents,
             "generationConfig": {
                 "maxOutputTokens": max_tokens,
                 "temperature": temperature,
@@ -403,6 +450,8 @@ class LLMRouter:
             response.raise_for_status()
             data = response.json()
         except requests.exceptions.RequestException as e:
+            if hasattr(e, 'response') and e.response:
+                logger.error(f"Gemini Vision API Error Response: {e.response.text}")
             raise LLMError(f"Gemini Vision API error: {e}") from e
 
         content = data["candidates"][0]["content"]["parts"][0]["text"]
@@ -450,6 +499,7 @@ class LLMRouter:
         model: str | None = None,
         max_tokens: int = 2048,
         temperature: float = 0.7,
+        history: list[dict] | None = None,
     ) -> LLMResponse:
         """
         Chat with a file (document/PDF/etc).
@@ -462,6 +512,7 @@ class LLMRouter:
             filename: Name
             file_uri: Pre-uploaded file URI (optional)
             ...
+            history: Optional conversation history
         """
         if provider not in self.PROVIDERS:
             raise LLMError(f"Unknown provider: {provider}")
@@ -478,7 +529,8 @@ class LLMRouter:
             return self._call_gemini_file(
                 api_key, text, file_uri, file_mime_type,
                 system_prompt, model, max_tokens, temperature,
-                file_data=file_data
+                file_data=file_data,
+                history=history
             )
         elif file_mime_type.startswith("image/"):
             # If it's an image, we can use chat_with_image for any provider
@@ -509,8 +561,14 @@ class LLMRouter:
             
             if file_data:
                 extracted_text = self._extract_text_from_pdf(file_data)
+                
+                # Combine history into context if available
+                history_text = ""
+                if history:
+                    history_text = "对话历史:\n" + "\n".join([f"{'用户' if m['role']=='user' else '模型'}: {m['content']}" for m in history]) + "\n\n"
+
                 full_prompt = (
-                    f"(注意：用户上传了 PDF 文件 {filename}，已为您提取文本内容如下，请基于此回答):\n"
+                    f"{history_text}(注意：用户上传了 PDF 文件 {filename}，已为您提取文本内容如下，请基于此回答):\n"
                     f"```\n{extracted_text[:10000]}\n```\n\n用户提问: {text}"
                 )
                 return self.chat(
@@ -633,28 +691,88 @@ class LLMRouter:
         max_tokens: int,
         temperature: float,
         file_data: bytes | None = None,
+        history: list[dict] | None = None,
     ) -> LLMResponse:
-        """Call Gemini with file URI or Inline Data."""
+        """Call Gemini with file URI or Inline Data, including history."""
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
 
-        user_text = text
-        if system_prompt:
-            user_text = system_prompt + "\n\n" + text
+        # If file_uri is an external URL (not Gemini URI), we must download it or use inline data
+        is_external_url = file_uri and (file_uri.startswith("http://") or file_uri.startswith("https://")) and "generativelanguage.googleapis.com" not in file_uri
+        
+        if is_external_url and not file_data:
+            try:
+                logger.info(f"[LLM_ROUTER] Downloading external file for Gemini: {file_uri}")
+                resp = requests.get(file_uri, timeout=30)
+                resp.raise_for_status()
+                file_data = resp.content
+                file_uri = None # Use inline data instead
+            except Exception as e:
+                logger.error(f"[LLM_ROUTER] Failed to download external file: {e}")
 
-        media_part = {}
+        # Build contents from history and current prompt
+        contents = []
+        
+        # 1. Process system prompt and history
+        # Gemini v1beta merge pattern
+        system_content = system_prompt + "\n" if system_prompt else ""
+        raw_history = history or []
+        
+        # Pull out system messages from history if any
+        final_history = []
+        for msg in raw_history:
+            if msg["role"] == "system":
+                system_content += msg["content"] + "\n"
+            else:
+                final_history.append(msg)
+
+        # 2. Convert history to Gemini contents
+        for msg in final_history:
+            role = "user" if msg["role"] == "user" else "model"
+            if contents and contents[-1]["role"] == role:
+                contents[-1]["parts"][0]["text"] += "\n" + msg["content"]
+            else:
+                contents.append({"role": role, "parts": [{"text": msg["content"]}]})
+
+        # 3. Handle system prompt - prepend to first user message
+        if system_content:
+            # Find first user message in contents
+            first_user = None
+            for c in contents:
+                if c["role"] == "user":
+                    first_user = c
+                    break
+            
+            if first_user:
+                # Prepend to existing first user message
+                first_user["parts"][0]["text"] = system_content + "\n" + first_user["parts"][0]["text"]
+            else:
+                # No user message in history, or history empty
+                # We'll prepend it to the current message later if needed
+                pass
+
+        # 4. Process current prompt with file
+        user_text = text
+        # If system content wasn't prepended to history (because no user msg in history), prepend to current
+        if system_content and not any(c["role"] == "user" for c in contents):
+            user_text = system_content + "\n" + text
+
+        parts = []
         if file_uri:
-            media_part = {"file_data": {"mime_type": mime_type, "file_uri": file_uri}}
+            parts.append({"file_data": {"mime_type": mime_type, "file_uri": file_uri}})
         elif file_data:
             b64_data = base64.b64encode(file_data).decode('utf-8')
-            media_part = {"inline_data": {"mime_type": mime_type, "data": b64_data}}
+            parts.append({"inline_data": {"mime_type": mime_type, "data": b64_data}})
         
-        parts = []
-        if media_part:
-            parts.append(media_part)
         parts.append({"text": user_text})
 
+        # Add current user message
+        if contents and contents[-1]["role"] == "user":
+            contents[-1]["parts"].extend(parts)
+        else:
+            contents.append({"role": "user", "parts": parts})
+
         payload = {
-            "contents": [{"role": "user", "parts": parts}],
+            "contents": contents,
             "generationConfig": {
                 "maxOutputTokens": max_tokens,
                 "temperature": temperature,
@@ -666,6 +784,9 @@ class LLMRouter:
             response.raise_for_status()
             data = response.json()
         except requests.exceptions.RequestException as e:
+            # Log full response on error for debugging
+            if hasattr(e, 'response') and e.response:
+                logger.error(f"Gemini API Error Response: {e.response.text}")
             raise LLMError(f"Gemini File Analysis API error: {e}") from e
 
         content = data["candidates"][0]["content"]["parts"][0]["text"]
