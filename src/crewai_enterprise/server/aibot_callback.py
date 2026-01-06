@@ -2120,59 +2120,6 @@ async def _call_vision_llm_async(
             _stream_tasks[stream_id]["finished"] = True
             _stream_tasks[stream_id]["completed_at"] = time.time()
 
-            # Check for Codebase QA Context (Screenshot Diagnosis)
-            active_project = _user_project_context.get(chat_id)
-            if active_project:
-                # If we have a project context, use the image description to query the codebase
-                image_desc = response.content
-                project_path = active_project["project_path"]
-                gitlab_base_url = active_project["gitlab_url"]
-                logger.info(f"[GITLAB_VISA] Detected project context {project_path}, triggering Codebase QA with image description")
-                
-                gitlab_token = os.getenv("GITLAB_TOKEN")
-                
-                if gitlab_token:
-                    try:
-                        # Append QA status to current response
-                        if stream_id in _stream_tasks:
-                            current_content = _stream_tasks[stream_id]["content"]
-                            _stream_tasks[stream_id]["content"] = f"{current_content}\n\n🤖 正在查阅代码库分析截图原因..."
-                            _stream_tasks[stream_id]["finished"] = False # Re-open stream
-                        
-                        flow = CodebaseQAFlow(
-                            gitlab_url=gitlab_base_url,
-                            private_token=gitlab_token,
-                            project_id=project_path,  # Use string, not dict
-                            query="请根据这张图片的描述，分析可能的原因或相关代码位置。",
-                            context=f"图片描述:\n{image_desc}"
-                        )
-                        
-                        loop = asyncio.get_running_loop()
-                        qa_result = await loop.run_in_executor(None, flow.kickoff)
-                        
-                        # Combine Vision + Codebase QA results
-                        final_response = f"{qa_result}\n\n---\n(图片初步分析: {image_desc})"
-                        
-                        # Update task with final result
-                        if stream_id in _stream_tasks:
-                            _stream_tasks[stream_id]["content"] = final_response
-                            _stream_tasks[stream_id]["finished"] = True
-                            
-                        # Update chat context with final result
-                        get_context_manager().add_message(
-                           chat_id=chat_id,
-                           sender_id=f"bot_{bot_type}_qa", # Virtual sender to distinguish
-                           sender_name=f"{bot_type} QA",
-                           content=final_response,
-                           role="assistant",
-                           bot_type=bot_type,
-                        )
-                        
-                    except Exception as e:
-                        logger.error(f"[GITLAB_VISA] QA failed: {e}")
-                        # Fallback: keep original vision response
-                        pass
-
     except LLMError as e:
         logger.error(f"[AIBOT_VISION_ERR] bot={bot_type} error={e}")
         if stream_id in _stream_tasks:
