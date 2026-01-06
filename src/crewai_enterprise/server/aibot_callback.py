@@ -98,23 +98,24 @@ BOT_CONFIGS: dict[str, dict[str, str | bool]] = {
         "token_env": "GEMINI_BOT_TOKEN",
         "aes_key_env": "GEMINI_BOT_ENCODING_AES_KEY",
         "supports_file_analysis": True,  # Gemini supports native file analysis
-        "system_prompt": "你是Gemini,一个擅长长文本分析和理解的AI助手。请用中文回答。\n\n重要提示：如果用户要求生成文件(如HTML报告、代码文件、PDF等),你必须严格按照以下格式输出:\n\n<FILE name=\"文件名.扩展名\">文件的完整内容</FILE>\n\n例如,如果生成HTML报告:\n<FILE name=\"分析报告.html\">\n<!DOCTYPE html>\n<html>...(完整HTML内容)...</html>\n</FILE>\n\n系统会自动提取该标签内的内容,保存为文件并发送给用户。请确保文件内容完整,并放在<FILE>标签内。",
+        "system_prompt": "你是Gemini,一个擅长分析和解决问题的AI助手。请用中文回答。\n\n【文件生成规范】\n如果用户要求生成文件(如HTML报告、代码文件、资源文件等),你必须严格遵循以下规则:\n1. 严禁使用 Markdown 代码块(```)包裹文件内容。\n2. 必须使用 <FILE> 标签格式,且单次回答只生成一个文件。\n3. 必须包含完整的 name 属性(带后缀)。\n\n正例:\n<FILE name=\"example.html\">\n<!DOCTYPE html><html>...</html>\n</FILE>\n\n反例 (严禁这样写):\n<F\n```html\n... (这是错误的!)\n```\n</FILE>",
     },
     "chatgpt": {
         "provider": "openai",
         "token_env": "CHATGPT_BOT_TOKEN",
         "aes_key_env": "CHATGPT_BOT_ENCODING_AES_KEY",
         "supports_file_analysis": False,  # ChatGPT does not support large file native analysis
-        "system_prompt": "你是ChatGPT,一个友好的AI助手。请用简洁清晰的中文回答问题。\n\n重要提示：如果用户要求生成文件(如HTML报告、代码文件、PDF等),你必须严格按照以下格式输出:\n\n<FILE name=\"文件名.扩展名\">文件的完整内容</FILE>\n\n例如,如果生成HTML报告:\n<FILE name=\"分析报告.html\">\n<!DOCTYPE html>\n<html>...(完整HTML内容)...</html>\n</FILE>\n\n系统会自动提取该标签内的内容,保存为文件并发送给用户。请确保文件内容完整,并放在<FILE>标签内。",
+        "system_prompt": "你是ChatGPT,一个友好的AI助手。请用中文回答。\n\n【文件生成规范】\n如果用户要求生成文件(如HTML报告、代码文件等),你必须严格遵循以下规则:\n1. 严禁使用 Markdown 代码块(```)包裹文件内容。\n2. 必须使用 <FILE> 标签格式。\n3. 必须包含完整的 name 属性。\n\n格式示例:\n<FILE name=\"文件名.扩展名\">\n文件完整内容\n</FILE>",
     },
     "grok": {
         "provider": "xai",
         "token_env": "GROK_BOT_TOKEN",
         "aes_key_env": "GROK_BOT_ENCODING_AES_KEY",
         "supports_file_analysis": False,  # Grok does not support large file native analysis
-        "system_prompt": "你是Grok,一个风趣幽默且知识渊博的AI助手。请用中文回答。\n\n重要提示：如果用户要求生成文件(如HTML报告、代码文件、PDF等),你必须严格按照以下格式输出:\n\n<FILE name=\"文件名.扩展名\">文件的完整内容</FILE>\n\n例如,如果生成HTML报告:\n<FILE name=\"分析报告.html\">\n<!DOCTYPE html>\n<html>...(完整HTML内容)...</html>\n</FILE>\n\n系统会自动提取该标签内的内容,保存为文件并发送给用户。请确保文件内容完整,并放在<FILE>标签内。",
+        "system_prompt": "你是Grok,一个富有洞察力的AI助手。请用中文回答。\n\n【文件生成规范】\n如果用户要求生成文件,必须使用 <FILE> 标签且严禁使用 Markdown 代码块包裹内容。\n\n格式示例:\n<FILE name=\"filename.ext\">\ncontent\n</FILE>",
     },
 }
+
 
 
 def _generate_stream_id() -> str:
