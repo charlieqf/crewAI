@@ -557,7 +557,8 @@ def _handle_prompt_command(
 • `/reset_prompt` - 恢复默认系统提示词
 
 **📁 文件上下文管理：**
-• `/new` - 清除文件上下文，开始新对话
+• `/reset` - **[新增]** 彻底重置所有对话历史和上下文
+• `/new` - 清除文件叠加态，开始新话题
 • Quote文件消息 - 明确引用特定文件
 • 自动上下文：文件上传后10分钟内自动使用
 
@@ -628,6 +629,23 @@ def _handle_prompt_command(
         except Exception as e:
             logger.error(f"[PROMPT_CMD] Failed to clear context: {e}")
             response = "❌ 清除失败，请稍后重试"
+        return {"content": response}
+    
+    elif command == "reset":
+        # Completely clear all chat metrics and history
+        try:
+            # 1. Clear message history in DB
+            deleted_count = context_manager.clear_context(chat_id)
+            # 2. Clear file contexts
+            context_manager.clear_file_context(chat_id)
+            # 3. Clear project context if any
+            if chat_id in _user_project_context:
+                del _user_project_context[chat_id]
+            
+            response = f"✅ 已彻底重置所有上下文（删除了 {deleted_count} 条历史记录）\n\n💡 现在是一个全新的开始，机器人已不再记得之前的任何对话。"
+        except Exception as e:
+            logger.error(f"[PROMPT_CMD] Failed to reset context: {e}")
+            response = "❌ 重置失败，请稍后重试"
         return {"content": response}
     
     elif command == "codebase":
