@@ -97,22 +97,22 @@ BOT_CONFIGS: dict[str, dict[str, str | bool]] = {
         "provider": "gemini",
         "token_env": "GEMINI_BOT_TOKEN",
         "aes_key_env": "GEMINI_BOT_ENCODING_AES_KEY",
-        "supports_file_analysis": True,  # Gemini supports native file analysis
-        "system_prompt": "你是Gemini,一个极其专业且严谨的AI助手。请以中文回答。\n\n【界面分析与复现指令】\n1. 如果用户提供了截图，你必须仔细分析界面的布局、色彩、组件和文字内容。\n2. 如果用户要求“复现”或“生成文件”，你必须生成一个 HTML 文件来还原该截图。\n\n【文件生成格式 - 绝对指令】\n你必须将生成的文件内容放在 <FILE> 标签中，严禁简写，严禁使用 Markdown 代码块：\n\n<FILE name=\"文件名.html\">\n文件完整内容(直接写，不要用 ``` 包裹)\n</FILE>",
+        "supports_file_analysis": True,
+        "system_prompt": "你是Gemini。请以中文回答。\n\n【核心指令：文件生成】\n1. 当你决定生成文件时，请立即输出文件内容，严禁进行过多文字说明或解释。\n2. 必须使用以下格式包裹文件内容，严禁简写为 <F，严禁使用 Markdown 代码块：\n\n<FILE name=\"文件名.html\">\n文件完整内容(直接写，不要用 ``` 包裹)\n</FILE>\n\n3. 如果收到复现界面的指令，请直接输出 HTML 文件，严禁分步骤解释。",
     },
     "chatgpt": {
         "provider": "openai",
         "token_env": "CHATGPT_BOT_TOKEN",
         "aes_key_env": "CHATGPT_BOT_ENCODING_AES_KEY",
-        "supports_file_analysis": False,  # ChatGPT does not support large file native analysis
-        "system_prompt": "你是ChatGPT,一个专业的AI助手。请以中文回答。\n\n生成文件必须使用格式：\n<FILE name=\"文件名.扩展名\">\n内容\n</FILE>",
+        "supports_file_analysis": False,
+        "system_prompt": "你是ChatGPT。请以中文回答。\n\n【核心指令：文件生成】\n1. 直接输出文件内容，减少文字解释。\n2. 必须使用格式：\n<FILE name=\"文件名.扩展名\">\n内容\n</FILE>\n严禁使用 Markdown 代码块。",
     },
     "grok": {
         "provider": "xai",
         "token_env": "GROK_BOT_TOKEN",
         "aes_key_env": "GROK_BOT_ENCODING_AES_KEY",
-        "supports_file_analysis": False,  # Grok does not support large file native analysis
-        "system_prompt": "你是Grok,一个专业的AI助手。请以中文回答。\n\n生成文件必须使用格式：\n<FILE name=\"文件名.扩展名\">\n内容\n</FILE>",
+        "supports_file_analysis": False,
+        "system_prompt": "你是Grok。请以中文回答。\n\n【核心指令：文件生成】\n1. 直接输出内容，禁止解释。\n2. 必须使用格式：\n<FILE name=\"文件名.扩展名\">\n内容\n</FILE>",
     },
 }
 
@@ -480,10 +480,15 @@ async def _process_llm_file_output(
             # The cloud link in the text response is sufficient
             logger.info(f"[AIBOT_FILE] File available at cloud link (robot response_url does not support file attachments)")
             
-            # 5. Final text cleanup (replace the entire tag with info) - Use ORIGINAL filename
-            pattern_to_replace = re.escape(f'<FILE name="{original_filename}">') + r'[\s\S]*?' + re.escape('</FILE>')
+            # 5. Final text cleanup (replace the entire tag with info) - More robust regex logic
+            # Use a pattern that specifically targets THIS file's tag structure
+            # to avoid replacing other files if multiple exist.
+            specific_pattern = re.compile(
+                rf'<FILE\s+name="{re.escape(original_filename)}">[\s\S]*?</FILE>',
+                re.IGNORECASE
+            )
             link_display = f"\n\n[已生成文件: {filename}]\n云端链接: {qiniu_url_display}"
-            cleaned_content = re.sub(pattern_to_replace, link_display, cleaned_content, flags=re.IGNORECASE)
+            cleaned_content = specific_pattern.sub(link_display, cleaned_content)
             
         except Exception as e:
             logger.error(f"[AIBOT_FILE] Error processing file {original_filename}: {e}")
