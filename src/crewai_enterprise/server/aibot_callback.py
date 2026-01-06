@@ -120,6 +120,40 @@ def _generate_stream_id() -> str:
     return "".join(random.choices(string.ascii_letters + string.digits, k=16))
 
 
+def _sanitize_text(text: str) -> str:
+    """Remove hidden/invisible characters from text that may come from WeCom copy-paste.
+    
+    This cleans:
+    - Zero-width spaces (U+200B, U+200C, U+200D, U+FEFF)
+    - Various invisible Unicode characters
+    - Normalizes whitespace (full-width to half-width)
+    """
+    if not text:
+        return text
+    
+    # Characters to remove completely
+    invisible_chars = [
+        '\u200b',  # Zero-width space
+        '\u200c',  # Zero-width non-joiner
+        '\u200d',  # Zero-width joiner
+        '\ufeff',  # BOM / Zero-width no-break space
+        '\u00a0',  # Non-breaking space (replace with regular space)
+        '\u3000',  # Ideographic space (full-width space)
+        '\u2028',  # Line separator
+        '\u2029',  # Paragraph separator
+    ]
+    
+    result = text
+    for char in invisible_chars:
+        result = result.replace(char, ' ' if char in ['\u00a0', '\u3000'] else '')
+    
+    # Normalize multiple spaces to single space
+    result = ' '.join(result.split())
+    
+    return result
+
+
+
 def _get_bot_crypto(bot_type: str) -> WXBizJsonMsgCrypt:
     """Get WXBizJsonMsgCrypt instance for a specific bot."""
     config = BOT_CONFIGS.get(bot_type)
@@ -1407,7 +1441,7 @@ async def _handle_text_message(
     _cleanup_old_tasks()
 
     text_data = data.get("text", {})
-    content = text_data.get("content", "").strip()
+    content = _sanitize_text(text_data.get("content", "").strip())
 
     # Extract user info
     from_data = data.get("from", {})
