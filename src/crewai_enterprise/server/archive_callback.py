@@ -126,18 +126,36 @@ async def archive_callback_message(request: Request):
     return {"status": "ok"}
 
 
+from src.crewai_enterprise.utils.wework_finance_sdk import WeWorkFinanceSDK
+
+# Archive SDK configuration
+ARCHIVE_SECRET = os.getenv("ARCHIVE_SECRET", "")
+_archive_sdk: WeWorkFinanceSDK | None = None
+
+def _get_archive_sdk() -> Optional[WeWorkFinanceSDK]:
+    """Lazy initialization of the Finance SDK."""
+    global _archive_sdk
+    if _archive_sdk is None:
+        if not ARCHIVE_SECRET:
+            logger.warning("[ARCHIVE] ARCHIVE_SECRET not set, file retrieval disabled")
+            return None
+        try:
+            sdk = WeWorkFinanceSDK()
+            if sdk.init(WECOM_CORP_ID, ARCHIVE_SECRET):
+                _archive_sdk = sdk
+                logger.info("[ARCHIVE] Finance SDK initialized successfully")
+            else:
+                logger.error("[ARCHIVE] Finance SDK initialization failed")
+        except Exception as e:
+            logger.error(f"[ARCHIVE] Error initializing Finance SDK: {e}")
+    return _archive_sdk
+
+
 async def process_archive_message(message: dict):
     """
     Process an archived message.
     
     We're mainly interested in file messages for automatic collection.
-    
-    Message types:
-    - text: Ignore
-    - image: Could collect for image analysis
-    - file: IMPORTANT - collect PDF, Office docs, etc.
-    - voice: Ignore
-    - video: Maybe collect later
     """
     msg_type = message.get("msgtype", "")
     chat_id = message.get("roomid", "")  # Group chat ID
@@ -163,22 +181,44 @@ async def process_archive_message(message: dict):
     
     logger.info(f"[ARCHIVE_PROCESS] File detected: {filename} ({file_size} bytes)")
     
-    #TODO: Download file using archive SDK
-    # file_content = download_archive_file(sdkfileid)
-    
-    # TODO: Upload to Qiniu
-    # storage = get_storage_manager()
-    # file_uri = await storage.upload_file(file_content, filename)
-    
-    # TODO: Save to database
-    # context_manager = get_context_manager()
-    # context_manager.save_file(
-    #     chat_id=chat_id,
-    #     sender_id=sender_id,
-    #     wecom_msg_id=msg_id,
-    #     filename=filename,
-    #     file_uri=file_uri,
-    #     upload_time=int(time.time())
-    # )
+    # 1. Download file using archive SDK
+    sdk = _get_archive_sdk()
+    if not sdk:
+        logger.warning("[ARCHIVE_PROCESS] Archive SDK not available, skipping download")
+        return
+
+    try:
+        logger.info(f"[ARCHIVE_DOWNLOAD] Starting download for {filename} (id={sdkfileid[:20]}...)")
+        # Run synchronous SDK call in executor
+        import asyncio
+        loop = asyncio.get_running_loop()
+        file_content = await loop.run_in_executor(None, lambda: sdk.get_media_data(sdkfileid))
+        
+        if not file_content:
+            logger.error(f"[ARCHIVE_DOWNLOAD] Download failed for {filename}")
+            return
+            
+        logger.info(f"[ARCHIVE_DOWNLOAD] Downloaded {len(file_content)} bytes for {filename}")
+
+        # 2. Upload to Qiniu
+        storage = get_storage_manager()
+        upload_res = storage.upload_file(file_content, filename)
+        file_uri = upload_res.url
+        logger.info(f"[ARCHIVE_UPLOAD] Uploaded to Qiniu: {file_uri}")
+        
+        # 3. Save to database
+        context_manager = get_context_manager()
+        context_manager.save_file(
+            chat_id=chat_id,
+            sender_id=sender_id,
+            wecom_msg_id=msg_id,
+            filename=filename,
+            file_uri=file_uri,
+            storage_key=upload_res.key
+        )
+        logger.info(f"[ARCHIVE_DB] File context saved for {filename} in chat {chat_id}")
+        
+    except Exception as e:
+        logger.error(f"[ARCHIVE_PROCESS] Error handling file {filename}: {e}")
     
     logger.info(f"[ARCHIVE_PROCESS] File processing complete: {filename}")
