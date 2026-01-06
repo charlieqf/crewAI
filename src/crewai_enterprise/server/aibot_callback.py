@@ -64,6 +64,11 @@ PROJECT_NICKNAMES = {
         "project_path": "qd-team/quick-deal",
         "gitlab_url": "http://gitlab.goldenstand.com",
         "branch": "project-meituan"
+    },
+    "investorportal": {
+        "project_path": "didi/investorportal",
+        "gitlab_url": "http://gitlab.goldenstand.com",
+        "branch": "master"
     }
 }
 
