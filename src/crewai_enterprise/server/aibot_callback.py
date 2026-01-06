@@ -47,6 +47,26 @@ from src.crewai_enterprise.flows.codebase_qa_flow import CodebaseQAFlow
 # In production, this should be in Redis
 _user_project_context: dict[str, dict[str, str]] = {}
 
+# Predefined project nicknames to bypass WeCom URL filtering
+# Usage: @gemini /codebase <nickname> <question>
+PROJECT_NICKNAMES = {
+    "qd": {
+        "project_path": "qd-team/quick-deal",
+        "gitlab_url": "http://gitlab.goldenstand.com",
+        "branch": "project-meituan"
+    },
+    "quick-deal": {
+        "project_path": "qd-team/quick-deal",
+        "gitlab_url": "http://gitlab.goldenstand.com",
+        "branch": "project-meituan"
+    },
+    "project-meituan": {
+        "project_path": "qd-team/quick-deal",
+        "gitlab_url": "http://gitlab.goldenstand.com",
+        "branch": "project-meituan"
+    }
+}
+
 
 # Configure logging
 logging.basicConfig(
@@ -554,38 +574,50 @@ def _handle_prompt_command(
             )
             return {"content": response}
         
-        # Parse args: first part is URL/path, rest is optional question
+        # Parse args: first part is URL/path or NICKNAME, rest is optional question
         args_parts = args.strip().split(maxsplit=1)
         project_input = args_parts[0]
         inline_question = args_parts[1] if len(args_parts) > 1 else None
         
         project_path = project_input
         branch = "main"
-        
-        # Check if it's a URL and extract project path + branch
-        # Pattern for tree view: /-/tree/branch_name
-        # Pattern for blob view: /-/blob/branch_name/file_path
-        url_match = re.match(r"https?://[^\s/]+/(.+?)(?:/-/.*)?$", project_input)
-        if url_match:
-            project_path = url_match.group(1)
-            
-            # Handle branch extraction from /-/tree/ or /-/blob/
-            if "/-/tree/" in project_input:
-                # Format: domain/project/-/tree/branch
-                parts = project_input.split("/-/tree/")
-                project_path = url_match.group(1).split("/-/tree/")[0]
-                branch = parts[1].split("/")[0] if len(parts) > 1 else "main"
-            elif "/-/blob/" in project_input:
-                # Format: domain/project/-/blob/branch/file
-                parts = project_input.split("/-/blob/")
-                project_path = url_match.group(1).split("/-/blob/")[0]
-                branch = parts[1].split("/")[0] if len(parts) > 1 else "main"
-            elif "/-/" in project_path:
-                project_path = project_path.split("/-/")[0]
+        gitlab_base_url = os.getenv("GITLAB_URL", "http://gitlab.goldenstand.com")
 
-        # Extract GitLab base URL from input
-        gitlab_url_match = re.match(r"(https?://[^/]+)", project_input)
-        gitlab_base_url = gitlab_url_match.group(1) if gitlab_url_match else os.getenv("GITLAB_URL", "https://gitlab.goldenstand.com")
+        # Check for nickname first
+        if project_input.lower() in PROJECT_NICKNAMES:
+            config = PROJECT_NICKNAMES[project_input.lower()]
+            project_path = config["project_path"]
+            gitlab_base_url = config["gitlab_url"]
+            branch = config["branch"]
+            print(f"[CODEBASE_CMD] Using nickname {project_input} -> {project_path} ({branch})", flush=True)
+            logger.info(f"[CODEBASE_CMD] Using nickname {project_input} -> {project_path} ({branch})")
+        else:
+            print(f"[CODEBASE_CMD] Parsing as URL: {project_input}", flush=True)
+            # Check if it's a URL and extract project path + branch
+            # Pattern for tree view: /-/tree/branch_name
+            # Pattern for blob view: /-/blob/branch_name/file_path
+            url_match = re.match(r"https?://[^\s/]+/(.+?)(?:/-/.*)?$", project_input)
+            if url_match:
+                project_path = url_match.group(1)
+                
+                # Handle branch extraction from /-/tree/ or /-/blob/
+                if "/-/tree/" in project_input:
+                    # Format: domain/project/-/tree/branch
+                    parts = project_input.split("/-/tree/")
+                    project_path = url_match.group(1).split("/-/tree/")[0]
+                    branch = parts[1].split("/")[0] if len(parts) > 1 else "main"
+                elif "/-/blob/" in project_input:
+                    # Format: domain/project/-/blob/branch/file
+                    parts = project_input.split("/-/blob/")
+                    project_path = url_match.group(1).split("/-/blob/")[0]
+                    branch = parts[1].split("/")[0] if len(parts) > 1 else "main"
+                elif "/-/" in project_path:
+                    project_path = project_path.split("/-/")[0]
+
+            # Extract GitLab base URL from input
+            gitlab_url_match = re.match(r"(https?://[^/]+)", project_input)
+            gitlab_base_url = gitlab_url_match.group(1) if gitlab_url_match else os.getenv("GITLAB_URL", "https://gitlab.goldenstand.com")
+
         
         # Save project context with URL and branch
         _user_project_context[chat_id] = {
