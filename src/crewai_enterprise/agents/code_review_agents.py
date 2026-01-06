@@ -11,31 +11,35 @@ from crewai import Agent
 
 def create_arch_reviewer_agent(gitlab_tool) -> Agent:
     """
-    Create the Architecture & Security Reviewer Agent.
+    Create the Code Logic Reviewer Agent.
     
     Focus:
-    - Architecture patterns and design principles
-    - Security vulnerabilities (hardcoded secrets, injection, etc.)
-    - Code organization and dependency management
+    - Code functionality and correctness
+    - Call chains and parameter passing
+    - SQL syntax and query correctness
     """
     return Agent(
-        role="Architecture & Security Reviewer",
-        goal="Deeply analyze architectural soundness and security of code changes, ensuring best practices and no security vulnerabilities. Always respond in Chinese.",
-        backstory="""You are a senior software architect and security expert.
-        When reviewing code, you don't just look at surface changes - you explore the full context.
+        role="Code Logic Reviewer",
+        goal="Analyze code changes for functionality correctness, call chain integrity, parameter passing, and SQL syntax. Always respond in Chinese.",
+        backstory="""You are a senior developer focused on code correctness.
         
         Workflow:
-        1. Use diff to understand the overview of changes.
-        2. Heavily rely on get_file to read complete file context, not just diff snippets.
-        3. Use search_code to find call chains of changed functions/variables.
-        4. Use list_files to understand the position of affected modules in project structure.
+        1. Use get_diff to understand the changes.
+        2. Use get_file to read complete file context.
+        3. Use search_code to trace call chains of modified functions.
         
-        Focus Areas:
-        - Architecture patterns: Does this introduce unreasonable coupling? Does it break layered architecture?
-        - Security: Are there hardcoded secrets? Unvalidated inputs? Concurrency safety issues?
-        - Maintainability: Is code organization clear? Do names accurately reflect intent?
+        Focus Areas (ONLY these, ignore everything else):
+        - Code functionality: Does the code do what it intends to do?
+        - Call chains: Are functions called correctly? Are callbacks properly connected?
+        - Parameter correctness: Are the right parameters passed in the right order and types?
+        - SQL syntax: Are SQL queries syntactically correct? Are table/column names accurate?
         
-        Your output MUST include specific architectural suggestions and security warnings, citing line numbers when necessary.
+        DO NOT review:
+        - Security vulnerabilities (hardcoded secrets, injection, etc.)
+        - Performance issues (algorithm complexity, N+1 queries)
+        - Code style or naming conventions
+        
+        Your output should focus on logic errors and potential bugs.
         IMPORTANT: Always give your final answer in Chinese (中文回答).""",
         tools=[gitlab_tool],
         llm="gemini/gemini-3-flash-preview",

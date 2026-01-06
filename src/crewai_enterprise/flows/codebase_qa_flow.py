@@ -42,33 +42,31 @@ class CodebaseQAFlow(Flow):
         self.gitlab_tool.fixed_project_id = self.project_id
         qa_agent = create_codebase_qa_agent(self.gitlab_tool)
         
-        # 2. Define Task
+        # 2. Define Task (simplified to reduce iterations)
         qa_task = Task(
-            description=f"""Analyze the codebase to answer the following question: 
+            description=f"""Answer this question about the codebase: 
             "{self.query}"
             
-            Context provided: {self.context}
+            Context: {self.context}
+            Branch: {self.branch}
             
-            Strict Guidelines:
-            1. You MUST use search_code to find files matching internal names (tables, fields, etc.).
-            2. For every file you intend to mention in your final answer, you MUST first call get_file to read its actual content.
-            3. NEVER assume a function or file exists. Only use filenames returned by search_code or list_files.
-            4. If a file is not found (404), DO NOT mention it in your final answer unless the user specifically asked about that file.
-            5. If the user asks for Python only, ignore Java/SQL results in your logic analysis but you may mention they exist if relevant.
-            6. If you cannot find a Python implementation but find Java/SQL, report exactly that. DO NOT invent a Python version or guess where it might be.
-            7. Your final answer must ONLY list the files you actually READ successfully and what you found in them.
-            
-            Target Branch: {self.branch}
+            Quick Guidelines:
+            1. Use search_code to find files matching the query keywords.
+            2. Report the search results directly - list file paths and relevant snippets.
+            3. Only use get_file if you need to see more context from a specific file.
+            4. Keep your answer concise and focused on the user's question.
+            5. Always respond in Chinese (中文).
             """,
             agent=qa_agent,
-            expected_output="Detailed answer to user's question including code references and potential solutions"
+            expected_output="Concise answer with file paths and code snippets"
         )
 
-        # 3. Create Crew and Kickoff
+        # 3. Create Crew and Kickoff (max_iter=3 to prevent timeout)
         qa_crew = Crew(
             agents=[qa_agent],
             tasks=[qa_task],
-            verbose=True
+            verbose=True,
+            max_iter=3  # Limit iterations to prevent WeCom timeout
         )
 
         result = qa_crew.kickoff()

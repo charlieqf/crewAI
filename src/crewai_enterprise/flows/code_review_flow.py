@@ -36,74 +36,40 @@ class CodeReviewFlow(Flow):
 
     @start()
     def review_code(self):
-        """Execute the code review process with multiple agents."""
+        """Execute the code review process with single agent for speed."""
         
-        # 1. Create Agents
+        # 1. Create Agent (simplified to single agent for faster response)
         arch_agent = create_arch_reviewer_agent(self.gitlab_tool)
-        perf_agent = create_perf_reviewer_agent(self.gitlab_tool)
-        # test_agent = create_test_reviewer_agent(self.gitlab_tool) # User requested to disable test agent
-        summary_agent = create_summary_agent()
         
-        # 2. Define Tasks
-        
-        # Common description for review tasks
-        base_desc = f"""
-        Review Project: {self.project_id}, Commit: {self.commit_sha}.
-        
-        IMPORTANT: When using get_file, list_files, or search_code, always set ref="{self.commit_sha}" to ensure you're viewing the code at this specific commit, NOT the main branch.
-        
-        1. Use get_diff to obtain changes.
-        2. MUST use get_file with ref="{self.commit_sha}" to view full context of modified files.
-        3. If necessary, use search_code to find references.
-        
-        Identify potential issues in your area of expertise and provide specific recommendations.
-        """
-
-        arch_task = Task(
-            description=f"From architecture and security perspective: {base_desc}",
-            agent=arch_agent,
-            expected_output="Architecture and security review report including design pattern analysis and security risk warnings",
-            async_execution=True  # Run in parallel
-        )
-
-        perf_task = Task(
-            description=f"From performance perspective: {base_desc}",
-            agent=perf_agent,
-            expected_output="Performance review report including algorithm complexity and resource usage analysis",
-            async_execution=True  # Run in parallel
-        )
-
-        # test_task = Task(
-        #     description=f"从测试和可维护性角度: {base_desc}",
-        #     agent=test_agent,
-        #     expected_output="测试与质量审查报告，包含测试覆盖率和代码规范分析",
-        #     async_execution=True  # Run in parallel
-        # )
-
-        # Summary task depends on the 2 review tasks
-        summary_task = Task(
+        # 2. Define Task
+        review_task = Task(
             description=f"""
-            Aggregate the review reports from 2 experts (Architecture, Performance) and generate the final code review feedback.
+            Review Project: {self.project_id}, Commit: {self.commit_sha}.
             
-            Commit: {self.commit_sha}
+            IMPORTANT: Always set ref="{self.commit_sha}" when using tools.
             
-            Requirements:
-            1. Consolidate duplicate opinions.
-            2. Resolve conflicting suggestions.
-            3. Categorize issues by severity (Critical, Major, Minor).
-            4. Provide final conclusion: Should this be merged?
+            Steps:
+            1. Use get_diff to obtain changes.
+            2. Use get_file with ref="{self.commit_sha}" to view context if needed.
+            3. Identify architecture, security, and performance issues.
+            4. Provide specific recommendations.
+            5. Categorize by severity (Critical, Major, Minor).
+            6. Give final conclusion: Should this be merged?
+            
+            Respond in Chinese (中文).
             """,
-            agent=summary_agent,
-            context=[arch_task, perf_task], # Wait for these tasks
-            expected_output="Final aggregated code review report (Markdown format)"
+            agent=arch_agent,
+            expected_output="Code review report with issues and recommendations (Markdown format)"
         )
 
-        # 3. Create Crew and Kickoff
+        # 3. Create Crew and Kickoff (max_iter=3 to prevent timeout)
         review_crew = Crew(
-            agents=[arch_agent, perf_agent, summary_agent],
-            tasks=[arch_task, perf_task, summary_task],
-            verbose=True
+            agents=[arch_agent],
+            tasks=[review_task],
+            verbose=True,
+            max_iter=3
         )
 
         result = review_crew.kickoff()
         return str(result)
+
