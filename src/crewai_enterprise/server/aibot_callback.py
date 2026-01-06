@@ -972,64 +972,6 @@ async def _call_llm_async(
                 _stream_tasks[stream_id]["error"] = True
             return
 
-    # Check for Codebase QA (General Questions)
-    # Trigger if:
-    # 1. We have a project context for this chat
-    # 2. Content looks like a question or issue
-    # 3. Not a simple greeting or irrelevant command
-    active_project = _user_project_context.get(chat_id)
-    
-    # Heuristics for a code question: MUST contain code-related keywords or question patterns
-    # Relaxed length check removed to avoid hijacking normal chat
-    code_keywords = ["哪里", "怎么", "报错", "在哪", "如何", "什么原因", "怎么调用", "怎么用",
-                     "error", "exception", "failed", "how to", "where", "what causes", "how do i"]
-    has_question_mark = "?" in content_stripped or "？" in content_stripped
-    has_code_keyword = any(k in content_stripped.lower() for k in code_keywords)
-    
-    is_code_question = active_project and (has_code_keyword or has_question_mark)
-    
-    # If vision message (image_base64 is present in scope via closure or separate handler?) 
-    # Wait, _call_llm_async is generic. The vision handler calls _handle_vision_message.
-    # We need to handle this inside the main flow or separate?
-    # Actually, the user wants @gemini [screenshot]. That goes to _handle_vision_message.
-    # We should handle text-based QA here first.
-    
-    if is_code_question and not gitlab_match:
-        # Use GitLab URL from cached context (not hardcoded env)
-        project_path = active_project["project_path"]
-        gitlab_base_url = active_project["gitlab_url"]
-        gitlab_token = os.getenv("GITLAB_TOKEN")
-        
-        if gitlab_token:
-            logger.info(f"[GITLAB_QA] Detected code question for {project_path}: {content_stripped[:50]}...")
-            
-            if stream_id in _stream_tasks:
-                _stream_tasks[stream_id]["content"] = f"🤖 正在查阅代码库 ({project_path})..."
-
-            try:
-                flow = CodebaseQAFlow(
-                    gitlab_url=gitlab_base_url,
-                    private_token=gitlab_token,
-                    project_id=project_path,  # Use string, not dict
-                    query=content_stripped,
-                    context="", # Add extra context if needed
-                    branch=active_project.get("branch", "main")
-                )
-                
-                loop = asyncio.get_running_loop()
-                result = await loop.run_in_executor(None, flow.kickoff)
-                
-                final_response = f"{result}\n\n(基于项目: {project_path})"
-                
-                if stream_id in _stream_tasks:
-                    _stream_tasks[stream_id]["content"] = final_response
-                    _stream_tasks[stream_id]["finished"] = True
-                    _stream_tasks[stream_id]["completed_at"] = time.time()
-                return
-            except Exception as e:
-                logger.error(f"[GITLAB_QA] QA failed: {e}")
-                # Fallback to normal LLM if QA fails
-                pass 
     
     config = BOT_CONFIGS[bot_type]
     provider = config["provider"]
