@@ -24,41 +24,19 @@ logger = logging.getLogger(__name__)
 # Archive configuration from environment
 ARCHIVE_TOKEN = os.getenv("ARCHIVE_TOKEN", "")
 ARCHIVE_AES_KEY = os.getenv("ARCHIVE_AES_KEY", "")
+WECOM_CORP_ID = os.getenv("WECOM_CORP_ID", os.getenv("CORP_ID", ""))
+
+from src.crewai_enterprise.utils.wecom_json_crypto import WXBizJsonMsgCrypt
 
 router = APIRouter()
 
 
-def verify_signature(signature: str, timestamp: str, nonce: str, echo_str: str) -> bool:
-    """
-    Verify URL signature from WeCom.
-    
-    Algorithm: sha1(sort(token, timestamp, nonce, echostr))
-    """
-    if not ARCHIVE_TOKEN:
-        logger.error("[ARCHIVE] ARCHIVE_TOKEN not configured")
-        return False
-    
-    params = sorted([ARCHIVE_TOKEN, timestamp, nonce, echo_str])
-    concatenated = "".join(params)
-    calculated = hashlib.sha1(concatenated.encode()).hexdigest()
-    
-    return calculated == signature
-
-
-def decrypt_aes(encrypted_msg: str) -> Optional[dict]:
-    """
-    Decrypt AES encrypted message from WeCom.
-    
-    Args:
-        encrypted_msg: Base64 encoded encrypted message
-    
-    Returns:
-        Decrypted message as dict, or None if decryption fails
-    """
-    # TODO: Implement AES decryption
-    # This will be implemented after we have the actual AES key from WeCom
-    logger.warning("[ARCHIVE] AES decryption not yet implemented")
-    return None
+def _get_crypto() -> WXBizJsonMsgCrypt:
+    """Initialize and return the crypto utility."""
+    if not ARCHIVE_TOKEN or not ARCHIVE_AES_KEY or not WECOM_CORP_ID:
+        logger.error(f"[ARCHIVE] Configuration missing: TOKEN={bool(ARCHIVE_TOKEN)}, AES_KEY={bool(ARCHIVE_AES_KEY)}, CORP_ID={bool(WECOM_CORP_ID)}")
+        raise HTTPException(status_code=500, detail="Archive service configuration error")
+    return WXBizJsonMsgCrypt(ARCHIVE_TOKEN, ARCHIVE_AES_KEY, WECOM_CORP_ID)
 
 
 @router.get("/wecom/archive-callback")
@@ -80,18 +58,22 @@ async def archive_callback_verify(
     """
     logger.info(f"[ARCHIVE_VERIFY] Received verification request: timestamp={timestamp}, nonce={nonce}")
     
-    # Verify signature
-    if not verify_signature(msg_signature, timestamp, nonce, echostr):
-        logger.error("[ARCHIVE_VERIFY] Signature verification failed")
-        raise HTTPException(status_code=403, detail="Signature verification failed")
-    
-    logger.info("[ARCHIVE_VERIFY] Signature verified successfully")
-    
-    # TODO: Decrypt echostr (AES encrypted)
-    # For now, return the echostr as-is (this might not work)
-    # We need to implement proper AES decryption
-    
-    return Response(content=echostr, media_type="text/plain")
+    try:
+        crypto = _get_crypto()
+        ret, echostr_decrypted = crypto.VerifyURL(msg_signature, timestamp, nonce, echostr)
+        
+        if ret != 0:
+            logger.error(f"[ARCHIVE_VERIFY] Verification failed with error code {ret}")
+            raise HTTPException(status_code=403, detail=f"Verification failed: {ret}")
+            
+        logger.info("[ARCHIVE_VERIFY] URL verified successfully")
+        return Response(content=echostr_decrypted, media_type="text/plain")
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"[ARCHIVE_VERIFY] Unexpected error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/wecom/archive-callback")
@@ -118,28 +100,20 @@ async def archive_callback_message(request: Request):
     timestamp = params.get("timestamp", "")
     nonce = params.get("nonce", "")
     
-    # Get request body
-    body = await request.body()
-    
-    # Parse encrypted message
-    try:
-        data = json.loads(body)
-        encrypted_msg = data.get("encrypt", "")
-    except json.JSONDecodeError:
-        logger.error("[ARCHIVE_MSG] Invalid JSON in request body")
-        raise HTTPException(status_code=400, detail="Invalid JSON")
-    
-    # Verify signature
-    if not verify_signature(msg_signature, timestamp, nonce, encrypted_msg):
-        logger.error("[ARCHIVE_MSG] Signature verification failed")
-        raise HTTPException(status_code=403, detail="Signature verification failed")
-    
     # Decrypt message
-    message = decrypt_aes(encrypted_msg)
-    if not message:
-        logger.error("[ARCHIVE_MSG] Message decryption failed")
-        # Don't return error, just log and continue
-        # WeCom expects 200 OK even if we can't process the message
+    try:
+        crypto = _get_crypto()
+        ret, json_content = crypto.DecryptMsg(body.decode("utf-8"), msg_signature, timestamp, nonce)
+        
+        if ret != 0:
+            logger.error(f"[ARCHIVE_MSG] Decryption failed with error code {ret}")
+            return {"status": "ok"} # Always return 200 to WeCom
+            
+        message = json.loads(json_content)
+        logger.info(f"[ARCHIVE_MSG] Decrypted message type: {message.get('msgtype')}")
+        
+    except Exception as e:
+        logger.error(f"[ARCHIVE_MSG] Decryption exception: {e}")
         return {"status": "ok"}
     
     # Process message
