@@ -98,21 +98,36 @@ BOT_CONFIGS: dict[str, dict[str, str | bool]] = {
         "token_env": "GEMINI_BOT_TOKEN",
         "aes_key_env": "GEMINI_BOT_ENCODING_AES_KEY",
         "supports_file_analysis": True,
-        "system_prompt": "你是Gemini。请以中文回答。\n\n【核心指令：文件生成】\n1. 当你决定生成文件时，请立即输出文件内容，严禁进行过多文字说明或解释。\n2. 必须使用以下格式包裹文件内容，严禁简写为 <F，严禁使用 Markdown 代码块：\n\n<FILE name=\"文件名.html\">\n文件完整内容(直接写，不要用 ``` 包裹)\n</FILE>\n\n3. 如果收到复现界面的指令，请直接输出 HTML 文件，严禁分步骤解释。",
+        "system_prompt": (
+            "You are a helpful assistant. If the user asks you to reproduce an interface or design from an image, "
+            "generate a complete, single-page HTML/CSS file directly. "
+            "Follow these STRICT rules:\n"
+            "1. Wrap the file in <FILE name=\"filename\">content</FILE> tags.\n"
+            "2. DO NOT use Markdown code blocks (```).\n"
+            "3. DO NOT provide any preamble or explanation unless absolutely necessary.\n"
+            "4. Use Tailwind CSS via CDN and standard CSS as needed for high-quality reproduction.\n"
+            "5. Ensure all tags are correctly closed."
+        ),
     },
     "chatgpt": {
         "provider": "openai",
-        "token_env": "CHATGPT_BOT_TOKEN",
-        "aes_key_env": "CHATGPT_BOT_ENCODING_AES_KEY",
-        "supports_file_analysis": False,
-        "system_prompt": "你是ChatGPT。请以中文回答。\n\n【核心指令：文件生成】\n1. 直接输出文件内容，减少文字解释。\n2. 必须使用格式：\n<FILE name=\"文件名.扩展名\">\n内容\n</FILE>\n严禁使用 Markdown 代码块。",
+        "token_env": "OPENAI_BOT_TOKEN",
+        "aes_key_env": "OPENAI_BOT_ENCODING_AES_KEY",
+        "supports_file_analysis": True,
+        "system_prompt": (
+            "You are a helpful assistant. Directly generate file content wrapped in <FILE name=\"filename\">content</FILE> tags. "
+            "NO Markdown code blocks, NO excessive explanation. Focus on direct utility."
+        ),
     },
     "grok": {
         "provider": "xai",
-        "token_env": "GROK_BOT_TOKEN",
-        "aes_key_env": "GROK_BOT_ENCODING_AES_KEY",
+        "token_env": "XAI_BOT_TOKEN",
+        "aes_key_env": "XAI_BOT_ENCODING_AES_KEY",
         "supports_file_analysis": False,
-        "system_prompt": "你是Grok。请以中文回答。\n\n【核心指令：文件生成】\n1. 直接输出内容，禁止解释。\n2. 必须使用格式：\n<FILE name=\"文件名.扩展名\">\n内容\n</FILE>",
+        "system_prompt": (
+            "You are a helpful assistant. Directly generate file content wrapped in <FILE name=\"filename\">content</FILE> tags. "
+            "NO Markdown code blocks, NO excessive explanation."
+        ),
     },
 }
 
@@ -399,12 +414,12 @@ async def _process_llm_file_output(
     from src.crewai_enterprise.utils.storage_manager import get_storage_manager
     from src.crewai_enterprise.utils.chat_context import get_context_manager
     
-    # Pattern to match <FILE name="filename">content</FILE>
-    # Use re.DOTALL to match across newlines
-    file_pattern = re.compile(r'<FILE\s+name="([^"]+)">([\s\S]*?)<\/FILE>', re.IGNORECASE)
+    # Robust parsing: Find all opening tags first
+    # This handles cases where a tag might be opened but not closed (truncated output)
+    open_tag_pattern = re.compile(r'<FILE\s+name="([^"]+)">', re.IGNORECASE)
+    open_tags = list(open_tag_pattern.finditer(content))
     
-    matches = file_pattern.findall(content)
-    if not matches:
+    if not open_tags:
         return content
         
     cleaned_content = content
@@ -425,7 +440,27 @@ async def _process_llm_file_output(
             name = name[:90] + "_" + name[-9:]
         return name
 
-    for original_filename, file_content in matches:
+    # Process tags from last to first to maintain correct string indices after replacement
+    for i in range(len(open_tags) - 1, -1, -1):
+        match = open_tags[i]
+        original_filename = match.group(1)
+        start_pos = match.end()
+        
+        # Determine end of file content (either next opening tag or end of string)
+        # But we also search for a closing tag within this range
+        next_tag_start = open_tags[i+1].start() if i + 1 < len(open_tags) else len(content)
+        segment = content[start_pos:next_tag_start]
+        
+        closing_match = re.search(r'</FILE>', segment, re.IGNORECASE)
+        if closing_match:
+            file_content = segment[:closing_match.start()]
+            full_tag_end_pos = start_pos + closing_match.end()
+        else:
+            # Fallback for truncated/unclosed tags: take until next tag or end
+            file_content = segment
+            full_tag_end_pos = next_tag_start
+            logger.warning(f"[AIBOT_FILE] Tag for {original_filename} was not closed, taking content until end/next tag")
+
         try:
             filename = _sanitize_filename(original_filename)
             logger.info(f"[AIBOT_FILE] Processing generated file: {filename} (original: {original_filename}, {len(file_content)} chars)")
@@ -480,15 +515,9 @@ async def _process_llm_file_output(
             # The cloud link in the text response is sufficient
             logger.info(f"[AIBOT_FILE] File available at cloud link (robot response_url does not support file attachments)")
             
-            # 5. Final text cleanup (replace the entire tag with info) - More robust regex logic
-            # Use a pattern that specifically targets THIS file's tag structure
-            # to avoid replacing other files if multiple exist.
-            specific_pattern = re.compile(
-                rf'<FILE\s+name="{re.escape(original_filename)}">[\s\S]*?</FILE>',
-                re.IGNORECASE
-            )
+            # 5. Final text cleanup (replace the entire tag with info)
             link_display = f"\n\n[已生成文件: {filename}]\n云端链接: {qiniu_url_display}"
-            cleaned_content = specific_pattern.sub(link_display, cleaned_content)
+            cleaned_content = cleaned_content[:match.start()] + link_display + cleaned_content[full_tag_end_pos:]
             
         except Exception as e:
             logger.error(f"[AIBOT_FILE] Error processing file {original_filename}: {e}")
@@ -1207,6 +1236,7 @@ async def _call_llm_async(
                                     filename=filename,
                                     history=messages[:-1],
                                     system_prompt=system_prompt,
+                                    max_tokens=4096,
                                 )
                             )
                         except Exception as download_err:
@@ -2036,6 +2066,7 @@ async def _call_vision_llm_async(
                 image_base64=image_base64,
                 system_prompt=system_prompt,
                 history=messages[:-1],
+                max_tokens=4096,
             )
         )
 
