@@ -106,7 +106,8 @@ BOT_CONFIGS: dict[str, dict[str, str | bool]] = {
             "2. DO NOT use Markdown code blocks (```).\n"
             "3. DO NOT provide any preamble or explanation unless absolutely necessary.\n"
             "4. Use Tailwind CSS via CDN and standard CSS as needed for high-quality reproduction.\n"
-            "5. Ensure all tags are correctly closed."
+            "5. Ensure all tags are correctly closed.\n"
+            "6. IMPORTANT: Always generate FRESH code. NEVER reuse or repeat old links from the conversation history."
         ),
     },
     "chatgpt": {
@@ -1147,6 +1148,17 @@ async def _call_llm_async(
                     file_bytes = base64.b64decode(raw_b64)
                     full_prompt = f"对话历史:\n{history_text}\n\n(注意：用户之前上传了文件 {filename}，请基于该文件回答)"
                     
+                    # Fetch limited history for file analysis to avoid hallucinating old results
+                    context = context_manager.get_context(chat_id)
+                    limited_messages = context.messages[-5:] if len(context.messages) > 5 else context.messages
+                    
+                    messages = []
+                    if system_prompt:
+                        messages.append({"role": "system", "content": system_prompt})
+                    for msg in limited_messages:
+                        messages.append({"role": msg.get("role", "user"), "content": msg.get("content", "")})
+                    messages.append({"role": "user", "content": messages_for_llm[-1]["content"] if messages_for_llm else ""})
+
                     response = await loop.run_in_executor(
                         None,
                         lambda: router.chat_with_file(
@@ -1157,6 +1169,7 @@ async def _call_llm_async(
                             filename=filename,
                             history=messages[:-1],
                             system_prompt=system_prompt,
+                            max_tokens=4096,
                         )
                     )
                 else:
@@ -2053,8 +2066,16 @@ async def _call_vision_llm_async(
 
         start_time = time.time()
 
-        # Fetch history for vision LLM call
-        messages = context_manager.get_messages_for_llm(chat_id, system_prompt=system_prompt)
+        # Fetch limited history (last 5 messages) for vision LLM call to prevent history-based hallucinations
+        context = context_manager.get_context(chat_id)
+        limited_messages = context.messages[-5:] if len(context.messages) > 5 else context.messages
+        
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        for msg in limited_messages:
+            messages.append({"role": msg.get("role", "user"), "content": msg.get("content", "")})
+        messages.append({"role": "user", "content": prompt})
 
         # Run vision LLM call in thread pool
         loop = asyncio.get_running_loop()
@@ -2472,9 +2493,18 @@ async def _call_file_llm_async(
             real_file_data = file_bytes
             real_file_uri = file_uri
             
-            # Fetch history for file LLM call
+            # Fetch limited history (last 5 messages) for file LLM call
             from src.crewai_enterprise.utils.chat_context import get_context_manager
-            messages = get_context_manager().get_messages_for_llm(chat_id, system_prompt=system_prompt)
+            ctx_mgr = get_context_manager()
+            context = ctx_mgr.get_context(chat_id)
+            limited_messages = context.messages[-5:] if len(context.messages) > 5 else context.messages
+            
+            messages = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            for msg in limited_messages:
+                messages.append({"role": msg.get("role", "user"), "content": msg.get("content", "")})
+            messages.append({"role": "user", "content": prompt})
             
             response = await loop.run_in_executor(
                 None,
@@ -2486,7 +2516,8 @@ async def _call_file_llm_async(
                     file_mime_type=mime_type,
                     filename=filename,
                     history=messages[:-1],
-                    system_prompt=system_prompt
+                    system_prompt=system_prompt,
+                    max_tokens=4096,
                 )
             )
 
