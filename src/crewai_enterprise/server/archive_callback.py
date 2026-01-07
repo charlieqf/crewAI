@@ -107,18 +107,26 @@ async def archive_callback_message(request: Request):
     
     # Decrypt message
     try:
-        crypto = _get_crypto()
-        ret, json_content = crypto.DecryptMsg(body.decode("utf-8"), msg_signature, timestamp, nonce)
+        from src.crewai_enterprise.utils.wecom_crypto import WeComCrypto
+        crypto = WeComCrypto(ARCHIVE_TOKEN, ARCHIVE_AES_KEY, WECOM_CORP_ID)
         
-        if ret != 0:
-            logger.error(f"[ARCHIVE_MSG] Decryption failed with error code {ret}")
-            return {"status": "ok"} # Always return 200 to WeCom
+        # XML format decryption
+        decrypted_xml = crypto.decrypt_callback_body(body.decode("utf-8"))
+        logger.info(f"[ARCHIVE_MSG] Decrypted content: {decrypted_xml[:500]}...")
+        
+        # Parse XML
+        import defusedxml.ElementTree as ET
+        root = ET.fromstring(decrypted_xml)
+        
+        # Extract message content (format varies by event type)
+        # For archive push, we need to see what's inside.
+        message = {"raw_xml": decrypted_xml}
+        msg_type_node = root.find("MsgType")
+        if msg_type_node is not None:
+            message["msgtype"] = msg_type_node.text
             
-        message = json.loads(json_content)
-        logger.info(f"[ARCHIVE_MSG] Decrypted message type: {message.get('msgtype')}")
-        
     except Exception as e:
-        logger.error(f"[ARCHIVE_MSG] Decryption exception: {e}")
+        logger.error(f"[ARCHIVE_MSG] Decryption failed: {e}")
         return {"status": "ok"}
     
     # Process message
