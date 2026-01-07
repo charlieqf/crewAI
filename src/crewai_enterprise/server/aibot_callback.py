@@ -860,6 +860,7 @@ async def _call_llm_async(
     quoted_msg_id: str | None = None,
     quoted_filename: str | None = None,
     response_url: str | None = None,
+    file_output_mode: bool = False,
 ) -> None:
     """Call the appropriate LLM asynchronously and update task result."""
     print(f"[LLM_ASYNC_START] stream_id={stream_id} content={content[:50]!r}", flush=True)
@@ -1610,6 +1611,7 @@ async def _handle_text_message(
             quoted_msg_id=quoted_msg_id,
             quoted_filename=quoted_filename,
             response_url=response_url,
+            file_output_mode=file_output_mode,
         )
     )
 
