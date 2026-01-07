@@ -17,76 +17,61 @@ max_chars = 8000    # Maximum number of characters
 2. Remove starting from the earliest messages.
 3. System Prompt is always retained.
 
-## Conversation Example: Long Conversation Truncation
+## Memory Model: Hot vs. Cold Storage
+
+| Memory Type | Storage | Capacity | Access Rule (Decision Logic) |
+| :--- | :--- | :--- | :--- |
+| **Short-term (Context)** | Hot (chat_storage.db) | Recent 20 turns | Used for **immediate flow**. Automatically injected into LLM prompt. |
+| **Long-term (Archive)** | Cold (chat_history.db) | Years / Unlimited | Used for **historical recall**. Must be retrieved via `ArchiveSearchTool`. |
+
+### Decision Rule: When to Use Archive vs. Context
+
+- **Scenario: Recall**
+  - "What did we say just now?" -> **Context** (within the 20-turn window).
+  - "What was the API key mentioned last week?" -> **Archive** (triggers tool).
+- **Scenario: Summary**
+  - "Summarize our conversation so far" -> **Context** (summarizes the hot window).
+  - "Generate a weekly report for this group" -> **Archive** (requires scanning all messages).
+- **Scenario: Continuity**
+  - "Keep going" -> **Context** (relies on previous turn).
+
+---
+
+## Context Contamination & Persistence Policy
+
+### 1. The /reset vs. /new Policy
+
+| Command | Status | Clears Chat History? | Clears File Context? | Clears Codebase Context? |
+| :--- | :--- | :--- | :--- | :--- |
+| `/reset` | Global Reset | ✅ Yes | ✅ Yes | ✅ Yes |
+| `/new` | Logical Break | ❌ No | ✅ Yes | ❌ No |
+
+> [!NOTE]
+> **Codebase context (`/codebase`) persists across `/new`** because it is often considered an "environment setting" for the current project session, whereas files are often "focal points" for a specific sub-topic.
+
+### 2. Multi-Bot Context Sharing
+- **Policy**: All bots in the same group chat **share the same short-term context**.
+- **User Intent**: If you talk to `@gemini` and then `@chatgpt`, ChatGPT will see Gemini's previous responses. 
+- **Contamination Risk**: If you want a bot to start fresh without seeing what another bot said, use `/reset` or `/new` (depending on whether you want to clear text history or just files).
+
+---
+
+## Conversation Example: Mixed Memory Access
 
 ```
-# Assuming there are already 19 historical messages
+User: [Sends PDF: Spec.pdf]
+User: @gemini Summarize this.
+Gemini: (Context: Has Spec.pdf) Summary is...
 
-User: @gemini 20th message
-Gemini: Reply to the 20th
+[30 turns later...]
 
-User: @gemini 21st message
-# At this point, the 1st message is removed
-# LLM only sees messages 2-21
-Gemini: Reply to the 21st
+User: @gemini What was in that PDF we looked at earlier?
+# Context: Spec.pdf has been truncated from the hot window.
+Gemini: I am sorry, I no longer have the "Spec.pdf" in my active context. 
 
-User: @gemini Do you remember what we discussed at the very beginning?
-Gemini: Sorry, I cannot recall the earlier conversation content...
-```
-
-## Conversation Example: Manual Reset
-
-### /reset - Complete Reset
-```
-User: @gemini /reset
-Gemini: ✅ Completely reset all conversation history and context (deleted 15 historical records)
-        🔄 It is now a fresh start, and the bot no longer remembers any previous conversations.
-
-User: @gemini What did we discuss earlier?
-Gemini: Hello! This is our first conversation. How can I help you?
-```
-
-### /new - Clear File Context
-```
-User: [Sends a PDF file]
-User: @gemini Summarize this document
-Gemini: This is a document about...
-
-User: @gemini /new
-Gemini: ✅ File context cleared, starting a new conversation
-        💡 Previous files will no longer be used automatically; if needed, please resend or Quote them.
-
-User: @gemini Help me summarize the document
-Gemini: Hello! Please send the document you need summarized first.
-# File context has been cleared, but conversation history remains
-```
-
-## Context Isolation
-
-### Isolation by chat_id
-```
-Group Chat A (chat_id: group_A):
-  User 1: Discusses Python
-  Gemini: Python is...
-  
-Group Chat B (chat_id: group_B):
-  User 2: Discusses JavaScript
-  Gemini: JavaScript is...
-  
-# The context of the two group chats is completely independent.
-```
-
-### Sharing Across Bots
-```
-Group Chat A:
-  User: @gemini What is Python?
-  Gemini: Python is a programming language...
-  
-  User: @chatgpt Continue explaining
-  ChatGPT: Okay, continuing from the previous topic, Python...
-  
-# Different Bots in the same group chat share context
-# (Because the chat_id is the same)
+User: @gemini Check the archive for the PDF sent by me today.
+Gemini: (Triggers search_archive) 🔍 Found "Spec.pdf". 
+        (Retrieves file content) Based on the archive, the PDF contains...
 ```
 
 ## Key Decision Points
@@ -96,10 +81,10 @@ Group Chat A:
 | When to truncate? | Exceeds 20 messages or 8000 characters | Configurable |
 | What to truncate? | Earliest messages | Based on importance |
 | Share between Bots? | Yes (same chat_id) | Isolate by bot_type |
-| Reset granularity? | /reset clears all, /new only files | More granular options |
+| Codebase Persistence | Persists across /new | Reset on /new |
 
 ## For Consideration
 
-1. **Summary Mechanism**: Do extra-long conversations need automatic summarization?
-2. **Important Message Tagging**: Should certain messages be kept permanently?
-3. **User Preferences**: Allow users to set context length?
+1. **Summary Chain**: Use small-scale summaries of truncated turns to extend "perceived" context.
+2. **Pinned Context**: Allow users to explicitly "pin" a file or message so it never truncates.
+3. **Cross-Group Search**: Should a user be able to search archives of Group A while in Group B? (Current: Prohibited for security).

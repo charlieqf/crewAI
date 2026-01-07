@@ -4,110 +4,97 @@
 
 This scenario covers complex interactions combining multiple capabilities (codebase, file analysis, file generation, search).
 
-## Scenario A: From Design to Implementation (Vision + Codebase + FileGen)
+---
 
-User sends a UI design mockup and requests implementation code based on the existing codebase style.
+## 1. Mixed Modality in One Turn
 
+When a user sends a message containing text, a quote, a file, and an @mention in a single turn, the system merges them into a single coherent prompt for the LLM.
+
+### Modality Merging Sequence (Prompt Construction)
+1. **Quoted Message**: `[User quoted message: {content}]`
+2. **File Context**: `[File Attachment: {filename} ({mime_type})]`
+3. **User Input Text**: `{cleaned_text}` (after removing @mention and commands)
+
+> [!IMPORTANT]
+> **Command Stripping**: Any system command (e.g., `/reset`, `/set_prompt`, `/codebase`) is executed by the system and then **removed** from the text before it is sent to the LLM. This prevents the LLM from trying to "answer" the command itself.
+
+### Example turn
 ```
-User: [Sends image: Login Page Mockup.png]
-User: @gemini /codebase myproject 
-Gemini: ✅ Codebase context set: `myproject`
+User: [Quotes: "Deadline is next Monday"]
+User: [Sends PDF: project_plan.pdf]
+User: @gemini /set_prompt ... Based on the quoted deadline and this PDF, verify if we are on track.
 
-User: @gemini /file-html Referencing this mockup and using existing component libraries (check src/components), implement this login page.
-Gemini: 🔍 Analyzing image content...
-        🔍 Retrieving `src/components` from codebase...
-        
-        Cloud Link: http://wecomfile.medmeeting.com/wecom/login_impl.html
-        
-        [Internal Logic]
-        1. Vision model analyzes layout, colors, and text from the screenshot.
-        2. RAG retrieves usage of components like Button, Input under `src/components`.
-        3. Combined generation of HTML that conforms to project specifications.
-```
-
-## Scenario B: Bug Fix Based on Log Screenshot (Vision + Codebase)
-
-User sends an error screenshot; the Bot locates the issue within the codebase and provides fix suggestions.
-
-```
-User: [Sends image: Error Stack Trace.png]
-User: @gemini /codebase myproject Where is the issue causing this error?
-Gemini: 🔍 Analyzing screenshot text "NullPointerException at UserService.java:45"...
-        🔍 Locating `src/main/java/.../UserService.java` line 45 in the codebase...
-        
-        Analysis Results:
-        The error occurs in the `getUserInfo` method. The screenshot shows `userDao` is null.
-        
-        Potential Cause:
-        `UserDao` was not properly injected via dependency injection when `UserService` was initialized.
-        
-        Fix Suggestion:
-        Please check `application-context.xml` or `@Autowired` annotations...
+# Merged Prompt sent to LLM:
+# [User quoted message: Deadline is next Monday]
+# [File Attachment: project_plan.pdf (application/pdf)]
+# Verified prompt: Based on the quoted deadline and this PDF, verify if we are on track.
 ```
 
-## Scenario C: Document-Driven Code Generation (FileAnalysis + FileGen)
+---
 
-User uploads a requirements document (PDF), and the Bot generates corresponding code files.
+## 2. Command Collisions & Priorities
 
+If multiple commands appear in a single message, the system follows a strict **execution order** rather than rejecting the message.
+
+### Priority Table
+| Order | Command Type | Action |
+| :--- | :--- | :--- |
+| **1st** | `/reset` | Clears everything first. |
+| **2nd** | `/new` | Clears files if /reset wasn't present. |
+| **3rd** | `/set_prompt` | Updates the persona. |
+| **4th** | `/codebase` | Sets the project context. |
+| **5th** | `/file-html` / `Content` | Triggers the actual task. |
+
+### Example: Reset and Generate
 ```
-User: [Sends PDF: API Interface Definition.pdf]
-User: @gemini /file-html Generate Swagger/OpenAPI definition files based on this document.
-Gemini: 🔍 Reading PDF document...
-        
-        Cloud Link: http://wecomfile.medmeeting.com/wecom/openapi.yaml
-        (Although the command is /file-html, the content is YAML, which can be previewed or downloaded in the browser)
-```
+User: @gemini /reset /file-html Make a landing page.
 
-## Scenario D: Cross-Bot Collaboration (Multi-Bot)
-
-Leverage the expertise of different bots for collaboration.
-
-```
-User: @gemini /codebase myproject Analyze the algorithmic complexity of `src/algo/ranking.py`.
-Gemini: (Gemini 1.5 Pro excels at long-context code analysis)
-        The time complexity of this algorithm is O(n^2)... there is a performance bottleneck...
-
-User: @chatgpt Provide an optimization solution for the O(n^2) bottleneck pointed out by Gemini.
-ChatGPT: (GPT-4 excels at algorithm optimization)
-        It can be optimized to O(n log n) by using merge sort...
-        ```python
-        def optimized_ranking(items):
-            ...
-        ```
-
-User: @grok Does this optimization run fast under Python 3.12?
-Grok: (X.AI excels at real-time info/latest tech stack)
-        In Python 3.12, due to the introduction of the adaptive interpreter, this style...
+# Logic: 
+# 1. System executes /reset (Clears context).
+# 2. System then treats "/file-html Make a landing page" as a fresh request.
+# Result: A landing page is generated with zero stale context interference.
 ```
 
-## Scenario E: Search-Driven Response (WebSearch + Chat)
+### Example: Collision (Reject vs. Step)
+If `/codebase` and `/file-html` are sent together:
+- **Decision**: The system **supports both**. It first switches the codebase context, then uses that context to generate the HTML.
 
-User asks about recent news or technical trends; the Bot responds after a web search.
+---
 
+## 3. Advanced Multi-Turn Scenarios
+
+### Scenario A: From Design to Implementation
 ```
-User: @grok What are the new features of Android 16?
-Grok: (Web search)
-        Android 16 is expected to introduce... 
-        [Reference 1] [Reference 2]
+User: [Sends image: Mockup.png]
+User: @gemini /codebase myproject /file-html Implement this.
+Gemini: 🔍 Setting codebase to `myproject`...
+        🔍 Analyzing image content...
+        Cloud Link: http://.../login_impl.html
+```
+
+### Scenario B: Cross-Bot Collaboration
+```
+User: @gemini /codebase myproject Analysis...
+User: @chatgpt Evaluate Gemini's results...
+# Context is shared via chat_id, allowing GPT to see Gemini's codebase analysis.
 ```
 
 ## Technical Challenges
 
-1. **Context Passing**: Different capabilities (Vision, RAG, FileGen) share the same Context Window, requiring precise Token management.
-2. **Multimodal Alignment**: How to ensure "the button in the image" corresponds to "the Button component in the codebase"?
-3. **Command Combination**: Users might mix commands, e.g., `/codebase myproject /file-html ...` (needs support or explicit non-support).
+1. **Token Overflow**: Merging text, quote, and multi-file context can quickly hit 128k/1M limits.
+2. **Modality Order**: Does the image "describe" the text or vice-versa?
 
-## Current Support Status
+## Support Matrix
 
-| Combination | Support Status | Notes |
+| Combination | Status | Priority Rule |
 |-----|---------|-----|
-| Vision + Codebase | ✅ | Context supports images + RAG |
-| Vision + FileGen | ✅ | Context supports images + generation instructions |
-| PDF + FileGen | ✅ | Context supports PDF + generation instructions |
-| Cross-Bot Collaboration | ✅ | Implemented via shared Context |
-| WebSearch | ❌ | Not yet integrated (Grok natively supports but API may be limited) |
+| Text + File + Quote | ✅ | Construction: Quote > File > Text. Instruction: Text > File > Quote. |
+| Multiple Commands | ✅ | Reset > Config > Task. |
+| Mixed Modality | ✅ | Merged into structured prompt (commands stripped). |
 
-## Scenario F: Daily Visualized Report Generation (Archive + FileGen)
+---
+
+## 4. Scenario F: Daily Visualized Report Generation (Archive + FileGen)
 
 Users request a summary of the day's group chat content in the form of an HTML report, including topic summaries, to-dos, and precise navigation.
 

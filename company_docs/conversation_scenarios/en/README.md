@@ -11,33 +11,35 @@ This directory contains design documents for all multi-turn conversation scenari
 
 ## Architectural Perspective
 
-- [13_llm_vs_agent.md](en/13_llm_vs_agent.md) - **Core: Differences between LLM Conversations vs Agent Tasks**
+- [13_llm_vs_agent.md](13_llm_vs_agent.md) - **Core: Differences between LLM Conversations vs Agent Tasks**
 
 ## Scenario Classification
 
 ### Basic Conversation
-- [01_basic_conversation.md](en/01_basic_conversation.md) - Basic multi-turn conversation
-- [02_context_management.md](en/02_context_management.md) - Context management and limits
+- [01_basic_conversation.md](01_basic_conversation.md) - Basic multi-turn conversation
+- [02_context_management.md](02_context_management.md) - Context management and limits
 
 ### File Generation
-- [03_file_html_generation.md](en/03_file_html_generation.md) - HTML file generation
-- [04_file_iterative_refinement.md](en/04_file_iterative_refinement.md) - Iterative file refinement
+- [03_file_html_generation.md](03_file_html_generation.md) - HTML file generation
+- [04_file_iterative_refinement.md](04_file_iterative_refinement.md) - Iterative file refinement
 
 ### Code Analysis
-- [05_gitlab_code_review.md](en/05_gitlab_code_review.md) - GitLab code review
-- [06_codebase_qa.md](en/06_codebase_qa.md) - Codebase QA
+- [05_gitlab_code_review.md](05_gitlab_code_review.md) - GitLab code review
+- [06_codebase_qa.md](06_codebase_qa.md) - Codebase QA
 
 ### File Processing
-- [07_file_analysis.md](en/07_file_analysis.md) - File analysis (PDF/Images)
-- [08_file_quote_context.md](en/08_file_quote_context.md) - File quoting and context
+- [07_file_analysis.md](07_file_analysis.md) - File analysis (PDF/Images)
+- [08_file_quote_context.md](08_file_quote_context.md) - File quoting and context
 
 ### Prompt Management
-- [09_custom_prompt.md](en/09_custom_prompt.md) - Custom Prompts
-- [10_context_reset.md](en/10_context_reset.md) - Context reset
+- [09_custom_prompt.md](09_custom_prompt.md) - Custom Prompts
+- [10_context_reset.md](10_context_reset.md) - Context reset
 
 ### Complex Scenarios
-- [11_mixed_scenarios.md](en/11_mixed_scenarios.md) - Mixed complex scenarios (Vision+Codebase, Multi-Bot)
-- [12_archive_integration.md](en/12_archive_integration.md) - Conversation archive integration and "Deep Memory"
+- [11_mixed_scenarios.md](11_mixed_scenarios.md) - Mixed complex scenarios (Vision+Codebase, Multi-Bot)
+- [12_archive_integration.md](12_archive_integration.md) - Conversation archive integration and "Deep Memory"
+- [14_error_handling_fallbacks.md](14_error_handling_fallbacks.md) - **Failure & Fallback Mechanisms**
+- [15_system_policies.md](15_system_policies.md) - **Deduplication, Modality, & Core System Policies**
 
 ## Design Principles
 

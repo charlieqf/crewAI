@@ -197,7 +197,7 @@ def sync(start_seq: int):
         return {"status": "error", "message": "Failed to initialize SDK"}
 
     # Pull messages
-    chat_data = sdk.get_chat_data(start_seq, limit=100)
+    chat_data = sdk.get_chat_data(start_seq, limit=500)
     if not chat_data:
         return {"status": "ok", "new_max_seq": start_seq, "processed": 0, "files": 0}
 

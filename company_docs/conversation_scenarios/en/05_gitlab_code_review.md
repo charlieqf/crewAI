@@ -11,10 +11,11 @@ When a user sends a GitLab Commit URL, the AI automatically triggers the code re
 https://<domain>/<project-path>/-/commit/<sha>
 ```
 
-### Trigger Rules
-1. **URL + Keywords**: `review`, `审查`, `审核`, `检查`, `看看`, `帮我看`
-2. **URL Only**: If the message contains only a commit URL, it triggers automatically.
-3. **Exclusion Rules**: If the message contains `不要审查` or `别审查`, it will not trigger.
+| Rule Type | Condition | Keywords / Notes |
+| :--- | :--- | :--- |
+| **URL Only** | Message contains only the commit URL | Triggers automatically. |
+| **URL + Keywords** | URL present + positive intent | `review`, `审查`, `审核`, `检查`, `看看`, `帮我看` |
+| **Exclusion** | Negative keywords present | `不要审查`, `别审查`, `不用审查`, `don't review`, `no review` |
 
 ## Conversation Example
 

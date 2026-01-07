@@ -161,7 +161,7 @@ def sync_archive_messages():
     
     # Get current seq from DB
     start_seq = 0
-    db_path = os.getenv("CHAT_DB_PATH", "/var/lib/wecom-callback/chat_history.db")
+    db_path = os.getenv("ARCHIVE_DB_PATH", os.getenv("CHAT_DB_PATH", "/var/lib/wecom-callback/chat_history.db"))
     try:
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()

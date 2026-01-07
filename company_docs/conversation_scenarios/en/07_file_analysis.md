@@ -4,30 +4,53 @@
 
 The user sends a file (PDF, image, etc.), and the AI analyzes the file content to answer questions.
 
-## Supported File Types
+## Supported File Types & Bot Fallbacks
 
-| Type | Gemini | ChatGPT | Grok |
-|-----|--------|---------|------|
-| PDF | ✅ | ❌ | ❌ |
-| Images | ✅ | ✅ | ✅ |
-| Docs | ✅ | ❌ | ❌ |
+| Type | Gemini | ChatGPT | Grok | Fallback Behavior |
+|-----|--------|---------|------|-------------------|
+| **Images** | ✅ Native | ✅ Vision | ✅ Vision | None regular. |
+| **PDF** | ✅ Native | ⚠️ Fallback | ❌ Unsupported | Non-Gemini bots use tools to extract text/links. |
+| **Docs** | ✅ Native | ❌ Unsupported | ❌ Unsupported | Bot prompts: "Please send as PDF or text." |
+
+### Policy: Bot Capability Fallback
+If a user sends a file type not natively supported by the targeted bot:
+1. **Tool-based Extraction**: If the bot has access to a `FileOCR` or `PDFParser` tool, it will attempt to use it first.
+2. **User Prompt**: If no tool is available, the bot **must** reply with:
+   > "I've received your file: {filename}, but as {bot_type}, I cannot analyze {mime_type} files directly. Please try @gemini or send the content as plain text."
+
+---
+
+## Multi-file Handling & Selection Rules
+
+When a chat contains multiple files, the system uses the following **Selection Rule Priority**:
+
+1. **Explicit Quote (Highest)**: If the user message quotes a specific file message, use that file.
+2. **Most Recent (Default)**: If no quote, use the file sent within the last 10 minutes that is closest to the `@mention` message.
+3. **Ambiguity Resolution**: If two different files were sent simultaneously or the context is unclear:
+   - The bot should **ask the user** to clarify or quote the specific file.
+
+### Example: Multi-file Comparison
+```
+User: [Sends Image: Layout_V1.png]
+User: [Sends Image: Layout_V2.png]
+User: @gemini Compare these two images.
+
+# Selection Logic: The bot sees two active files in the 10-minute window.
+Gemini: I see two images: "Layout_V1.png" and "Layout_V2.png". I will analyze both to provide a comparison.
+```
+
+---
 
 ## Conversation Example
 
-### PDF Analysis
+### PDF Analysis (Non-Gemini Fallback)
 ```
 User: [Sends PDF file: Financial Report.pdf]
-User: @gemini What is the main content of this report?
-Gemini: This is a financial report for the third quarter of 2024. The main points include:
-        1. Revenue grew by 15% year-on-year.
-        2. Net profit reached XXX thousand RMB.
-        3. ...
+User: @chatgpt What is the main content?
 
-User: @gemini What were the major expenditure items for the third quarter?
-Gemini: According to page 12 of the report, major expenditures for Q3 included:
-        1. R&D Investment: XXX thousand RMB (30%)
-        2. Marketing: XXX thousand RMB (20%)
-        ...
+# Logic: ChatGPT doesn't support PDF Native. It triggers a PDF tool if available.
+ChatGPT: 🔍 Parsing PDF "Financial Report.pdf"...
+         Based on the extracted text, this report covers...
 ```
 
 ### Image Analysis
@@ -35,10 +58,6 @@ Gemini: According to page 12 of the report, major expenditures for Q3 included:
 User: [Sends screenshot: Error Page.png]
 User: @gemini What is the reason for this error?
 Gemini: An HTTP 500 error can be seen in the screenshot...
-        This is typically a server internal error, likely reasons:
-        1. Database connection failure.
-        2. Uncaught code exception.
-        ...
 ```
 
 ### Multi-image Analysis
@@ -58,36 +77,29 @@ Gemini: Analyzing these two design drafts:
 
 ## File Context Mechanism
 
-### Saving Files
-```python
-# When a user sends a file
-context_manager.save_file(
-    chat_id=chat_id,
-    sender_id=user_id,
-    sender_name=user_name,
-    file_uri="base64:...",    # or Cloud URI
-    filename="Financial Report.pdf",
-    mime_type="application/pdf",
-    wecom_msg_id=msg_id,      # Used for reference matching
-)
-```
-
 ### 10-Minute Automatic Context
+Files are "active" for 10 minutes. After 10 minutes, they are removed from the automatic injection to save tokens and prevent "stale" context issues.
+
+### Manual Override (Quote)
+Explicitly quoting a file message bypasses the 10-minute rule.
+
+---
+
+## Technical Details
+
+### Selection Rule Code Logic
 ```python
-# Check for files within the last 10 minutes
-file_ctx = context_manager.get_active_file(chat_id, limit=50)
-
-if file_ctx:
-    elapsed_minutes = (time.time() - file_ctx["timestamp"]) / 60
-    if elapsed_minutes > 10:
-        file_ctx = None  # Exceeded 10 minutes, ignore
-```
-
-### Quoting a Specific File
-```
-User: [Quotes a previously sent PDF]
-User: @gemini Summarize this document
-# Explicit quote, will be used even if beyond 10 minutes
+def get_target_file(chat_data):
+    # 1. Check Quote
+    if chat_data.quote:
+        return resolve_by_msg_id(chat_data.quote.msg_id)
+    
+    # 2. Check Recent (10 min)
+    recent_files = storage.get_recent_files(chat_data.chat_id, minutes=10)
+    if not recent_files:
+        return None
+    
+    return recent_files[0] # Return the most recent
 ```
 
 ## Multi-turn File Conversation
@@ -164,13 +176,11 @@ response = router.chat(
 
 | Decision Point | Current Solution | Alternatives |
 |-------|---------|---------|
-| Automatic Context Validity | 10 Minutes | Configurable |
-| File Storage | Base64 or Cloud URI | Unified Cloud Storage |
-| Multi-file Support | Most recent 1 | Support multiple simultaneous files |
-| Unsupported Formats | Silent ignore | Prompt the user |
+| Selection Logic | Quote > Most Recent | Always ask |
+| Unsupported Formats | Prompt the user with fallback advice | Silent ignore |
+| Multi-file Support | Up to 10 files in context | Limit to 1 |
 
-## To Be Considered
+## For Consideration
 
-1. **Large File Handling**: How to handle files exceeding 10MB?
-2. **File Pre-processing**: Is OCR or text extraction required?
-3. **Multi-file Context**: Maintain context for multiple files simultaneously?
+1. **OCR for non-Gemini**: Should we build a heavy OCR service for non-native bots?
+2. **Permanent Files**: Allowing `/pin_file` to keep a document in context indefinitely.
