@@ -100,6 +100,9 @@ async def archive_callback_message(request: Request):
     timestamp = params.get("timestamp", "")
     nonce = params.get("nonce", "")
     
+    # Get body for decryption
+    body = await request.body()
+    
     # Decrypt message
     try:
         crypto = _get_crypto()
