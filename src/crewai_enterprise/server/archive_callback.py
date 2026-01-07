@@ -92,7 +92,9 @@ async def archive_callback_message(request: Request):
     5. Save to database (chat_files table)
     6. User can then @gemini to analyze the file
     """
-    logger.info("[ARCHIVE_MSG] Received message callback")
+    # Get body for decryption
+    body = await request.body()
+    logger.debug(f"[ARCHIVE_MSG] Raw body: {body.decode('utf-8')[:200]}...")
     
     # Get query parameters
     params = request.query_params
