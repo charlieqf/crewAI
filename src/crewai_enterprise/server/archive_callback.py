@@ -212,75 +212,124 @@ async def sync_archive_messages():
         logger.error(f"[ARCHIVE_SYNC] Failed to load private key from {ARCHIVE_PRIVATE_KEY_PATH}: {e}")
         return
 
-    while has_more:
+    """Background task to poll messages from WeCom Archive."""
+    if _sync_lock.locked():
+        logger.info("[ARCHIVE_SYNC] Sync already in progress, skipping")
+        return
+        
+    async with _sync_lock:
+        logger.info("[ARCHIVE_SYNC] Starting sync process")
+        
+        # 1. Get current sequence
+        start_seq = 0
         try:
-            # Run SDK call in executor
-            import asyncio
-            loop = asyncio.get_event_loop()
-            chat_data = await loop.run_in_executor(None, lambda: sdk.get_chat_data(current_seq, limit))
+            db_path = os.getenv("CHAT_DB_PATH", "/var/lib/wecom-callback/chat_history.db")
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            cursor.execute("CREATE TABLE IF NOT EXISTS archive_cursor (id INTEGER PRIMARY KEY, seq INTEGER, updated_at TEXT)")
+            cursor.execute("INSERT OR IGNORE INTO archive_cursor (id, seq) VALUES (1, 0)")
+            conn.commit()
+            cursor.execute("SELECT seq FROM archive_cursor WHERE id = 1")
+            row = cursor.fetchone()
+            if row:
+                start_seq = row[0]
+            conn.close()
+        except Exception as e:
+            logger.error(f"[ARCHIVE_SYNC] Failed to get cursor: {e}")
+            # Continue with 0...
+
+        logger.info(f"[ARCHIVE_SYNC] Starting sync from seq={start_seq}")
+        
+        # 2. Initialize SDK for this sync task (Per-task instance for thread safety)
+        sdk = WeWorkFinanceSDK()
+        if not ARCHIVE_SECRET:
+            logger.warning("[ARCHIVE_SYNC] ARCHIVE_SECRET not set, file retrieval disabled")
+            return
+        if not sdk.init(WECOM_CORP_ID, ARCHIVE_SECRET):
+            logger.error("[ARCHIVE_SYNC] Failed to initialize Finance SDK")
+            return
+        logger.info("[ARCHIVE_SYNC] Finance SDK initialized successfully for this sync task")
+
+        # Load private key once for this sync task
+        priv_key = None
+        try:
+            with open(ARCHIVE_PRIVATE_KEY_PATH, "rb") as f:
+                priv_key = RSA.importKey(f.read())
+        except Exception as e:
+            logger.error(f"[ARCHIVE_SYNC] Failed to load private key from {ARCHIVE_PRIVATE_KEY_PATH}: {e}")
+            return
+
+        try:
+            # 3. Pull messages
+            # Use run_in_executor because C calls are blocking
+            chat_data = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: sdk.get_chat_data(start_seq, limit=100)
+            )
             
             if not chat_data:
-                logger.info("[ARCHIVE_SYNC] No more messages to pull")
-                has_more = False
-                break
-                
+                logger.info("[ARCHIVE_SYNC] No new messages to process")
+                return
+
             logger.info(f"[ARCHIVE_SYNC] Pulled {len(chat_data)} encrypted messages")
-            
-            max_seq = current_seq
-            for msg_item in chat_data:
-                seq = msg_item.get("seq", 0)
-                if seq > max_seq:
-                    max_seq = seq
-                    
-                # Decrypt this message
-                encrypt_random_key = msg_item.get("encrypt_random_key")
-                encrypt_chat_msg = msg_item.get("encrypt_chat_msg")
-                
-                if not encrypt_random_key or not encrypt_chat_msg:
-                    continue
-                    
-                # a) RSA decrypt random key
+
+            # 4. Decrypt and Process
+            new_max_seq = start_seq
+            for msg in chat_data:
                 try:
-                    random_key_bytes = rsa_cipher.decrypt(base64.b64decode(encrypt_random_key), None)
+                    # A. RSA Decrypt the random key
+                    cipher_rsa = PKCS1_v1_5.new(priv_key)
+                    encrypted_key = base64.b64decode(msg['encrypt_random_key'])
+                    
+                    random_key_bytes = cipher_rsa.decrypt(encrypted_key, None)
                     if not random_key_bytes:
-                        logger.error(f"[ARCHIVE_SYNC] RSA decryption failed for seq={seq}")
-                        continue
-                    
-                    random_key = random_key_bytes.decode('utf-8')
-                    
-                    # b) Finance SDK decrypt message
-                    decrypted_json = await loop.run_in_executor(
-                        None, lambda: sdk.decrypt_data(random_key, encrypt_chat_msg)
-                    )
-                    
-                    if not decrypted_json:
-                        logger.error(f"[ARCHIVE_SYNC] Finance SDK decryption failed for seq={seq}")
+                        logger.error(f"[ARCHIVE_SYNC] RSA decryption failed for msg {msg.get('msgid')}")
                         continue
                         
-                    # c) Process message JSON
-                    message = json.loads(decrypted_json)
-                    await process_archive_message(message)
+                    random_key = random_key_bytes.decode('utf-8')
+                    
+                    # B. Finance SDK Decrypt the message
+                    decrypted_json_str = await asyncio.get_event_loop().run_in_executor(
+                        None, lambda: sdk.decrypt_data(random_key, msg['encrypt_chat_msg'])
+                    )
+                    
+                    if not decrypted_json_str:
+                        logger.error(f"[ARCHIVE_SYNC] Finance SDK decryption failed for msg {msg.get('msgid')}")
+                        continue
+                    
+                    decrypted_msg = json.loads(decrypted_json_str)
+                    
+                    # C. Process the decrypted message (Save to DB, Handle files)
+                    await process_archive_message(decrypted_msg, sdk)
+                    
+                    new_max_seq = max(new_max_seq, msg['seq'])
                     
                 except Exception as e:
-                    logger.error(f"[ARCHIVE_SYNC] Error processing seq={seq}: {e}")
-            
-            # 3. Update cursor
-            current_seq = max_seq
-            cursor.execute("UPDATE archive_cursor SET seq = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1", (current_seq,))
-            conn.commit()
-            
-            # If we got fewer messages than limit, we're likely caught up
-            if len(chat_data) < limit:
-                has_more = False
-                
-        except Exception as e:
-            logger.error(f"[ARCHIVE_SYNC] Sync batch error: {e}")
-            has_more = False
+                    logger.error(f"[ARCHIVE_SYNC] Error processing message {msg.get('seq')}: {e}")
+                    import traceback
+                    logger.debug(traceback.format_exc())
 
-    logger.info(f"[ARCHIVE_SYNC] Sync complete. Current seq={current_seq}")
+            # 5. Update cursor
+            if new_max_seq > start_seq:
+                try:
+                    conn = sqlite3.connect(db_path)
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "UPDATE archive_cursor SET seq = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1",
+                        (new_max_seq,)
+                    )
+                    conn.commit()
+                    conn.close()
+                    logger.info(f"[ARCHIVE_SYNC] Updated cursor to seq={new_max_seq}")
+                except Exception as e:
+                    logger.error(f"[ARCHIVE_SYNC] Failed to update cursor: {e}")
+        finally:
+            # SDK cleanup happens via __del__ or we could add an explicit destroy
+            pass
+
+    logger.info(f"[ARCHIVE_SYNC] Sync complete. Current seq={new_max_seq}")
 
 
-async def process_archive_message(message: dict):
+async def process_archive_message(message: dict, sdk: WeWorkFinanceSDK):
     """
     Process an archived message.
     
