@@ -173,7 +173,7 @@ connect_vpn() {
     check_root
     
     echo "=== 启动 IPSec ==="
-    systemctl restart strongswan || ipsec restart
+    systemctl restart strongswan-starter || systemctl restart strongswan || ipsec restart
     sleep 2
     ipsec up ${VPN_NAME}
     

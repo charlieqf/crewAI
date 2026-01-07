@@ -25,7 +25,12 @@ echo "开始时间: $(date)"
 echo ""
 echo ">>> 1. 安装系统依赖..."
 
-apt-get update -qq
+apt-get \
+  -o Acquire::http::Timeout=20 \
+  -o Acquire::https::Timeout=20 \
+  -o Acquire::Retries=2 \
+  -o Acquire::ForceIPv4=true \
+  update -qq
 apt-get install -y python3 python3-pip python3-venv git sqlite3
 
 # -----------------------------------------------------------------------------
