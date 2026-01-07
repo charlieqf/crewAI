@@ -55,32 +55,68 @@ class WeWorkFinanceSDK:
         self.lib.GetChatData.argtypes = [
             ctypes.c_void_p, ctypes.c_ulonglong, ctypes.c_uint, 
             ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int, 
-            ctypes.POINTER(Slice_t)
+            ctypes.c_void_p # Slice_t*
         ]
 
         # int DecryptData(const char* encrypt_key, const char* encrypt_msg, Slice_t* msg)
         self.lib.DecryptData.restype = ctypes.c_int
-        self.lib.DecryptData.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.POINTER(Slice_t)]
+        self.lib.DecryptData.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_void_p]
 
         # int GetMediaData(void* sdk, const char* indexbuf, const char* sdkFileid, const char* proxy, const char* passwd, int timeout, MediaData_t* mediaData)
         self.lib.GetMediaData.restype = ctypes.c_int
         self.lib.GetMediaData.argtypes = [
             ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p,
             ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int,
-            ctypes.POINTER(MediaData_t)
+            ctypes.c_void_p # MediaData_t*
         ]
-
-        # void FreeSlice(Slice_t* slice)
-        self.lib.FreeSlice.restype = None
-        self.lib.FreeSlice.argtypes = [ctypes.POINTER(Slice_t)]
-
-        # void FreeMediaData(MediaData_t* mediaData)
-        self.lib.FreeMediaData.restype = None
-        self.lib.FreeMediaData.argtypes = [ctypes.POINTER(MediaData_t)]
 
         # void DestroySdk(void* sdk)
         self.lib.DestroySdk.restype = None
         self.lib.DestroySdk.argtypes = [ctypes.c_void_p]
+
+        # Slice_t* NewSlice()
+        self.lib.NewSlice.restype = ctypes.c_void_p
+        self.lib.NewSlice.argtypes = []
+
+        # void FreeSlice(Slice_t* slice)
+        self.lib.FreeSlice.restype = None
+        self.lib.FreeSlice.argtypes = [ctypes.c_void_p]
+
+        # char* GetContentFromSlice(Slice_t* slice)
+        self.lib.GetContentFromSlice.restype = ctypes.c_char_p
+        self.lib.GetContentFromSlice.argtypes = [ctypes.c_void_p]
+
+        # int GetSliceLen(Slice_t* slice)
+        self.lib.GetSliceLen.restype = ctypes.c_int
+        self.lib.GetSliceLen.argtypes = [ctypes.c_void_p]
+
+        # MediaData_t* NewMediaData()
+        self.lib.NewMediaData.restype = ctypes.c_void_p
+        self.lib.NewMediaData.argtypes = []
+
+        # void FreeMediaData(MediaData_t* media_data)
+        self.lib.FreeMediaData.restype = None
+        self.lib.FreeMediaData.argtypes = [ctypes.c_void_p]
+
+        # char* GetOutIndexBuf(MediaData_t* media_data)
+        self.lib.GetOutIndexBuf.restype = ctypes.c_char_p
+        self.lib.GetOutIndexBuf.argtypes = [ctypes.c_void_p]
+
+        # char* GetData(MediaData_t* media_data)
+        self.lib.GetData.restype = ctypes.c_char_p
+        self.lib.GetData.argtypes = [ctypes.c_void_p]
+
+        # int GetIndexLen(MediaData_t* media_data)
+        self.lib.GetIndexLen.restype = ctypes.c_int
+        self.lib.GetIndexLen.argtypes = [ctypes.c_void_p]
+
+        # int GetDataLen(MediaData_t* media_data)
+        self.lib.GetDataLen.restype = ctypes.c_int
+        self.lib.GetDataLen.argtypes = [ctypes.c_void_p]
+
+        # int IsMediaDataFinish(MediaData_t* media_data)
+        self.lib.IsMediaDataFinish.restype = ctypes.c_int
+        self.lib.IsMediaDataFinish.argtypes = [ctypes.c_void_p]
 
     def init(self, corp_id: str, secret: str) -> bool:
         """Initialize the SDK with credentials."""
@@ -98,49 +134,58 @@ class WeWorkFinanceSDK:
 
     def decrypt_data(self, encrypt_key: str, encrypt_msg: str) -> str:
         """Decrypt chat message data using the provided (decrypted) random key."""
-        slice_out = Slice_t()
-        ret = self.lib.DecryptData(encrypt_key.encode(), encrypt_msg.encode(), ctypes.byref(slice_out))
-        
-        if ret != 0:
-            logger.error(f"Failed to decrypt message data: ret={ret}")
+        slice_out = self.lib.NewSlice()
+        if not slice_out:
+            logger.error("Failed to allocate Slice for decryption")
             return None
-        
+            
         try:
-            result = slice_out.buf[:slice_out.len].decode('utf-8')
-            return result
+            ret = self.lib.DecryptData(encrypt_key.encode(), encrypt_msg.encode(), slice_out)
+            if ret != 0:
+                logger.error(f"Failed to decrypt message data: ret={ret}")
+                return None
+            
+            content = self.lib.GetContentFromSlice(slice_out)
+            length = self.lib.GetSliceLen(slice_out)
+            if content and length > 0:
+                return content[:length].decode('utf-8')
+            return None
         finally:
-            self.lib.FreeSlice(ctypes.byref(slice_out))
+            self.lib.FreeSlice(slice_out)
 
     def get_chat_data(self, seq: int, limit: int = 100, timeout: int = 30) -> list[dict]:
         """Fetch chat messages starting from seq+1."""
         if not self.sdk:
             raise RuntimeError("SDK not initialized. Call init() first.")
             
-        slice_out = Slice_t()
-        import json
-        
-        ret = self.lib.GetChatData(
-            self.sdk, seq, limit, 
-            None, None, timeout, ctypes.byref(slice_out)
-        )
-        
-        if ret != 0:
-            logger.error(f"Failed to get chat data: ret={ret}")
+        slice_out = self.lib.NewSlice()
+        if not slice_out:
+            logger.error("Failed to allocate Slice for GetChatData")
             return None
             
+        import json
         try:
-            # Check if slice_out.buf is None or slice_out.len is 0
-            if not slice_out.buf or slice_out.len == 0:
-                return []
+            ret = self.lib.GetChatData(
+                self.sdk, seq, limit, 
+                None, None, timeout, slice_out
+            )
+            
+            if ret != 0:
+                logger.error(f"Failed to get chat data: ret={ret}")
+                return None
                 
-            raw_data = slice_out.buf[:slice_out.len].decode('utf-8')
-            data = json.loads(raw_data)
-            return data.get("chatdata", [])
+            content = self.lib.GetContentFromSlice(slice_out)
+            length = self.lib.GetSliceLen(slice_out)
+            if content and length > 0:
+                raw_data = content[:length].decode('utf-8')
+                data = json.loads(raw_data)
+                return data.get("chatdata", [])
+            return []
         except Exception as e:
             logger.error(f"Failed to parse chat data JSON: {e}")
             return None
         finally:
-            self.lib.FreeSlice(ctypes.byref(slice_out))
+            self.lib.FreeSlice(slice_out)
 
     def get_media_data(self, sdk_file_id: str, timeout: int = 30) -> bytes:
         """Download complete media data (file content) using sdk_file_id."""
@@ -151,32 +196,45 @@ class WeWorkFinanceSDK:
         full_data = b""
         
         while True:
-            media_out = MediaData_t()
-            media_out.outindexbuf = None
-            media_out.data = None
-            
-            ret = self.lib.GetMediaData(
-                self.sdk, index_buf, sdk_file_id.encode(), 
-                None, None, timeout, ctypes.byref(media_out)
-            )
-            
-            if ret != 0:
-                logger.error(f"Failed to get media data for {sdk_file_id}: ret={ret}")
+            media_out = self.lib.NewMediaData()
+            if not media_out:
+                logger.error("Failed to allocate MediaData for GetMediaData")
                 break
                 
-            if media_out.data and media_out.data_len > 0:
-                full_data += media_out.data[:media_out.data_len]
-            
-            index_buf = media_out.outindexbuf[:media_out.out_len]
-            is_finish = media_out.is_finish
-            
-            self.lib.FreeMediaData(ctypes.byref(media_out))
-            
-            if is_finish:
-                break
+            try:
+                ret = self.lib.GetMediaData(
+                    self.sdk, index_buf, sdk_file_id.encode(), 
+                    None, None, timeout, media_out
+                )
+                
+                if ret != 0:
+                    logger.error(f"Failed to get media data for {sdk_file_id}: ret={ret}")
+                    break
+                    
+                data_ptr = self.lib.GetData(media_out)
+                data_len = self.lib.GetDataLen(media_out)
+                if data_ptr and data_len > 0:
+                    full_data += data_ptr[:data_len]
+                
+                next_index_ptr = self.lib.GetOutIndexBuf(media_out)
+                next_index_len = self.lib.GetIndexLen(media_out)
+                if next_index_ptr and next_index_len > 0:
+                    index_buf = next_index_ptr[:next_index_len]
+                else:
+                    index_buf = b""
+                    
+                is_finish = self.lib.IsMediaDataFinish(media_out)
+                if is_finish:
+                    break
+            finally:
+                self.lib.FreeMediaData(media_out)
         
         return full_data
 
     def __del__(self):
         if hasattr(self, 'sdk') and self.sdk:
-            self.lib.DestroySdk(self.sdk)
+            try:
+                self.lib.DestroySdk(self.sdk)
+                self.sdk = None
+            except:
+                pass
