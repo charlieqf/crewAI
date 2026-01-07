@@ -21,6 +21,9 @@ from datetime import datetime
 # Add project to path
 sys.path.insert(0, "/opt/wecom-callback")
 
+MAX_ARCHIVE_FILE_BYTES = 5 * 1024 * 1024
+ARCHIVE_SYNC_LOCK = os.getenv("ARCHIVE_SYNC_LOCK", "/var/lib/wecom-callback/archive_sync.lock")
+
 def load_env(path):
     if not os.path.exists(path):
         return
@@ -134,9 +137,15 @@ def process_file_message(sdk, msg: dict, cursor) -> bool:
         sdkfileid = file_info.get("sdkfileid")
         filename = file_info.get("filename", "unknown")
         file_size = file_info.get("filesize", 0)
-        
+
         if not sdkfileid:
             logger.warning(f"No sdkfileid in file message {msg.get('msgid')}")
+            return False
+
+        if file_size and file_size > MAX_ARCHIVE_FILE_BYTES:
+            logger.warning(
+                f"Skipping large file {filename} ({file_size} bytes) > {MAX_ARCHIVE_FILE_BYTES} bytes"
+            )
             return False
         
         logger.info(f"Downloading file: {filename} ({file_size} bytes)")
@@ -177,111 +186,148 @@ def process_file_message(sdk, msg: dict, cursor) -> bool:
 
 
 def sync(start_seq: int):
-    corp_id = os.getenv("WECOM_CORP_ID")
-    secret = os.getenv("ARCHIVE_SECRET")
-    priv_key_path = os.getenv("ARCHIVE_RSA_PRIVATE_KEY_PATH", "/opt/wecom-callback/keys/archive_private_key.pem")
-    db_path = os.getenv("ARCHIVE_DB_PATH")
-    if not db_path:
-        db_path = os.getenv("CHAT_DB_PATH", "/var/lib/wecom-callback/chat_history.db")
-        logger.warning(f"ARCHIVE_DB_PATH not set, falling back to {db_path}. Contention may occur.")
-    
-    if not corp_id or not secret:
-        return {"status": "error", "message": "Missing WECOM_CORP_ID or ARCHIVE_SECRET"}
-
-    # Initialize database
-    init_db(db_path)
-
-    # Initialize SDK
-    sdk = WeWorkFinanceSDK()
-    if not sdk.init(corp_id, secret):
-        return {"status": "error", "message": "Failed to initialize SDK"}
-
-    # Pull messages
-    chat_data = sdk.get_chat_data(start_seq, limit=500)
-    if not chat_data:
-        return {"status": "ok", "new_max_seq": start_seq, "processed": 0, "files": 0}
-
-    # Load private key
+    lock_fd = None
     try:
-        with open(priv_key_path, "rb") as f:
-            priv_key = RSA.importKey(f.read())
-    except Exception as e:
-        return {"status": "error", "message": f"Failed to load private key: {e}"}
-    
-    cipher_rsa = PKCS1_v1_5.new(priv_key)
-    new_max_seq = start_seq
-    processed = 0
-    files_processed = 0
-    
-    conn = sqlite3.connect(db_path, timeout=30)
-    cursor = conn.cursor()
-    
-    for msg in chat_data:
-        msg_seq = msg.get('seq', 0)
         try:
-            # Update sequence immediately to ensure we advance even on failure
-            # (Cursor is committed at the end of the batch)
-            new_max_seq = max(new_max_seq, msg_seq)
-            
-            # RSA Decrypt
-            encrypted_key = base64.b64decode(msg.get('encrypt_random_key', ''))
-            if not encrypted_key:
-                logger.warning(f"No encrypted_key for msg seq={msg_seq}")
-                continue
-                
-            random_key_bytes = cipher_rsa.decrypt(encrypted_key, None)
-            if not random_key_bytes:
-                logger.warning(f"RSA decryption failed for msg seq={msg_seq}")
-                continue
-            random_key = random_key_bytes.decode('utf-8')
-            
-            # SDK Decrypt
-            decrypted_json = sdk.decrypt_data(random_key, msg.get('encrypt_chat_msg', ''))
-            if not decrypted_json:
-                logger.warning(f"SDK decryption failed for msg seq={msg_seq}")
-                continue
-            
-            decrypted_msg = json.loads(decrypted_json)
-            msg_type = decrypted_msg.get("msgtype", "unknown")
-            
-            # Save message to database
-            try:
-                cursor.execute("""
-                    INSERT OR IGNORE INTO archived_messages 
-                    (seq, msgid, msgtype, sender_id, room_id, content, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                """, (
-                    msg_seq,
-                    decrypted_msg.get("msgid", msg.get("msgid")),
-                    msg_type,
-                    decrypted_msg.get("from", ""),
-                    decrypted_msg.get("roomid", ""),
-                    json.dumps(decrypted_msg, ensure_ascii=False)
-                ))
-            except Exception as e:
-                logger.warning(f"Failed to save message seq={msg_seq}: {e}")
-            
-            # Handle file messages
-            if msg_type == "file":
-                if process_file_message(sdk, decrypted_msg, cursor):
-                    files_processed += 1
-            
-            logger.info(f"Processed msg seq={msg_seq} type={msg_type}")
-            processed += 1
-            
+            lock_fd = os.open(ARCHIVE_SYNC_LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(lock_fd, str(os.getpid()).encode("utf-8"))
+        except FileExistsError:
+            logger.warning("Archive sync already running; skipping new run.")
+            return {"status": "ok", "new_max_seq": start_seq, "processed": 0, "files": 0}
         except Exception as e:
-            logger.error(f"Error processing msg {msg_seq}: {e}")
-    
-    conn.commit()
+            return {"status": "error", "message": f"Failed to acquire sync lock: {e}"}
 
-    # Update cursor
-    if new_max_seq > start_seq:
-        cursor.execute("UPDATE archive_cursor SET seq = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1", (new_max_seq,))
+        corp_id = os.getenv("WECOM_CORP_ID")
+        secret = os.getenv("ARCHIVE_SECRET")
+        priv_key_path = os.getenv(
+            "ARCHIVE_RSA_PRIVATE_KEY_PATH",
+            "/opt/wecom-callback/keys/archive_private_key.pem",
+        )
+        db_path = os.getenv("ARCHIVE_DB_PATH")
+        if not db_path:
+            db_path = os.getenv("CHAT_DB_PATH", "/var/lib/wecom-callback/chat_history.db")
+            logger.warning(
+                f"ARCHIVE_DB_PATH not set, falling back to {db_path}. Contention may occur."
+            )
+
+        if not corp_id or not secret:
+            return {"status": "error", "message": "Missing WECOM_CORP_ID or ARCHIVE_SECRET"}
+
+        # Initialize database
+        init_db(db_path)
+
+        # Initialize SDK
+        sdk = WeWorkFinanceSDK()
+        if not sdk.init(corp_id, secret):
+            return {"status": "error", "message": "Failed to initialize SDK"}
+
+        # Pull messages
+        chat_data = sdk.get_chat_data(start_seq, limit=500)
+        if not chat_data:
+            return {"status": "ok", "new_max_seq": start_seq, "processed": 0, "files": 0}
+
+        # Load private key
+        try:
+            with open(priv_key_path, "rb") as f:
+                priv_key = RSA.importKey(f.read())
+        except Exception as e:
+            return {"status": "error", "message": f"Failed to load private key: {e}"}
+
+        cipher_rsa = PKCS1_v1_5.new(priv_key)
+        new_max_seq = start_seq
+        processed = 0
+        files_processed = 0
+
+        conn = sqlite3.connect(db_path, timeout=30)
+        cursor = conn.cursor()
+
+        for msg in chat_data:
+            msg_seq = msg.get("seq", 0)
+            try:
+                # Update sequence immediately to ensure we advance even on failure
+                # (Cursor is committed at the end of the batch)
+                new_max_seq = max(new_max_seq, msg_seq)
+
+                # RSA Decrypt
+                encrypted_key = base64.b64decode(msg.get("encrypt_random_key", ""))
+                if not encrypted_key:
+                    logger.warning(f"No encrypted_key for msg seq={msg_seq}")
+                    continue
+
+                random_key_bytes = cipher_rsa.decrypt(encrypted_key, None)
+                if not random_key_bytes:
+                    logger.warning(f"RSA decryption failed for msg seq={msg_seq}")
+                    continue
+                random_key = random_key_bytes.decode("utf-8")
+
+                # SDK Decrypt
+                decrypted_json = sdk.decrypt_data(random_key, msg.get("encrypt_chat_msg", ""))
+                if not decrypted_json:
+                    logger.warning(f"SDK decryption failed for msg seq={msg_seq}")
+                    continue
+
+                decrypted_msg = json.loads(decrypted_json)
+                msg_type = decrypted_msg.get("msgtype", "unknown")
+
+                # Save message to database
+                try:
+                    cursor.execute(
+                        """
+                        INSERT OR IGNORE INTO archived_messages 
+                        (seq, msgid, msgtype, sender_id, room_id, content, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                        """,
+                        (
+                            msg_seq,
+                            decrypted_msg.get("msgid", msg.get("msgid")),
+                            msg_type,
+                            decrypted_msg.get("from", ""),
+                            decrypted_msg.get("roomid", ""),
+                            json.dumps(decrypted_msg, ensure_ascii=False),
+                        ),
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to save message seq={msg_seq}: {e}")
+
+                # Handle file messages
+                if msg_type == "file":
+                    if process_file_message(sdk, decrypted_msg, cursor):
+                        files_processed += 1
+
+                logger.info(f"Processed msg seq={msg_seq} type={msg_type}")
+                processed += 1
+
+            except Exception as e:
+                logger.error(f"Error processing msg {msg_seq}: {e}")
+
         conn.commit()
-    
-    conn.close()
 
-    return {"status": "ok", "new_max_seq": new_max_seq, "processed": processed, "files": files_processed}
+        # Update cursor
+        if new_max_seq > start_seq:
+            cursor.execute(
+                "UPDATE archive_cursor SET seq = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1",
+                (new_max_seq,),
+            )
+            conn.commit()
+
+        conn.close()
+
+        return {
+            "status": "ok",
+            "new_max_seq": new_max_seq,
+            "processed": processed,
+            "files": files_processed,
+        }
+    finally:
+        if lock_fd is not None:
+            try:
+                os.close(lock_fd)
+            except OSError:
+                pass
+            try:
+                os.remove(ARCHIVE_SYNC_LOCK)
+            except OSError:
+                pass
 
 if __name__ == "__main__":
     start_seq = int(sys.argv[1]) if len(sys.argv) > 1 else 0

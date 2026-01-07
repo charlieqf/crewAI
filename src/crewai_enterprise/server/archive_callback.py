@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 ARCHIVE_TOKEN = os.getenv("ARCHIVE_TOKEN", "")
 ARCHIVE_AES_KEY = os.getenv("ARCHIVE_AES_KEY", "")
 WECOM_CORP_ID = os.getenv("WECOM_CORP_ID", os.getenv("CORP_ID", ""))
+ARCHIVE_SYNC_LOCK = os.getenv("ARCHIVE_SYNC_LOCK", "/var/lib/wecom-callback/archive_sync.lock")
 
 from src.crewai_enterprise.utils.wecom_json_crypto import WXBizJsonMsgCrypt
 
@@ -157,6 +158,10 @@ def sync_archive_messages():
     """
     import subprocess
     
+    if os.path.exists(ARCHIVE_SYNC_LOCK):
+        logger.warning("[ARCHIVE_SYNC] Existing sync lock detected; skipping spawn")
+        return
+
     logger.info("[ARCHIVE_SYNC] Spawning subprocess for sync")
     
     # Get current seq from DB
