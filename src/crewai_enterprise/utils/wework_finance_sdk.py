@@ -111,6 +111,37 @@ class WeWorkFinanceSDK:
         finally:
             self.lib.FreeSlice(ctypes.byref(slice_out))
 
+    def get_chat_data(self, seq: int, limit: int = 100, timeout: int = 30) -> list[dict]:
+        """Fetch chat messages starting from seq+1."""
+        if not self.sdk:
+            raise RuntimeError("SDK not initialized. Call init() first.")
+            
+        slice_out = Slice_t()
+        import json
+        
+        ret = self.lib.GetChatData(
+            self.sdk, seq, limit, 
+            None, None, timeout, ctypes.byref(slice_out)
+        )
+        
+        if ret != 0:
+            logger.error(f"Failed to get chat data: ret={ret}")
+            return None
+            
+        try:
+            # Check if slice_out.buf is None or slice_out.len is 0
+            if not slice_out.buf or slice_out.len == 0:
+                return []
+                
+            raw_data = slice_out.buf[:slice_out.len].decode('utf-8')
+            data = json.loads(raw_data)
+            return data.get("chatdata", [])
+        except Exception as e:
+            logger.error(f"Failed to parse chat data JSON: {e}")
+            return None
+        finally:
+            self.lib.FreeSlice(ctypes.byref(slice_out))
+
     def get_media_data(self, sdk_file_id: str, timeout: int = 30) -> bytes:
         """Download complete media data (file content) using sdk_file_id."""
         if not self.sdk:

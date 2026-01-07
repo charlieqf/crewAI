@@ -28,6 +28,9 @@ WECOM_CORP_ID = os.getenv("WECOM_CORP_ID", os.getenv("CORP_ID", ""))
 
 from src.crewai_enterprise.utils.wecom_json_crypto import WXBizJsonMsgCrypt
 
+# Path to the RSA private key for archive decryption
+ARCHIVE_PRIVATE_KEY_PATH = os.getenv("ARCHIVE_RSA_PRIVATE_KEY_PATH", "/opt/wecom-callback/keys/archive_private_key.pem")
+
 router = APIRouter()
 
 
@@ -77,7 +80,7 @@ async def archive_callback_verify(
 
 
 @router.post("/wecom/archive-callback")
-async def archive_callback_message(request: Request):
+async def archive_callback_message(request: Request, background_tasks: BackgroundTasks):
     """
     Handle message callbacks from WeCom archive service.
     
@@ -131,10 +134,12 @@ async def archive_callback_message(request: Request):
     
     # Process message
     try:
-        await process_archive_message(message)
+        # Any callback indicates activity (a message or a notification event).
+        # We trigger a background sync to pull the encrypted data.
+        background_tasks.add_task(sync_archive_messages)
+        logger.info("[ARCHIVE_MSG] Triggered background sync")
     except Exception as e:
-        logger.error(f"[ARCHIVE_MSG] Error processing message: {e}")
-        # Still return success to WeCom
+        logger.error(f"[ARCHIVE_MSG] Error triggering sync: {e}")
     
     return {"status": "ok"}
 
@@ -162,6 +167,117 @@ def _get_archive_sdk() -> Optional[WeWorkFinanceSDK]:
         except Exception as e:
             logger.error(f"[ARCHIVE] Error initializing Finance SDK: {e}")
     return _archive_sdk
+
+
+async def sync_archive_messages():
+    """
+    Sync new messages from WeCom Archive service.
+    
+    This function pulls encrypted messages using GetChatData,
+    decrypts them using the RSA private key and the Finance SDK,
+    and then processes any file messages.
+    """
+    sdk = _get_archive_sdk()
+    if not sdk:
+        logger.error("[ARCHIVE_SYNC] SDK not available")
+        return
+
+    # 1. Get current sequence from DB
+    try:
+        conn = get_context_manager().storage._sqlite_conn
+        cursor = conn.cursor()
+        cursor.execute("SELECT seq FROM archive_cursor WHERE id = 1")
+        row = cursor.fetchone()
+        current_seq = row[0] if row else 0
+    except Exception as e:
+        logger.error(f"[ARCHIVE_SYNC] Failed to get cursor: {e}")
+        current_seq = 0
+
+    logger.info(f"[ARCHIVE_SYNC] Starting sync from seq={current_seq}")
+
+    # 2. Pull messages in batches
+    limit = 100
+    has_more = True
+    
+    from Crypto.PublicKey import RSA
+    from Crypto.Cipher import PKCS1_v1_5
+    import base64
+
+    # Load private key once
+    try:
+        with open(ARCHIVE_PRIVATE_KEY_PATH, "rb") as f:
+            priv_key = RSA.importKey(f.read())
+            rsa_cipher = PKCS1_v1_5.new(priv_key)
+    except Exception as e:
+        logger.error(f"[ARCHIVE_SYNC] Failed to load private key from {ARCHIVE_PRIVATE_KEY_PATH}: {e}")
+        return
+
+    while has_more:
+        try:
+            # Run SDK call in executor
+            import asyncio
+            loop = asyncio.get_event_loop()
+            chat_data = await loop.run_in_executor(None, lambda: sdk.get_chat_data(current_seq, limit))
+            
+            if not chat_data:
+                logger.info("[ARCHIVE_SYNC] No more messages to pull")
+                has_more = False
+                break
+                
+            logger.info(f"[ARCHIVE_SYNC] Pulled {len(chat_data)} encrypted messages")
+            
+            max_seq = current_seq
+            for msg_item in chat_data:
+                seq = msg_item.get("seq", 0)
+                if seq > max_seq:
+                    max_seq = seq
+                    
+                # Decrypt this message
+                encrypt_random_key = msg_item.get("encrypt_random_key")
+                encrypt_chat_msg = msg_item.get("encrypt_chat_msg")
+                
+                if not encrypt_random_key or not encrypt_chat_msg:
+                    continue
+                    
+                # a) RSA decrypt random key
+                try:
+                    random_key_bytes = rsa_cipher.decrypt(base64.b64decode(encrypt_random_key), None)
+                    if not random_key_bytes:
+                        logger.error(f"[ARCHIVE_SYNC] RSA decryption failed for seq={seq}")
+                        continue
+                    
+                    random_key = random_key_bytes.decode('utf-8')
+                    
+                    # b) Finance SDK decrypt message
+                    decrypted_json = await loop.run_in_executor(
+                        None, lambda: sdk.decrypt_data(random_key, encrypt_chat_msg)
+                    )
+                    
+                    if not decrypted_json:
+                        logger.error(f"[ARCHIVE_SYNC] Finance SDK decryption failed for seq={seq}")
+                        continue
+                        
+                    # c) Process message JSON
+                    message = json.loads(decrypted_json)
+                    await process_archive_message(message)
+                    
+                except Exception as e:
+                    logger.error(f"[ARCHIVE_SYNC] Error processing seq={seq}: {e}")
+            
+            # 3. Update cursor
+            current_seq = max_seq
+            cursor.execute("UPDATE archive_cursor SET seq = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1", (current_seq,))
+            conn.commit()
+            
+            # If we got fewer messages than limit, we're likely caught up
+            if len(chat_data) < limit:
+                has_more = False
+                
+        except Exception as e:
+            logger.error(f"[ARCHIVE_SYNC] Sync batch error: {e}")
+            has_more = False
+
+    logger.info(f"[ARCHIVE_SYNC] Sync complete. Current seq={current_seq}")
 
 
 async def process_archive_message(message: dict):
