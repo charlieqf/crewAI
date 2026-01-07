@@ -146,183 +146,67 @@ async def archive_callback_message(request: Request, background_tasks: Backgroun
     return {"status": "ok"}
 
 
-from src.crewai_enterprise.utils.wework_finance_sdk import WeWorkFinanceSDK
-
 # Archive SDK configuration
 ARCHIVE_SECRET = os.getenv("ARCHIVE_SECRET", "")
-_archive_sdk: WeWorkFinanceSDK | None = None
-
-def _get_archive_sdk() -> Optional[WeWorkFinanceSDK]:
-    """Lazy initialization of the Finance SDK."""
-    global _archive_sdk
-    if _archive_sdk is None:
-        if not ARCHIVE_SECRET:
-            logger.warning("[ARCHIVE] ARCHIVE_SECRET not set, file retrieval disabled")
-            return None
-        try:
-            sdk = WeWorkFinanceSDK()
-            if sdk.init(WECOM_CORP_ID, ARCHIVE_SECRET):
-                _archive_sdk = sdk
-                logger.info("[ARCHIVE] Finance SDK initialized successfully")
-            else:
-                logger.error("[ARCHIVE] Finance SDK initialization failed")
-        except Exception as e:
-            logger.error(f"[ARCHIVE] Error initializing Finance SDK: {e}")
-    return _archive_sdk
-
-
-async def sync_archive_messages():
-    """
-    Sync new messages from WeCom Archive service.
-    
-    This function pulls encrypted messages using GetChatData,
-    decrypts them using the RSA private key and the Finance SDK,
-    and then processes any file messages.
-    """
-    sdk = _get_archive_sdk()
-    if not sdk:
-        logger.error("[ARCHIVE_SYNC] SDK not available")
-        return
-
-    # 1. Get current sequence from DB
-    try:
-        conn = get_context_manager().storage._sqlite_conn
-        cursor = conn.cursor()
-        cursor.execute("SELECT seq FROM archive_cursor WHERE id = 1")
-        row = cursor.fetchone()
-        current_seq = row[0] if row else 0
-    except Exception as e:
-        logger.error(f"[ARCHIVE_SYNC] Failed to get cursor: {e}")
-        current_seq = 0
-
-    logger.info(f"[ARCHIVE_SYNC] Starting sync from seq={current_seq}")
-
-    # 2. Pull messages in batches
-    limit = 100
-    has_more = True
-    
-    from Crypto.PublicKey import RSA
-    from Crypto.Cipher import PKCS1_v1_5
-    import base64
-
-    # Load private key once
-# Global lock for synchronous sync task
-_sync_lock_thread = threading.Lock()
 
 def sync_archive_messages():
-    """Synchronous background task to poll messages from WeCom Archive."""
-    if not _sync_lock_thread.acquire(blocking=False):
-        logger.info("[ARCHIVE_SYNC] Sync already in progress, skipping")
-        return
-        
+    """
+    Trigger archive sync by spawning a subprocess.
+    
+    This isolates the C SDK from the uvicorn process to avoid memory conflicts.
+    """
+    import subprocess
+    
+    logger.info("[ARCHIVE_SYNC] Spawning subprocess for sync")
+    
+    # Get current seq from DB
+    start_seq = 0
+    db_path = os.getenv("CHAT_DB_PATH", "/var/lib/wecom-callback/chat_history.db")
     try:
-        logger.info("[ARCHIVE_SYNC] Starting sync process (Sync Mode)")
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute("CREATE TABLE IF NOT EXISTS archive_cursor (id INTEGER PRIMARY KEY, seq INTEGER, updated_at TEXT)")
+        cursor.execute("INSERT OR IGNORE INTO archive_cursor (id, seq) VALUES (1, 0)")
+        conn.commit()
+        cursor.execute("SELECT seq FROM archive_cursor WHERE id = 1")
+        row = cursor.fetchone()
+        if row:
+            start_seq = row[0]
+        conn.close()
+    except Exception as e:
+        logger.error(f"[ARCHIVE_SYNC] Failed to get cursor: {e}")
+
+    # Run the worker script
+    try:
+        result = subprocess.run(
+            ["/opt/wecom-callback/venv/bin/python", "/opt/wecom-callback/scripts/archive_sync_worker.py", str(start_seq)],
+            capture_output=True,
+            text=True,
+            timeout=120  # 2 minute timeout
+        )
         
-        # 1. Get current sequence
-        start_seq = 0
-        db_path = os.getenv("CHAT_DB_PATH", "/var/lib/wecom-callback/chat_history.db")
-        try:
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-            cursor.execute("CREATE TABLE IF NOT EXISTS archive_cursor (id INTEGER PRIMARY KEY, seq INTEGER, updated_at TEXT)")
-            cursor.execute("INSERT OR IGNORE INTO archive_cursor (id, seq) VALUES (1, 0)")
-            conn.commit()
-            cursor.execute("SELECT seq FROM archive_cursor WHERE id = 1")
-            row = cursor.fetchone()
-            if row:
-                start_seq = row[0]
-            conn.close()
-        except Exception as e:
-            logger.error(f"[ARCHIVE_SYNC] Failed to get cursor: {e}")
-
-        logger.info(f"[ARCHIVE_SYNC] Starting sync from seq={start_seq}")
+        logger.info(f"[ARCHIVE_SYNC] Worker stdout: {result.stdout}")
+        if result.stderr:
+            logger.warning(f"[ARCHIVE_SYNC] Worker stderr: {result.stderr}")
         
-        # 2. Initialize SDK
-        sdk = WeWorkFinanceSDK()
-        if not ARCHIVE_SECRET:
-            logger.warning("[ARCHIVE_SYNC] ARCHIVE_SECRET not set, file retrieval disabled")
-            return
-            
-        if not sdk.init(WECOM_CORP_ID, ARCHIVE_SECRET):
-            logger.error("[ARCHIVE_SYNC] Failed to initialize Finance SDK")
-            return
-            
-        logger.info("[ARCHIVE_SYNC] Finance SDK initialized successfully")
-
-        # 3. Pull messages
-        try:
-            chat_data = sdk.get_chat_data(start_seq, limit=100)
-            if not chat_data:
-                logger.info("[ARCHIVE_SYNC] No new messages to process")
-                return
-
-            logger.info(f"[ARCHIVE_SYNC] Pulled {len(chat_data)} encrypted messages")
-
-            # 4. Load private key
+        if result.returncode == 0:
             try:
-                with open(ARCHIVE_PRIVATE_KEY_PATH, "rb") as f:
-                    priv_key = RSA.importKey(f.read())
-            except Exception as e:
-                logger.error(f"[ARCHIVE_SYNC] Failed to load private key: {e}")
-                return
-
-            cipher_rsa = PKCS1_v1_5.new(priv_key)
-            new_max_seq = start_seq
-            
-            for msg in chat_data:
-                try:
-                    # A. RSA Decrypt
-                    encrypted_key = base64.b64decode(msg['encrypt_random_key'])
-                    random_key_bytes = cipher_rsa.decrypt(encrypted_key, None)
-                    if not random_key_bytes:
-                        continue
-                    
-                    random_key = random_key_bytes.decode('utf-8')
-                    
-                    # B. SDK Decrypt
-                    decrypted_json = sdk.decrypt_data(random_key, msg['encrypt_chat_msg'])
-                    if not decrypted_json:
-                        continue
-                        
-                    decrypted_msg = json.loads(decrypted_json)
-                    
-                    # C. Process (Blocking version)
-                    # Use a helper to run the async process in a temp loop if needed, 
-                    # but maybe we can make process_archive_message sync too if it just does DB/Qiniu
-                    import asyncio
-                    new_loop = asyncio.new_event_loop()
-                    try:
-                        new_loop.run_until_complete(process_archive_message(decrypted_msg, sdk))
-                    finally:
-                        new_loop.close()
-                    
-                    new_max_seq = max(new_max_seq, msg['seq'])
-                    
-                except Exception as e:
-                    logger.error(f"[ARCHIVE_SYNC] Error processing msg {msg.get('seq')}: {e}")
-
-            # 5. Update cursor
-            if new_max_seq > start_seq:
-                conn = sqlite3.connect(db_path)
-                cursor = conn.cursor()
-                cursor.execute(
-                    "UPDATE archive_cursor SET seq = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1",
-                    (new_max_seq,)
-                )
-                conn.commit()
-                conn.close()
-                logger.info(f"[ARCHIVE_SYNC] Updated cursor to seq={new_max_seq}")
-
-        except Exception as e:
-            logger.error(f"[ARCHIVE_SYNC] Sync error: {e}")
-    finally:
-        _sync_lock_thread.release()
-        logger.info(f"[ARCHIVE_SYNC] Sync process finished")
-
-    logger.info(f"[ARCHIVE_SYNC] Sync complete. Current seq={new_max_seq}")
+                output = json.loads(result.stdout.strip().split('\n')[-1])  # Last line is JSON
+                if output.get("status") == "ok":
+                    logger.info(f"[ARCHIVE_SYNC] Sync complete. new_max_seq={output.get('new_max_seq')}, processed={output.get('processed')}")
+                else:
+                    logger.error(f"[ARCHIVE_SYNC] Worker error: {output.get('message')}")
+            except json.JSONDecodeError:
+                logger.error(f"[ARCHIVE_SYNC] Failed to parse worker output: {result.stdout}")
+        else:
+            logger.error(f"[ARCHIVE_SYNC] Worker exited with code {result.returncode}")
+    except subprocess.TimeoutExpired:
+        logger.error("[ARCHIVE_SYNC] Worker timed out")
+    except Exception as e:
+        logger.error(f"[ARCHIVE_SYNC] Failed to run worker: {e}")
 
 
-async def process_archive_message(message: dict, sdk: WeWorkFinanceSDK):
+async def process_archive_message(message: dict, sdk):
     """
     Process an archived message.
     
