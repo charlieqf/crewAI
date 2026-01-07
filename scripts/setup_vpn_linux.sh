@@ -140,12 +140,27 @@ EOF
     chmod 600 /etc/ppp/options.l2tpd.client
 }
 
+setup_persistent_routes() {
+    echo "=== 设置持久化路由 (ip-up.d) ==="
+    
+    cat > /etc/ppp/ip-up.d/99-goldenstand-routes << 'EOF'
+#!/bin/bash
+# Automatically add Goldenstand internal routes when ppp comes up
+INTERNAL_ROUTES=("10.10.10.0/24" "172.16.6.0/24" "172.16.7.0/24" "192.168.1.0/24" "10.0.0.0/24")
+for route in "${INTERNAL_ROUTES[@]}"; do
+    ip route add "$route" dev "$1" 2>/dev/null || true
+done
+EOF
+    chmod +x /etc/ppp/ip-up.d/99-goldenstand-routes
+}
+
 install_vpn() {
     check_root
     install_deps
     configure_ipsec
     configure_xl2tpd
     configure_ppp
+    setup_persistent_routes
     
     echo ""
     echo "=== 安装完成 ==="

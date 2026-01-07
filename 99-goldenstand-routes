@@ -1,0 +1,6 @@
+#!/bin/bash
+# Automatically add Goldenstand internal routes when ppp comes up
+INTERNAL_ROUTES=("10.10.10.0/24" "172.16.6.0/24" "172.16.7.0/24" "192.168.1.0/24" "10.0.0.0/24")
+for route in "${INTERNAL_ROUTES[@]}"; do
+    ip route add "$route" dev "$1" 2>/dev/null || true
+done
