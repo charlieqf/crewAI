@@ -99,13 +99,8 @@ BOT_CONFIGS: dict[str, dict[str, str | bool]] = {
         "aes_key_env": "GEMINI_BOT_ENCODING_AES_KEY",
         "supports_file_analysis": True,
         "system_prompt": (
-            "You are a helpful assistant. Respond naturally to conversations in Chinese or English.\n"
-            "ONLY when the user's message contains the command '/file-html', generate an HTML file.\n"
-            "When generating files, follow these rules:\n"
-            "1. Wrap the file in <FILE name=\"filename.html\">content</FILE> tags.\n"
-            "2. DO NOT use Markdown code blocks.\n"
-            "3. Use Tailwind CSS via CDN for styling.\n"
-            "For all other messages, just have a normal conversation WITHOUT generating any files."
+            "You are a helpful assistant. Respond naturally to conversations in Chinese or English. "
+            "Be concise, friendly, and helpful."
         ),
     },
     "chatgpt": {
@@ -114,9 +109,8 @@ BOT_CONFIGS: dict[str, dict[str, str | bool]] = {
         "aes_key_env": "OPENAI_BOT_ENCODING_AES_KEY",
         "supports_file_analysis": True,
         "system_prompt": (
-            "You are a helpful assistant. Respond naturally to conversations.\n"
-            "ONLY when the user's message contains '/file-html', generate an HTML file wrapped in <FILE name=\"filename.html\">content</FILE> tags.\n"
-            "For all other messages, just have a normal conversation WITHOUT generating files."
+            "You are a helpful assistant. Respond naturally to conversations. "
+            "Be concise, friendly, and helpful."
         ),
     },
     "grok": {
@@ -125,9 +119,8 @@ BOT_CONFIGS: dict[str, dict[str, str | bool]] = {
         "aes_key_env": "XAI_BOT_ENCODING_AES_KEY",
         "supports_file_analysis": False,
         "system_prompt": (
-            "You are a helpful assistant. Respond naturally to conversations.\n"
-            "ONLY when the user's message contains '/file-html', generate an HTML file wrapped in <FILE name=\"filename.html\">content</FILE> tags.\n"
-            "For all other messages, just have a normal conversation WITHOUT generating files."
+            "You are a helpful assistant. Respond naturally to conversations. "
+            "Be concise, friendly, and helpful."
         ),
     },
 }
@@ -408,8 +401,13 @@ async def _process_llm_file_output(
     user_id: str | None = None,
     user_name: str | None = None,
     response_url: str | None = None,
+    file_only_mode: bool = False,
 ) -> str:
-    """Detect and process <FILE> tags in LLM output."""
+    """Detect and process <FILE> tags in LLM output.
+    
+    Args:
+        file_only_mode: If True, return only the cloud link (no extra text).
+    """
     import re
     from src.crewai_enterprise.utils.file_storage import get_file_manager
     from src.crewai_enterprise.utils.storage_manager import get_storage_manager
@@ -517,8 +515,12 @@ async def _process_llm_file_output(
             logger.info(f"[AIBOT_FILE] File available at cloud link (robot response_url does not support file attachments)")
             
             # 5. Final text cleanup (replace the entire tag with info)
-            link_display = f"\n\n[已生成文件: {filename}]\n云端链接: {qiniu_url_display}"
-            cleaned_content = cleaned_content[:match.start()] + link_display + cleaned_content[full_tag_end_pos:]
+            if file_only_mode:
+                # In file_only_mode, return ONLY the cloud link
+                return f"云端链接: {qiniu_url_display}"
+            else:
+                link_display = f"\n\n[已生成文件: {filename}]\n云端链接: {qiniu_url_display}"
+                cleaned_content = cleaned_content[:match.start()] + link_display + cleaned_content[full_tag_end_pos:]
             
         except Exception as e:
             logger.error(f"[AIBOT_FILE] Error processing file {original_filename}: {e}")
@@ -735,6 +737,15 @@ def _handle_prompt_command(
         )
         return {"content": response}
     
+    elif command == "file-html":
+        # File generation mode - return only the cloud link
+        if not args or len(args.strip()) < 2:
+            return {"content": "❌ 请提供生成需求\n\n用法：/file-html 制作一个登录页面"}
+        return {
+            "file_mode": "html",
+            "user_request": args.strip(),
+        }
+    
     return None
 
 
@@ -931,6 +942,68 @@ async def _call_llm_async(
             
             logger.info(f"[PROMPT_CMD] Handled command /{command} for {bot_type} in {chat_id}")
             return
+        
+        # Handle file generation mode (e.g., /file-html)
+        if cmd_result and cmd_result.get("file_mode"):
+            file_mode = cmd_result["file_mode"]
+            user_request = cmd_result["user_request"]
+            
+            logger.info(f"[FILE_MODE] Generating {file_mode} file: {user_request[:50]}")
+            
+            # One-time prompt override for file generation (doesn't affect chat history)
+            file_gen_prompt = (
+                "你是一个HTML文件生成器。根据用户需求生成一个完整的HTML文件。\n"
+                "规则：\n"
+                "1. 将完整的HTML内容包裹在 <FILE name=\"output.html\">...</FILE> 标签中\n"
+                "2. 使用 Tailwind CSS CDN 进行样式设计\n"
+                "3. 只输出文件，不要任何解释或说明\n"
+                "4. 确保HTML结构完整（html, head, body标签）"
+            )
+            
+            # Call LLM with file generation prompt
+            try:
+                router = get_router()
+                provider = BOT_CONFIGS[bot_type]["provider"]
+                
+                response = await asyncio.get_running_loop().run_in_executor(
+                    None,
+                    lambda: router.call(
+                        provider=provider,
+                        messages=[
+                            {"role": "system", "content": file_gen_prompt},
+                            {"role": "user", "content": user_request}
+                        ],
+                        temperature=0.7,
+                        max_tokens=8000,
+                    )
+                )
+                
+                # Process file output - with file_only_mode=True
+                final_content = await _process_llm_file_output(
+                    bot_type=bot_type,
+                    chat_id=chat_id,
+                    content=response.content,
+                    user_id=user_id,
+                    user_name=user_name,
+                    response_url=response_url,
+                    file_only_mode=True,  # Only return the cloud link
+                )
+                
+                if stream_id in _stream_tasks:
+                    _stream_tasks[stream_id]["content"] = final_content
+                    _stream_tasks[stream_id]["finished"] = True
+                    _stream_tasks[stream_id]["completed_at"] = time.time()
+                
+                logger.info(f"[FILE_MODE] Completed file generation for {chat_id}")
+                return
+                
+            except Exception as e:
+                logger.exception(f"[FILE_MODE] Error generating file: {e}")
+                if stream_id in _stream_tasks:
+                    _stream_tasks[stream_id]["content"] = f"❌ 文件生成失败: {str(e)[:100]}"
+                    _stream_tasks[stream_id]["finished"] = True
+                    _stream_tasks[stream_id]["completed_at"] = time.time()
+                return
 
     # Check for GitLab Code Review Request
     # Pattern: https://<any-domain>/<path>/-/commit/<sha>
