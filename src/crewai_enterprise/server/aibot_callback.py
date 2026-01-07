@@ -99,15 +99,13 @@ BOT_CONFIGS: dict[str, dict[str, str | bool]] = {
         "aes_key_env": "GEMINI_BOT_ENCODING_AES_KEY",
         "supports_file_analysis": True,
         "system_prompt": (
-            "You are a helpful assistant. If the user asks you to reproduce an interface or design from an image, "
-            "generate a complete, single-page HTML/CSS file directly. "
-            "Follow these STRICT rules:\n"
-            "1. Wrap the file in <FILE name=\"filename\">content</FILE> tags.\n"
-            "2. DO NOT use Markdown code blocks (```).\n"
-            "3. DO NOT provide any preamble or explanation unless absolutely necessary.\n"
-            "4. Use Tailwind CSS via CDN and standard CSS as needed for high-quality reproduction.\n"
-            "5. Ensure all tags are correctly closed.\n"
-            "6. IMPORTANT: Always generate FRESH code. NEVER reuse or repeat old links from the conversation history."
+            "You are a helpful assistant. Respond naturally to conversations in Chinese or English.\n"
+            "ONLY when the user's message contains the command '/file-html', generate an HTML file.\n"
+            "When generating files, follow these rules:\n"
+            "1. Wrap the file in <FILE name=\"filename.html\">content</FILE> tags.\n"
+            "2. DO NOT use Markdown code blocks.\n"
+            "3. Use Tailwind CSS via CDN for styling.\n"
+            "For all other messages, just have a normal conversation WITHOUT generating any files."
         ),
     },
     "chatgpt": {
@@ -116,8 +114,9 @@ BOT_CONFIGS: dict[str, dict[str, str | bool]] = {
         "aes_key_env": "OPENAI_BOT_ENCODING_AES_KEY",
         "supports_file_analysis": True,
         "system_prompt": (
-            "You are a helpful assistant. Directly generate file content wrapped in <FILE name=\"filename\">content</FILE> tags. "
-            "NO Markdown code blocks, NO excessive explanation. Focus on direct utility."
+            "You are a helpful assistant. Respond naturally to conversations.\n"
+            "ONLY when the user's message contains '/file-html', generate an HTML file wrapped in <FILE name=\"filename.html\">content</FILE> tags.\n"
+            "For all other messages, just have a normal conversation WITHOUT generating files."
         ),
     },
     "grok": {
@@ -126,8 +125,9 @@ BOT_CONFIGS: dict[str, dict[str, str | bool]] = {
         "aes_key_env": "XAI_BOT_ENCODING_AES_KEY",
         "supports_file_analysis": False,
         "system_prompt": (
-            "You are a helpful assistant. Directly generate file content wrapped in <FILE name=\"filename\">content</FILE> tags. "
-            "NO Markdown code blocks, NO excessive explanation."
+            "You are a helpful assistant. Respond naturally to conversations.\n"
+            "ONLY when the user's message contains '/file-html', generate an HTML file wrapped in <FILE name=\"filename.html\">content</FILE> tags.\n"
+            "For all other messages, just have a normal conversation WITHOUT generating files."
         ),
     },
 }
