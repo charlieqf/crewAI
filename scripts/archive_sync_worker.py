@@ -177,7 +177,7 @@ def sync(start_seq: int):
     corp_id = os.getenv("WECOM_CORP_ID")
     secret = os.getenv("ARCHIVE_SECRET")
     priv_key_path = os.getenv("ARCHIVE_RSA_PRIVATE_KEY_PATH", "/opt/wecom-callback/keys/archive_private_key.pem")
-    db_path = os.getenv("CHAT_DB_PATH", "/var/lib/wecom-callback/chat_history.db")
+    db_path = os.getenv("ARCHIVE_DB_PATH", os.getenv("CHAT_DB_PATH", "/var/lib/wecom-callback/chat_history.db"))
     
     if not corp_id or not secret:
         return {"status": "error", "message": "Missing WECOM_CORP_ID or ARCHIVE_SECRET"}

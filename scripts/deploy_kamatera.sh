@@ -129,7 +129,8 @@ WEBHOOK_GEMINI=
 WEBHOOK_GROK=
 
 # 数据存储
-CHAT_DB_PATH=/var/lib/wecom-callback/chat_history.db
+CHAT_DB_PATH=/var/lib/wecom-callback/chat_storage.db
+ARCHIVE_DB_PATH=/var/lib/wecom-callback/chat_history.db
 
 # 日志
 LOG_DIR=/var/log/wecom-callback
