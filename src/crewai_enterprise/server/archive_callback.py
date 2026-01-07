@@ -13,7 +13,7 @@ import struct
 import time
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request
 from fastapi.responses import Response
 
 from src.crewai_enterprise.utils.chat_context import get_context_manager
