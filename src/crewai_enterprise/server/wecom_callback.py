@@ -34,9 +34,10 @@ from src.crewai_enterprise.server.handlers import (
     process_file_message,
 )
 
-# Import archive callback router
+# Import callback routers
 from src.crewai_enterprise.server import archive_callback
 from src.crewai_enterprise.server import archive_viewer
+from src.crewai_enterprise.server import aibot_callback
 
 
 logger = logging.getLogger(__name__)
@@ -77,6 +78,10 @@ def create_app() -> FastAPI:
     # Include archive viewer router
     app.include_router(archive_viewer.router)
     logger.info("[APP] Archive viewer router registered")
+    
+    # Include AI bot callback router
+    app.include_router(aibot_callback.router)
+    logger.info("[APP] AI bot callback router registered")
 
 
     # Lazy initialization for crypto
