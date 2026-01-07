@@ -738,12 +738,16 @@ def _handle_prompt_command(
         return {"content": response}
     
     elif command == "file-html":
-        # File generation mode - return only the cloud link
+        # File generation mode - NOT a terminal command
+        # Pass through to normal LLM flow with file output flag
+        # This allows full context while still producing file output
         if not args or len(args.strip()) < 2:
             return {"content": "❌ 请提供生成需求\n\n用法：/file-html 制作一个登录页面"}
+        # Return special marker to indicate file output mode (not a terminal command)
         return {
-            "file_mode": "html",
+            "file_output_mode": True,
             "user_request": args.strip(),
+            "continue_with_llm": True,  # Indicates this is NOT a terminal command
         }
     
     return None
@@ -934,76 +938,29 @@ async def _call_llm_async(
                         _stream_tasks[stream_id]["completed_at"] = time.time()
                     return
             
-            # Regular command - just return the response
-            if stream_id in _stream_tasks:
-                _stream_tasks[stream_id]["content"] = cmd_result["content"]
-                _stream_tasks[stream_id]["finished"] = True
-                _stream_tasks[stream_id]["completed_at"] = time.time()
-            
-            logger.info(f"[PROMPT_CMD] Handled command /{command} for {bot_type} in {chat_id}")
-            return
-        
-        # Handle file generation mode (e.g., /file-html)
-        if cmd_result and cmd_result.get("file_mode"):
-            file_mode = cmd_result["file_mode"]
-            user_request = cmd_result["user_request"]
-            
-            logger.info(f"[FILE_MODE] Generating {file_mode} file: {user_request[:50]}")
-            
-            # One-time prompt override for file generation (doesn't affect chat history)
-            file_gen_prompt = (
-                "你是一个HTML文件生成器。根据用户需求生成一个完整的HTML文件。\n"
-                "规则：\n"
-                "1. 将完整的HTML内容包裹在 <FILE name=\"output.html\">...</FILE> 标签中\n"
-                "2. 使用 Tailwind CSS CDN 进行样式设计\n"
-                "3. 只输出文件，不要任何解释或说明\n"
-                "4. 确保HTML结构完整（html, head, body标签）"
-            )
-            
-            # Call LLM with file generation prompt
-            try:
-                router = get_router()
-                provider = BOT_CONFIGS[bot_type]["provider"]
-                
-                response = await asyncio.get_running_loop().run_in_executor(
-                    None,
-                    lambda: router.call(
-                        provider=provider,
-                        messages=[
-                            {"role": "system", "content": file_gen_prompt},
-                            {"role": "user", "content": user_request}
-                        ],
-                        temperature=0.7,
-                        max_tokens=8000,
-                    )
-                )
-                
-                # Process file output - with file_only_mode=True
-                final_content = await _process_llm_file_output(
-                    bot_type=bot_type,
-                    chat_id=chat_id,
-                    content=response.content,
-                    user_id=user_id,
-                    user_name=user_name,
-                    response_url=response_url,
-                    file_only_mode=True,  # Only return the cloud link
-                )
-                
+            # Check if command wants to continue with LLM (e.g., /file-html)
+            if cmd_result.get("continue_with_llm"):
+                # File output mode - continue to normal LLM flow
+                file_output_mode = cmd_result.get("file_output_mode", False)
+                # Replace content with user's actual request (remove /file-html prefix)
+                content = cmd_result.get("user_request", content)
+                logger.info(f"[FILE_OUTPUT] Continuing to LLM with file_output_mode={file_output_mode}")
+                # Fall through to normal LLM processing below
+            else:
+                # Regular command - just return the response
                 if stream_id in _stream_tasks:
-                    _stream_tasks[stream_id]["content"] = final_content
+                    _stream_tasks[stream_id]["content"] = cmd_result["content"]
                     _stream_tasks[stream_id]["finished"] = True
                     _stream_tasks[stream_id]["completed_at"] = time.time()
                 
-                logger.info(f"[FILE_MODE] Completed file generation for {chat_id}")
+                logger.info(f"[PROMPT_CMD] Handled command /{command} for {bot_type} in {chat_id}")
                 return
-                
-            except Exception as e:
-                logger.exception(f"[FILE_MODE] Error generating file: {e}")
-                if stream_id in _stream_tasks:
-                    _stream_tasks[stream_id]["content"] = f"❌ 文件生成失败: {str(e)[:100]}"
-                    _stream_tasks[stream_id]["finished"] = True
-                    _stream_tasks[stream_id]["completed_at"] = time.time()
-                return
+    
+    # Initialize file_output_mode if not set by command handling above
+    try:
+        file_output_mode
+    except NameError:
+        file_output_mode = False
 
     # Check for GitLab Code Review Request
     # Pattern: https://<any-domain>/<path>/-/commit/<sha>
@@ -1106,6 +1063,19 @@ async def _call_llm_async(
     else:
         system_prompt = config["system_prompt"]
         logger.info(f"[PROMPT] Using default prompt for {bot_type}")
+
+    # If file_output_mode, append file generation instruction to system prompt
+    if file_output_mode:
+        file_instruction = (
+            "\n\n[重要：文件输出模式]\n"
+            "用户请求以HTML文件形式输出。请：\n"
+            "1. 将回复内容生成为一个完整的HTML文件\n"
+            "2. 使用 <FILE name=\"output.html\">...</FILE> 标签包裹HTML内容\n"
+            "3. 使用 Tailwind CSS CDN 进行样式设计\n"
+            "4. 只输出文件，不要添加额外的解释"
+        )
+        system_prompt = system_prompt + file_instruction
+        logger.info(f"[FILE_OUTPUT] Added file output instruction to system prompt")
 
     try:
         router = get_router()
@@ -1375,8 +1345,10 @@ async def _call_llm_async(
             content=response.content,
             user_id=user_id,
             user_name=user_name,
-            response_url=response_url
+            response_url=response_url,
+            file_only_mode=file_output_mode,  # Only return cloud link if /file-html was used
         )
+
 
         # Add assistant response to context
         context_manager.add_message(

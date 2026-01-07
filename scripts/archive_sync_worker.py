@@ -124,7 +124,7 @@ def upload_to_qiniu(file_bytes: bytes, filename: str) -> str:
         return None
 
 
-def process_file_message(sdk, msg: dict, db_path: str) -> bool:
+def process_file_message(sdk, msg: dict, cursor) -> bool:
     """Download file from WeCom and upload to Qiniu."""
     try:
         file_info = msg.get("file", {})
@@ -151,9 +151,7 @@ def process_file_message(sdk, msg: dict, db_path: str) -> bool:
         if not file_uri:
             return False
         
-        # Save to database
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
+        # Save to database using existing cursor
         cursor.execute("""
             INSERT OR REPLACE INTO chat_files 
             (msgid, room_id, sender_id, filename, file_size, file_uri, created_at)
@@ -166,8 +164,6 @@ def process_file_message(sdk, msg: dict, db_path: str) -> bool:
             len(file_bytes),
             file_uri
         ))
-        conn.commit()
-        conn.close()
         
         logger.info(f"Saved file record: {filename} -> {file_uri}")
         return True
@@ -250,7 +246,7 @@ def sync(start_seq: int):
             
             # Handle file messages
             if msg_type == "file":
-                if process_file_message(sdk, decrypted_msg, db_path):
+                if process_file_message(sdk, decrypted_msg, cursor):
                     files_processed += 1
             
             logger.info(f"Processed msg seq={msg['seq']} type={msg_type}")
