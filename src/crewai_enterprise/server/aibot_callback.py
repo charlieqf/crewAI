@@ -2362,6 +2362,7 @@ async def _handle_file_message(
             wecom_msg_id=wecom_msg_id,
             quoted_msg_id=quoted_msg_id,
             response_url=response_url,
+            file_output_mode=file_output_mode,
         )
     )
     
@@ -2382,6 +2383,7 @@ async def _call_file_llm_async(
     wecom_msg_id: str | None = None,
     quoted_msg_id: str | None = None,
     response_url: str | None = None,
+    file_output_mode: bool = False,
 ) -> None:
     """Download file, upload to LLM, and generate analysis."""
     try:
