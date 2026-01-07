@@ -12,11 +12,13 @@ from fastapi.responses import HTMLResponse
 
 router = APIRouter()
 
-DB_PATH = os.getenv("CHAT_DB_PATH", "/var/lib/wecom-callback/chat_history.db")
+DB_PATH = os.getenv("ARCHIVE_DB_PATH", os.getenv("CHAT_DB_PATH", "/var/lib/wecom-callback/chat_history.db"))
 
 
 def get_db():
-    return sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn.execute("PRAGMA journal_mode=WAL")
+    return conn
 
 
 @router.get("/archive/api/rooms")
