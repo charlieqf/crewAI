@@ -94,7 +94,7 @@ async def archive_callback_message(request: Request):
     """
     # Get body for decryption
     body = await request.body()
-    logger.debug(f"[ARCHIVE_MSG] Raw body: {body.decode('utf-8')[:200]}...")
+    logger.info(f"[ARCHIVE_MSG] Raw body: {body.decode('utf-8')[:300]}...")
     
     # Get query parameters
     params = request.query_params
