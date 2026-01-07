@@ -139,6 +139,20 @@ EOF
     echo "!!! 请编辑 $ENV_FILE 填写配置 !!!"
 fi
 
+# 强制更新数据库路径 (确保隔离生效)
+if [ -f $ENV_FILE ]; then
+    sed -i 's|CHAT_DB_PATH=.*|CHAT_DB_PATH=/var/lib/wecom-callback/chat_storage.db|' $ENV_FILE
+    if ! grep -q "ARCHIVE_DB_PATH" $ENV_FILE; then
+        echo "ARCHIVE_DB_PATH=/var/lib/wecom-callback/chat_history.db" >> $ENV_FILE
+    else
+        sed -i 's|ARCHIVE_DB_PATH=.*|ARCHIVE_DB_PATH=/var/lib/wecom-callback/chat_history.db|' $ENV_FILE
+    fi
+fi
+
+# 确保数据库目录权限
+mkdir -p /var/lib/wecom-callback
+chmod 777 /var/lib/wecom-callback
+
 # -----------------------------------------------------------------------------
 # 6. 配置系统环境与 systemd 服务
 # -----------------------------------------------------------------------------

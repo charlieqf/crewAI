@@ -47,8 +47,11 @@ logger = logging.getLogger(__name__)
 
 def init_db(db_path: str):
     """Initialize database tables if they don't exist."""
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=30)
     cursor = conn.cursor()
+    
+    # Enable WAL mode for better concurrency
+    cursor.execute("PRAGMA journal_mode=WAL")
     
     # Archive cursor table
     cursor.execute("""
@@ -177,7 +180,10 @@ def sync(start_seq: int):
     corp_id = os.getenv("WECOM_CORP_ID")
     secret = os.getenv("ARCHIVE_SECRET")
     priv_key_path = os.getenv("ARCHIVE_RSA_PRIVATE_KEY_PATH", "/opt/wecom-callback/keys/archive_private_key.pem")
-    db_path = os.getenv("ARCHIVE_DB_PATH", os.getenv("CHAT_DB_PATH", "/var/lib/wecom-callback/chat_history.db"))
+    db_path = os.getenv("ARCHIVE_DB_PATH")
+    if not db_path:
+        db_path = os.getenv("CHAT_DB_PATH", "/var/lib/wecom-callback/chat_history.db")
+        logger.warning(f"ARCHIVE_DB_PATH not set, falling back to {db_path}. Contention may occur.")
     
     if not corp_id or not secret:
         return {"status": "error", "message": "Missing WECOM_CORP_ID or ARCHIVE_SECRET"}
@@ -207,21 +213,32 @@ def sync(start_seq: int):
     processed = 0
     files_processed = 0
     
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=30)
     cursor = conn.cursor()
     
     for msg in chat_data:
+        msg_seq = msg.get('seq', 0)
         try:
+            # Update sequence immediately to ensure we advance even on failure
+            # (Cursor is committed at the end of the batch)
+            new_max_seq = max(new_max_seq, msg_seq)
+            
             # RSA Decrypt
-            encrypted_key = base64.b64decode(msg['encrypt_random_key'])
+            encrypted_key = base64.b64decode(msg.get('encrypt_random_key', ''))
+            if not encrypted_key:
+                logger.warning(f"No encrypted_key for msg seq={msg_seq}")
+                continue
+                
             random_key_bytes = cipher_rsa.decrypt(encrypted_key, None)
             if not random_key_bytes:
+                logger.warning(f"RSA decryption failed for msg seq={msg_seq}")
                 continue
             random_key = random_key_bytes.decode('utf-8')
             
             # SDK Decrypt
-            decrypted_json = sdk.decrypt_data(random_key, msg['encrypt_chat_msg'])
+            decrypted_json = sdk.decrypt_data(random_key, msg.get('encrypt_chat_msg', ''))
             if not decrypted_json:
+                logger.warning(f"SDK decryption failed for msg seq={msg_seq}")
                 continue
             
             decrypted_msg = json.loads(decrypted_json)
@@ -234,7 +251,7 @@ def sync(start_seq: int):
                     (seq, msgid, msgtype, sender_id, room_id, content, created_at)
                     VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 """, (
-                    msg['seq'],
+                    msg_seq,
                     decrypted_msg.get("msgid", msg.get("msgid")),
                     msg_type,
                     decrypted_msg.get("from", ""),
@@ -242,19 +259,18 @@ def sync(start_seq: int):
                     json.dumps(decrypted_msg, ensure_ascii=False)
                 ))
             except Exception as e:
-                logger.warning(f"Failed to save message: {e}")
+                logger.warning(f"Failed to save message seq={msg_seq}: {e}")
             
             # Handle file messages
             if msg_type == "file":
                 if process_file_message(sdk, decrypted_msg, cursor):
                     files_processed += 1
             
-            logger.info(f"Processed msg seq={msg['seq']} type={msg_type}")
-            new_max_seq = max(new_max_seq, msg['seq'])
+            logger.info(f"Processed msg seq={msg_seq} type={msg_type}")
             processed += 1
             
         except Exception as e:
-            logger.error(f"Error processing msg {msg.get('seq')}: {e}")
+            logger.error(f"Error processing msg {msg_seq}: {e}")
     
     conn.commit()
 

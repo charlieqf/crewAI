@@ -871,91 +871,100 @@ async def _call_llm_async(
     slash_index = content_stripped.find("/")
     
     if slash_index != -1:
-        # Extract command part (everything from / onwards)
-        command_part = content_stripped[slash_index:]
-        parts = command_part.split(maxsplit=1)
-        command = parts[0][1:]  # Remove leading /
-        args = parts[1] if len(parts) > 1 else ""
-        
-        cmd_result = _handle_prompt_command(command, args, bot_type, chat_id, user_id)
-        if cmd_result:
-            # Check if command wants to continue with a question (e.g., /codebase url question)
-            if cmd_result.get("continue_with_question"):
-                inline_question = cmd_result["continue_with_question"]
-                project_path = cmd_result["project_path"]
-                
-                # Update stream with initial status
-                if stream_id in _stream_tasks:
-                    _stream_tasks[stream_id]["content"] = cmd_result["content"]
-                
-                # Trigger CodebaseQAFlow immediately
-                # Get gitlab_url from cached context (set by _handle_prompt_command)
-                cached_context = _user_project_context.get(chat_id)
-                gitlab_base_url = cached_context["gitlab_url"] if cached_context else os.getenv("GITLAB_URL", "https://gitlab.goldenstand.com")
-                gitlab_token = os.getenv("GITLAB_TOKEN")
-                
-                if gitlab_token:
-                    try:
-                        flow = CodebaseQAFlow(
-                            gitlab_url=gitlab_base_url,
-                            private_token=gitlab_token,
-                            project_id=project_path,
-                            query=inline_question,
-                            branch=cmd_result.get("branch", "main")
-                        )
-                        
-                        loop = asyncio.get_running_loop()
-                        qa_result = await loop.run_in_executor(None, flow.kickoff)
-                        
-                        if stream_id in _stream_tasks:
-                            _stream_tasks[stream_id]["content"] = str(qa_result)
-                            _stream_tasks[stream_id]["finished"] = True
-                            _stream_tasks[stream_id]["completed_at"] = time.time()
-                        
-                        # Add to context
-                        get_context_manager().add_message(
-                            chat_id=chat_id,
-                            sender_id=f"bot_{bot_type}_qa",
-                            sender_name=f"{bot_type} QA",
-                            content=str(qa_result),
-                            role="assistant",
-                            bot_type=bot_type,
-                        )
-                        
-                        logger.info(f"[CODEBASE_CMD] Completed inline QA for {chat_id}")
-                        return
-                        
-                    except Exception as e:
-                        logger.error(f"[CODEBASE_CMD] Inline QA failed: {e}")
-                        if stream_id in _stream_tasks:
-                            _stream_tasks[stream_id]["content"] = f"❌ 代码分析失败: {e}"
-                            _stream_tasks[stream_id]["finished"] = True
-                            _stream_tasks[stream_id]["completed_at"] = time.time()
-                        return
-                else:
+        try:
+            # Extract command part (everything from / onwards)
+            command_part = content_stripped[slash_index:]
+            parts = command_part.split(maxsplit=1)
+            command = parts[0][1:]  # Remove leading /
+            args = parts[1] if len(parts) > 1 else ""
+            
+            cmd_result = _handle_prompt_command(command, args, bot_type, chat_id, user_id)
+            if cmd_result:
+                # Check if command wants to continue with a question (e.g., /codebase url question)
+                if cmd_result.get("continue_with_question"):
+                    inline_question = cmd_result["continue_with_question"]
+                    project_path = cmd_result["project_path"]
+                    
+                    # Update stream with initial status
                     if stream_id in _stream_tasks:
-                        _stream_tasks[stream_id]["content"] = "❌ GITLAB_TOKEN 未配置"
+                        _stream_tasks[stream_id]["content"] = cmd_result["content"]
+                    
+                    # Trigger CodebaseQAFlow immediately
+                    # Get gitlab_url from cached context (set by _handle_prompt_command)
+                    cached_context = _user_project_context.get(chat_id)
+                    gitlab_base_url = cached_context["gitlab_url"] if cached_context else os.getenv("GITLAB_URL", "https://gitlab.goldenstand.com")
+                    gitlab_token = os.getenv("GITLAB_TOKEN")
+                    
+                    if gitlab_token:
+                        try:
+                            flow = CodebaseQAFlow(
+                                gitlab_url=gitlab_base_url,
+                                private_token=gitlab_token,
+                                project_id=project_path,
+                                query=inline_question,
+                                branch=cmd_result.get("branch", "main")
+                            )
+                            
+                            loop = asyncio.get_running_loop()
+                            qa_result = await loop.run_in_executor(None, flow.kickoff)
+                            
+                            if stream_id in _stream_tasks:
+                                _stream_tasks[stream_id]["content"] = str(qa_result)
+                                _stream_tasks[stream_id]["finished"] = True
+                                _stream_tasks[stream_id]["completed_at"] = time.time()
+                            
+                            # Add to context
+                            get_context_manager().add_message(
+                                chat_id=chat_id,
+                                sender_id=f"bot_{bot_type}_qa",
+                                sender_name=f"{bot_type} QA",
+                                content=str(qa_result),
+                                role="assistant",
+                                bot_type=bot_type,
+                            )
+                            
+                            logger.info(f"[CODEBASE_CMD] Completed inline QA for {chat_id}")
+                            return
+                            
+                        except Exception as e:
+                            logger.error(f"[CODEBASE_CMD] Inline QA failed: {e}")
+                            if stream_id in _stream_tasks:
+                                _stream_tasks[stream_id]["content"] = f"❌ 代码分析失败: {e}"
+                                _stream_tasks[stream_id]["finished"] = True
+                                _stream_tasks[stream_id]["completed_at"] = time.time()
+                            return
+                    else:
+                        if stream_id in _stream_tasks:
+                            _stream_tasks[stream_id]["content"] = "❌ GITLAB_TOKEN 未配置"
+                            _stream_tasks[stream_id]["finished"] = True
+                            _stream_tasks[stream_id]["completed_at"] = time.time()
+                        return
+                
+                # Check if command wants to continue with LLM (e.g., /file-html)
+                if cmd_result.get("continue_with_llm"):
+                    # File output mode - continue to normal LLM flow
+                    file_output_mode = cmd_result.get("file_output_mode", False)
+                    # Replace content with user's actual request (remove /file-html prefix)
+                    content = cmd_result.get("user_request", content)
+                    logger.info(f"[FILE_OUTPUT] Continuing to LLM with file_output_mode={file_output_mode}")
+                    # Fall through to normal LLM processing below
+                else:
+                    # Generic command response (e.g., /help, /show_prompt)
+                    # Update status and finish
+                    if stream_id in _stream_tasks:
+                        _stream_tasks[stream_id]["content"] = cmd_result.get("content", "指令已执行")
                         _stream_tasks[stream_id]["finished"] = True
                         _stream_tasks[stream_id]["completed_at"] = time.time()
+                    
+                    logger.info(f"[PROMPT_CMD] Handled command /{command} for {bot_type} in {chat_id}")
                     return
-            
-            # Check if command wants to continue with LLM (e.g., /file-html)
-            if cmd_result.get("continue_with_llm"):
-                # File output mode - continue to normal LLM flow
-                file_output_mode = cmd_result.get("file_output_mode", False)
-                # Replace content with user's actual request (remove /file-html prefix)
-                content = cmd_result.get("user_request", content)
-                logger.info(f"[FILE_OUTPUT] Continuing to LLM with file_output_mode={file_output_mode}")
-                # Fall through to normal LLM processing below
-            else:
-                # Regular command - just return the response
-                if stream_id in _stream_tasks:
-                    _stream_tasks[stream_id]["content"] = cmd_result["content"]
-                    _stream_tasks[stream_id]["finished"] = True
-                    _stream_tasks[stream_id]["completed_at"] = time.time()
-                
-                logger.info(f"[PROMPT_CMD] Handled command /{command} for {bot_type} in {chat_id}")
-                return
+        except Exception as e:
+            logger.exception(f"[AIBOT_CMD_ERR] Failed to process command: {e}")
+            if stream_id in _stream_tasks:
+                _stream_tasks[stream_id]["content"] = f"❌ 指令执行异常: {e}"
+                _stream_tasks[stream_id]["finished"] = True
+                _stream_tasks[stream_id]["completed_at"] = time.time()
+            return
     
     # Initialize file_output_mode if not set by command handling above
     try:
@@ -1052,33 +1061,33 @@ async def _call_llm_async(
             return
 
     
-    config = BOT_CONFIGS[bot_type]
-    provider = config["provider"]
-    
-    # Prompt priority: Custom > Default
-    context_manager = get_context_manager()
-    custom_prompt = context_manager.get_custom_prompt(chat_id, bot_type)
-    if custom_prompt:
-        system_prompt = custom_prompt
-        logger.info(f"[PROMPT] Using custom prompt for {bot_type} in {chat_id}")
-    else:
-        system_prompt = config["system_prompt"]
-        logger.info(f"[PROMPT] Using default prompt for {bot_type}")
-
-    # If file_output_mode, append file generation instruction to system prompt
-    if file_output_mode:
-        file_instruction = (
-            "\n\n[重要：文件输出模式]\n"
-            "用户请求以HTML文件形式输出。请：\n"
-            "1. 将回复内容生成为一个完整的HTML文件\n"
-            "2. 使用 <FILE name=\"output.html\">...</FILE> 标签包裹HTML内容\n"
-            "3. 使用 Tailwind CSS CDN 进行样式设计\n"
-            "4. 只输出文件，不要添加额外的解释"
-        )
-        system_prompt = system_prompt + file_instruction
-        logger.info(f"[FILE_OUTPUT] Added file output instruction to system prompt")
-
     try:
+        config = BOT_CONFIGS[bot_type]
+        provider = config["provider"]
+        
+        # Prompt priority: Custom > Default
+        context_manager = get_context_manager()
+        custom_prompt = context_manager.get_custom_prompt(chat_id, bot_type)
+        if custom_prompt:
+            system_prompt = custom_prompt
+            logger.info(f"[PROMPT] Using custom prompt for {bot_type} in {chat_id}")
+        else:
+            system_prompt = config["system_prompt"]
+            logger.info(f"[PROMPT] Using default prompt for {bot_type}")
+
+        # If file_output_mode, append file generation instruction to system prompt
+        if file_output_mode:
+            file_instruction = (
+                "\n\n[重要：文件输出模式]\n"
+                "用户请求以HTML文件形式输出。请：\n"
+                "1. 将回复内容生成为一个完整的HTML文件\n"
+                "2. 使用 <FILE name=\"output.html\">...</FILE> 标签包裹HTML内容\n"
+                "3. 使用 Tailwind CSS CDN 进行样式设计\n"
+                "4. 只输出文件，不要添加额外的解释"
+            )
+            system_prompt = system_prompt + file_instruction
+            logger.info(f"[FILE_OUTPUT] Added file output instruction to system prompt")
+
         router = get_router()
         context_manager = get_context_manager()
 
@@ -1509,6 +1518,9 @@ async def _handle_text_message(
     quoted_content, quoted_msg_id = _extract_quote_content(data)
     original_content = content  # Save original user input
     quoted_filename = None
+    
+    # file_output_mode will be detected inside _call_llm_async via _handle_prompt_command
+    file_output_mode = False
     
     if quoted_content:
         # If quoting a file, content is often the filename
@@ -2274,6 +2286,7 @@ async def _handle_file_message(
     For other bots, returns a friendly 'not supported' message.
     """
     _cleanup_old_tasks()
+    file_output_mode = False
 
     # Extract user info
     from_data = data.get("from", {})

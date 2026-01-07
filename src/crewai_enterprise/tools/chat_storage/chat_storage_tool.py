@@ -102,8 +102,13 @@ class ChatStorageTool(BaseTool):
 
     def _init_sqlite(self):
         """Initialize SQLite database and create tables if needed."""
-        self._sqlite_conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        self._sqlite_conn = sqlite3.connect(
+            self.db_path, check_same_thread=False, timeout=30
+        )
         cursor = self._sqlite_conn.cursor()
+        
+        # Enable WAL mode for better concurrency
+        cursor.execute("PRAGMA journal_mode=WAL")
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS chat_messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -123,6 +128,17 @@ class ChatStorageTool(BaseTool):
             CREATE INDEX IF NOT EXISTS idx_chat_date 
             ON chat_messages(chat_id, DATE(timestamp))
         """)
+
+        # Configuration Guard: Check if we are accidentally using the archive DB
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='archived_messages'")
+        if cursor.fetchone():
+            error_msg = (
+                f"CRITICAL CONFIGURATION ERROR: ChatStorageTool is pointing to an ARCHIVE database: {self.db_path}. "
+                "This violates strict isolation requirements and will cause contention/corruption. "
+                "Ensure CHAT_DB_PATH is NOT the same as ARCHIVE_DB_PATH."
+            )
+            logger.error(f"[CONFIG_GUARD] {error_msg}")
+            raise RuntimeError(error_msg)
 
         # Safe unique index creation: remove duplicates first if any exist
         try:
