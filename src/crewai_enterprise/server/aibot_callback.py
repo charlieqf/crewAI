@@ -481,10 +481,27 @@ async def _process_llm_file_output(
                 emoji = "📋" if template_name == "daily" else "📝"
                 label = "每日群聊摘要报告" if template_name == "daily" else "会议纪要"
                 
-                if file_only_mode:
-                    return f"{emoji} {label}已生成：\n{upload_res.url}"
-                else:
-                    return f"{content}\n\n---\n\n{emoji} {label}：\n{upload_res.url}"
+                # Generate content-specific description by parsing JSON
+                try:
+                    import json
+                    clean_json = content.strip()
+                    if "```json" in clean_json:
+                        clean_json = clean_json.split("```json")[-1].split("```")[0].strip()
+                    data = json.loads(clean_json)
+                    
+                    if template_name == "daily":
+                        topics_count = len(data.get("topics", []))
+                        todos_count = len(data.get("todos", []))
+                        desc = f"提取了{topics_count}个讨论话题和{todos_count}个待办事项"
+                    else:
+                        agenda_count = len(data.get("agenda", []))
+                        actions_count = len(data.get("action_items", []))
+                        desc = f"整理了{agenda_count}个议程项目和{actions_count}个行动项"
+                except:
+                    desc = "已生成"
+                
+                # Never echo raw JSON content - only return link with description
+                return f"{emoji} {label}：{desc}\n📄 云端链接: {upload_res.url}"
             else:
                 # Template rendering failed - return error HTML instead of falling back
                 logger.warning(f"[AIBOT_TEMPLATE] Template rendering failed for {template_name}, returning error report")
@@ -522,10 +539,21 @@ async def _process_llm_file_output(
                 )
                 logger.info(f"[AIBOT_REPORT] Uploaded generated report to cloud: {upload_res.url}")
                 
-                if file_only_mode:
-                    return f"📋 今日群聊摘要报告已生成：\n{upload_res.url}"
-                else:
-                    return f"{content}\n\n---\n\n📊 可视化报告：\n{upload_res.url}"
+                # Generate content-specific description (same as template path)
+                try:
+                    import json
+                    clean_json = content.strip()
+                    if "```json" in clean_json:
+                        clean_json = clean_json.split("```json")[-1].split("```")[0].strip()
+                    data = json.loads(clean_json)
+                    topics_count = len(data.get("topics", []))
+                    todos_count = len(data.get("todos", []))
+                    desc = f"提取了{topics_count}个讨论话题和{todos_count}个待办事项"
+                except:
+                    desc = "已生成"
+                
+                # Never echo raw JSON - consistent with template path
+                return f"📋 每日群聊摘要报告：{desc}\n📄 云端链接: {upload_res.url}"
             else:
                 logger.warning(f"[AIBOT_REPORT] HTML conversion success=False for chat={chat_id}, bypassing auto-upload.")
         except Exception as e:
@@ -648,16 +676,18 @@ async def _process_llm_file_output(
                     logger.info(f"[AIBOT_FILE] Extracted summary: {summary_text}")
             
             if file_only_mode:
-                # In file_only_mode, return link + summary
+                # In file_only_mode, return link + summary (with fallback)
                 if summary_text:
                     return f"📄 云端链接: {qiniu_url_display}\n✨ {summary_text}"
                 else:
-                    return f"📄 云端链接: {qiniu_url_display}"
+                    # Fallback description when LLM omits summary
+                    return f"📄 云端链接: {qiniu_url_display}\n✨ 已生成HTML文件"
             else:
                 if summary_text:
                     link_display = f"\n\n✨ {summary_text}\n📄 云端链接: {qiniu_url_display}"
                 else:
-                    link_display = f"\n\n📄 云端链接: {qiniu_url_display}"
+                    # Fallback description when LLM omits summary
+                    link_display = f"\n\n✨ 已生成HTML文件\n📄 云端链接: {qiniu_url_display}"
                 cleaned_content = cleaned_content[:match.start()] + link_display + cleaned_content[full_tag_end_pos:]
             
         except Exception as e:
