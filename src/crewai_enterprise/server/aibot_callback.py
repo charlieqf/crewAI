@@ -634,11 +634,30 @@ async def _process_llm_file_output(
             logger.info(f"[AIBOT_FILE] File available at cloud link (robot response_url does not support file attachments)")
             
             # 5. Final text cleanup (replace the entire tag with info)
+            # Extract summary: first line of text before the first <FILE> tag
+            summary_text = ""
+            if i == 0:  # Only extract summary for the first file
+                pre_tag_content = content[:match.start()].strip()
+                if pre_tag_content:
+                    # Take only the first line, truncate to 100 chars
+                    first_line = pre_tag_content.split('\n')[0].strip()
+                    if len(first_line) > 100:
+                        summary_text = first_line[:97] + "..."
+                    else:
+                        summary_text = first_line
+                    logger.info(f"[AIBOT_FILE] Extracted summary: {summary_text}")
+            
             if file_only_mode:
-                # In file_only_mode, return ONLY the cloud link
-                return f"云端链接: {qiniu_url_display}"
+                # In file_only_mode, return link + summary
+                if summary_text:
+                    return f"📄 云端链接: {qiniu_url_display}\n✨ {summary_text}"
+                else:
+                    return f"📄 云端链接: {qiniu_url_display}"
             else:
-                link_display = f"\n\n[已生成文件: {filename}]\n云端链接: {qiniu_url_display}"
+                if summary_text:
+                    link_display = f"\n\n✨ {summary_text}\n📄 云端链接: {qiniu_url_display}"
+                else:
+                    link_display = f"\n\n📄 云端链接: {qiniu_url_display}"
                 cleaned_content = cleaned_content[:match.start()] + link_display + cleaned_content[full_tag_end_pos:]
             
         except Exception as e:
@@ -1277,13 +1296,16 @@ async def _call_llm_async(
                 # Free-form HTML mode (template_name is None)
                 file_instruction = (
                     "\n\n[重要：文件输出模式]\n"
-                    "用户请求以HTML文件形式输出。请：\n"
-                    "1. 将回复内容生成为一个完整的HTML文件\n"
-                    "2. 使用 <FILE name=\"output.html\">...</FILE> 标签包裹HTML内容\n"
+                    "用户请求以HTML文件形式输出。请严格按照以下格式回复：\n"
+                    "1. 首先用一句话（不超过50字）描述你生成/修改了什么\n"
+                    "2. 然后使用 <FILE name=\"output.html\">...</FILE> 标签包裹完整的HTML内容\n"
                     "3. 使用 Tailwind CSS CDN 进行样式设计\n"
-                    "4. 只输出文件，不要添加额外的解释"
+                    "4. 除了摘要和文件标签，不要添加其他内容\n\n"
+                    "输出格式示例：\n"
+                    "创建了一个深色科技风的登录页面，包含用户名密码输入框和渐变按钮。\n"
+                    "<FILE name=\"login.html\">...</FILE>"
                 )
-                logger.info(f"[FILE_OUTPUT] Added free-form HTML instruction to system prompt")
+                logger.info(f"[FILE_OUTPUT] Added free-form HTML instruction with summary to system prompt")
             system_prompt = system_prompt + file_instruction
 
         router = get_router()
