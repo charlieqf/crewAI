@@ -42,6 +42,8 @@ from src.crewai_enterprise.utils.chat_context import get_context_manager
 from src.crewai_enterprise.utils.storage_manager import get_storage_manager
 from src.crewai_enterprise.flows.code_review_flow import CodeReviewFlow
 from src.crewai_enterprise.flows.codebase_qa_flow import CodebaseQAFlow
+from src.crewai_enterprise.tools.archive.archive_tool import get_merged_chat_history
+from src.crewai_enterprise.utils.report_generator import generate_html_report
 
 # Global cache for user project context (chat_id -> {project_path, gitlab_url})
 # In production, this should be in Redis
@@ -78,6 +80,40 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+
+def _detect_daily_report_intent(text: str) -> bool:
+    """Detect if the user is requesting a daily/group summary."""
+    keywords = [
+        r"daily", r"today", r"summary", r"report", r"group chat", 
+        r"报告", r"总结", r"今天", r"群聊", r"内容", r"干了什么", r"纪要"
+    ]
+    # Check for direct file-html context or keywords
+    for kw in keywords:
+        if re.search(kw, text, re.IGNORECASE):
+            return True
+    return False
+
+
+def _format_chat_history(history: list[dict]) -> str:
+    """Formats merged chat history for LLM prompt."""
+    lines = []
+    for msg in history:
+        time_str = msg.get("timestamp", "")
+        if " " in time_str:
+            time_str = time_str.split(" ")[1][:5]
+        else:
+            time_str = time_str[:5]
+        
+        sender = msg.get("sender", "未知")
+        content = msg.get("content", "")
+        role_label = ""
+        if msg.get("role") == "assistant":
+            role_label = "[Bot]"
+        
+        lines.append(f"[{time_str}] {role_label}{sender}: {content}")
+    
+    return "\n".join(lines)
 
 # ============================================================================
 # WARNING: In-memory caches - NOT suitable for multi-worker/multi-instance!
@@ -395,24 +431,61 @@ def _extract_quote_content(data: dict) -> tuple[str | None, str | None]:
 
 
 async def _process_llm_file_output(
-    bot_type: str,
-    chat_id: str,
-    content: str,
+    content: str, 
+    chat_id: str, 
+    bot_type: str, 
     user_id: str | None = None,
     user_name: str | None = None,
     response_url: str | None = None,
     file_only_mode: bool = False,
+    is_report_request: bool = False,
 ) -> str:
     """Detect and process <FILE> tags in LLM output.
     
     Args:
         file_only_mode: If True, return only the cloud link (no extra text).
+        is_report_request: If True, allow auto-conversion of JSON to HTML report.
     """
     import re
+    from datetime import datetime
     from src.crewai_enterprise.utils.file_storage import get_file_manager
     from src.crewai_enterprise.utils.storage_manager import get_storage_manager
     from src.crewai_enterprise.utils.chat_context import get_context_manager
     
+    # Phase 3: Daily Report JSON-to-HTML Auto-conversion
+    # We detect if the output looks like a structured summary report 
+    # AND the user actually requested a report/summary.
+    if is_report_request and "topics" in content and "todos" in content and "{" in content:
+        try:
+            # Check intent - only auto-convert if "summary" or "report" intent was likely detected
+            # (In Phase 2 we already inject history, but here we gate the conversion too)
+            from datetime import timedelta, timezone
+            BEIJING_TZ = timezone(timedelta(hours=8))
+            now_bj = datetime.now(BEIJING_TZ)
+
+            logger.info(f"[AIBOT_REPORT] Detected potential JSON report, converting to HTML for chat={chat_id}")
+            html_report, success = generate_html_report(content, chat_id)
+            
+            if success:
+                # Successfully converted JSON report to HTML
+                storage = get_storage_manager()
+                report_filename = f"daily_report_{now_bj.strftime('%Y%m%d_%H%M%S')}.html"
+                upload_res = storage.upload_file(
+                    html_report.encode("utf-8"), 
+                    report_filename, 
+                    content_type="text/html"
+                )
+                logger.info(f"[AIBOT_REPORT] Uploaded generated report to cloud: {upload_res.url}")
+                
+                if file_only_mode:
+                    return f"📋 今日群聊摘要报告已生成：\n{upload_res.url}"
+                else:
+                    return f"{content}\n\n---\n\n📊 可视化报告：\n{upload_res.url}"
+            else:
+                logger.warning(f"[AIBOT_REPORT] HTML conversion success=False for chat={chat_id}, bypassing auto-upload.")
+        except Exception as e:
+            logger.error(f"[AIBOT_REPORT] Failed to auto-convert report JSON: {e}")
+
     # Robust parsing: Find all opening tags first
     # This handles cases where a tag might be opened but not closed (truncated output)
     open_tag_pattern = re.compile(r'<FILE\s+name="([^"]+)">', re.IGNORECASE)
@@ -1104,6 +1177,23 @@ async def _call_llm_async(
 
         # Detect and fetch URL content if present
         urls = _extract_urls(content)
+
+        # Phase 2: Daily Report Intent Detection & Archive Context Injection
+        archive_context = ""
+        is_report_request = False
+        if file_output_mode and _detect_daily_report_intent(content):
+            logger.info(f"[AIBOT_INTENT] Daily Report intent detected for chat={chat_id}")
+            is_report_request = True
+            # Fetch today's merged transcript for the report
+            history = get_merged_chat_history(chat_id, date="today", limit=100)
+            if history:
+                archive_context = _format_chat_history(history)
+                logger.info(f"[AIBOT_CTX] Injected {len(history)} messages from archive for report")
+            else:
+                logger.warning(f"[AIBOT_CTX] No history found for today in chat={chat_id}")
+        else:
+            is_report_request = False
+
         url_contents = []
         if urls:
             logger.info(f"[URL_DETECT] Found {len(urls)} URL(s) in message")
@@ -1131,6 +1221,13 @@ async def _call_llm_async(
             if messages and messages[-1]["role"] == "user":
                 messages[-1]["content"] = f"{url_context}\n\n---\n\n用户问题：{messages[-1]['content']}"
                 logger.info(f"[URL_CTX] Added {len(url_contents)} URL(s) content to context")
+
+        # Inject Archive Context if available
+        if archive_context and messages and messages[-1]["role"] == "user":
+            messages[-1]["content"] = (
+                f"### 今日群聊记录摘要 (仅供参考):\n\n{archive_context}\n\n"
+                f"---\n\n基于以上对话背景，请按照要求执行：{messages[-1]['content']}"
+            )
 
         # 1. Quoted File (Specific)
         file_ctx = None
@@ -1356,7 +1453,8 @@ async def _call_llm_async(
             user_id=user_id,
             user_name=user_name,
             response_url=response_url,
-            file_only_mode=file_output_mode,  # Only return cloud link if /file-html was used
+            file_only_mode=file_output_mode,
+            is_report_request=is_report_request,
         )
 
 
@@ -2047,6 +2145,8 @@ async def _handle_vision_message(
     if wecom_msg_id:
         _processed_messages[wecom_msg_id] = stream_id
 
+    is_report_request = False # Initialize for scope safety
+
     # Save persistent context (UCS Phase 1)
     if file_url:
         try:
@@ -2062,6 +2162,9 @@ async def _handle_vision_message(
             elif ".bmp" in file_url:
                 mime_type = "image/bmp"
                 filename = "image.bmp"
+
+            # Detect report intent for vision flow
+            is_report_request = _detect_daily_report_intent(prompt)
 
             # Fix: Use a derived message ID for the file context to avoid conflict with the user message (persistence dedup)
             file_msg_id = f"file_{wecom_msg_id}" if wecom_msg_id else None
@@ -2095,6 +2198,7 @@ async def _handle_vision_message(
             wecom_msg_id=wecom_msg_id,
             quoted_msg_id=quoted_msg_id,
             response_url=response_url,
+            is_report_request=is_report_request,
         )
     )
 
@@ -2119,6 +2223,7 @@ async def _call_vision_llm_async(
     wecom_msg_id: str | None = None,
     quoted_msg_id: str | None = None,
     response_url: str | None = None,
+    is_report_request: bool = False,
 ) -> None:
     """Call vision LLM asynchronously and update task result."""
     try:
@@ -2182,7 +2287,8 @@ async def _call_vision_llm_async(
             content=response.content,
             user_id=user_id,
             user_name=user_name,
-            response_url=response_url
+            response_url=response_url,
+            is_report_request=is_report_request,
         )
 
         # Update task with completed response
@@ -2308,6 +2414,10 @@ async def _handle_file_message(
     # Extract file info
     url, filename, mime_type = _extract_file_info(data)
     
+    # Detect report intent for file flow (check filename AND message content/caption)
+    text_ctx = f"{filename} {data.get('content', '')}"
+    is_report_request = _detect_daily_report_intent(text_ctx)
+    
     logger.info(f"[AIBOT_FILE] bot={bot_type} user={user_name} file={filename} mime={mime_type} raw_data={json.dumps(data, ensure_ascii=False)}")
     
     chat_id = _extract_chat_id(data, user_id)
@@ -2371,6 +2481,7 @@ async def _handle_file_message(
             file_url=url,
             filename=filename,
             mime_type=mime_type,
+            is_report_request=is_report_request,
             system_prompt=config["system_prompt"],
             user_id=user_id,
             chat_id=chat_id,
@@ -2399,6 +2510,7 @@ async def _call_file_llm_async(
     quoted_msg_id: str | None = None,
     response_url: str | None = None,
     file_output_mode: bool = False,
+    is_report_request: bool = False,
 ) -> None:
     """Download file, upload to LLM, and generate analysis."""
     try:
@@ -2611,7 +2723,8 @@ async def _call_file_llm_async(
             content=response.content,
             user_id=user_id,
             user_name=None, # user_name not in scope here
-            response_url=response_url
+            response_url=response_url,
+            is_report_request=is_report_request,
         )
 
         # Update task with completed response

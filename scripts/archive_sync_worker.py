@@ -16,7 +16,7 @@ import json
 import logging
 import sqlite3
 import hashlib
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 # Add project to path
 sys.path.insert(0, "/opt/wecom-callback")
@@ -271,11 +271,22 @@ def sync(start_seq: int):
 
                 # Save message to database
                 try:
+                    # Convert msgtime (milliseconds) to UTC+8 string
+                    msg_time_ms = decrypted_msg.get("msgtime", 0)
+                    if msg_time_ms:
+                        # WeCom msgtime is in milliseconds
+                        dt_utc = datetime.fromtimestamp(msg_time_ms / 1000.0, tz=timezone.utc)
+                        # Offset to Beijing Time (UTC+8)
+                        dt_beijing = dt_utc.astimezone(timezone(timedelta(hours=8)))
+                        created_at_str = dt_beijing.strftime("%Y-%m-%d %H:%M:%S")
+                    else:
+                        created_at_str = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
+
                     cursor.execute(
                         """
                         INSERT OR IGNORE INTO archived_messages 
                         (seq, msgid, msgtype, sender_id, room_id, content, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             msg_seq,
@@ -284,6 +295,7 @@ def sync(start_seq: int):
                             decrypted_msg.get("from", ""),
                             decrypted_msg.get("roomid", ""),
                             json.dumps(decrypted_msg, ensure_ascii=False),
+                            created_at_str,
                         ),
                     )
                 except Exception as e:

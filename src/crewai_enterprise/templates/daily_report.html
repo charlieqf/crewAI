@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>每日群聊摘要报告</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+        body { font-family: 'Inter', system-ui, -apple-system, sans-serif; }
+        .glass { background: rgba(255, 255, 255, 0.7); backdrop-filter: blur(10px); }
+        .dark-glass { background: rgba(17, 24, 39, 0.8); backdrop-filter: blur(10px); }
+    </style>
+</head>
+<body class="bg-gray-50 text-gray-900 min-h-screen pb-12">
+    <!-- Header -->
+    <header class="bg-indigo-600 text-white py-10 px-6 shadow-lg mb-8">
+        <div class="max-w-4xl mx-auto">
+            <h1 class="text-3xl font-bold mb-2">📊 每日群聊摘要报告</h1>
+            <p class="text-indigo-100">{{ date }} · {{ room_name or room_id }}</p>
+        </div>
+    </header>
+
+    <main class="max-w-4xl mx-auto px-6 space-y-8">
+        <!-- Summary Stats (Optional) -->
+        <section class="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <div class="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 transition-all hover:shadow-md">
+                <p class="text-gray-500 text-sm font-medium mb-1">活跃主题</p>
+                <p class="text-2xl font-bold text-indigo-600">{{ topics|length }} 个</p>
+            </div>
+            <div class="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 transition-all hover:shadow-md">
+                <p class="text-gray-500 text-sm font-medium mb-1">待办事项</p>
+                <p class="text-2xl font-bold text-orange-500">{{ todos|length }} 项</p>
+            </div>
+            <div class="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 transition-all hover:shadow-md">
+                <p class="text-gray-500 text-sm font-medium mb-1">参与人数</p>
+                <p class="text-2xl font-bold text-green-600">{{ participant_count or 'N/A' }} 位</p>
+            </div>
+        </section>
+
+        <!-- Topic Summaries -->
+        <section class="space-y-6">
+            <h2 class="text-xl font-bold flex items-center gap-2">
+                <span class="w-1.5 h-6 bg-indigo-500 rounded-full"></span>
+                核心讨论话题
+            </h2>
+            
+            {% for topic in topics %}
+            <div class="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden transition-all hover:border-indigo-200">
+                <div class="p-6">
+                    <div class="flex justify-between items-start mb-4">
+                        <h3 class="text-lg font-semibold text-gray-800">{{ topic.title }}</h3>
+                        {% if topic.sentiment %}
+                        <span class="px-2 py-1 rounded-md text-xs font-medium 
+                            {% if topic.sentiment == 'positive' %}bg-green-100 text-green-700
+                            {% elif topic.sentiment == 'negative' %}bg-red-100 text-red-700
+                            {% else %}bg-gray-100 text-gray-600{% endif %}">
+                            {{ topic.sentiment }}
+                        </span>
+                        {% endif %}
+                    </div>
+                    <p class="text-gray-600 leading-relaxed">{{ topic.summary }}</p>
+                </div>
+                
+                {% if topic.msgids %}
+                <div class="bg-gray-50 px-6 py-3 border-t border-gray-100 flex justify-between items-center">
+                    <span class="text-xs text-gray-400">基于 {{ topic.msgids|length }} 条消息分析</span>
+                    <a href="/archive/viewer?room_id={{ room_id }}&msgid={{ topic.msgids[0] }}" class="text-xs font-semibold text-indigo-600 hover:text-indigo-800">
+                        查看原文 &rarr;
+                    </a>
+                </div>
+                {% endif %}
+            </div>
+            {% endfor %}
+        </section>
+
+        <!-- Tasks / To-dos -->
+        {% if todos %}
+        <section class="space-y-6">
+            <h2 class="text-xl font-bold flex items-center gap-2 text-orange-600">
+                <span class="w-1.5 h-6 bg-orange-500 rounded-full"></span>
+                待办 & 行动项
+            </h2>
+            <div class="bg-orange-50 rounded-2xl border border-orange-100 p-6 space-y-4">
+                {% for todo in todos %}
+                <div class="flex items-start gap-4">
+                    <div class="mt-1">
+                        <svg class="w-5 h-5 text-orange-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                        </svg>
+                    </div>
+                    <div>
+                        <p class="text-gray-800 font-medium">{{ todo.task }}</p>
+                        {% if todo.assignee %}
+                        <p class="text-sm text-gray-500 mt-1">负责: <span class="bg-white px-2 py-0.5 rounded border border-orange-200 text-orange-700 font-semibold">{{ todo.assignee }}</span></p>
+                        {% endif %}
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+        </section>
+        {% endif %}
+
+        <!-- Quotes / Insights -->
+        {% if insights %}
+        <section class="space-y-6">
+          <h2 class="text-xl font-bold items-center gap-2">💡 关键见解</h2>
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {% for insight in insights %}
+            <div class="bg-indigo-50 p-4 rounded-xl border border-indigo-100 italic text-indigo-900">
+              "{{ insight }}"
+            </div>
+            {% endfor %}
+          </div>
+        </section>
+        {% endif %}
+    </main>
+
+    <footer class="mt-12 text-center text-gray-400 text-sm">
+        <p>此报告由 Gemini 企业版 AI 自动生成</p>
+        <p class="mt-1">仅供团队内部参考 · 生成时间: {{ timestamp }}</p>
+    </footer>
+</body>
+</html>
