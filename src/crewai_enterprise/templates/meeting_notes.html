@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>会议纪要</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+
+        body {
+            font-family: 'Inter', system-ui, -apple-system, sans-serif;
+        }
+
+        .glass {
+            background: rgba(255, 255, 255, 0.9);
+            backdrop-filter: blur(10px);
+        }
+
+        @media print {
+            body {
+                print-color-adjust: exact;
+                -webkit-print-color-adjust: exact;
+            }
+        }
+    </style>
+</head>
+
+<body class="bg-slate-50 text-slate-900 min-h-screen pb-12">
+    <!-- Header -->
+    <header class="bg-gradient-to-r from-slate-800 to-slate-700 text-white py-10 px-6 shadow-lg mb-8">
+        <div class="max-w-4xl mx-auto">
+            <div class="flex items-center gap-3 mb-2">
+                <span class="text-3xl">📋</span>
+                <h1 class="text-3xl font-bold">{{ title or '会议纪要' }}</h1>
+            </div>
+            <p class="text-slate-300">{{ date }} · {{ room_name or room_id }}</p>
+        </div>
+    </header>
+
+    <main class="max-w-4xl mx-auto px-6 space-y-8">
+        <!-- Attendees -->
+        {% if attendees %}
+        <section class="bg-white rounded-2xl shadow-sm border border-slate-100 p-6">
+            <h2 class="text-lg font-bold text-slate-700 mb-4 flex items-center gap-2">
+                <span class="w-1.5 h-6 bg-blue-500 rounded-full"></span>
+                参会人员
+            </h2>
+            <div class="flex flex-wrap gap-2">
+                {% for person in attendees %}
+                <span
+                    class="px-3 py-1.5 bg-blue-50 text-blue-700 rounded-full text-sm font-medium border border-blue-100">
+                    {{ person }}
+                </span>
+                {% endfor %}
+            </div>
+        </section>
+        {% endif %}
+
+        <!-- Agenda Items -->
+        {% if agenda %}
+        <section class="space-y-4">
+            <h2 class="text-xl font-bold flex items-center gap-2">
+                <span class="w-1.5 h-6 bg-slate-600 rounded-full"></span>
+                会议议程
+            </h2>
+
+            {% for item in agenda %}
+            <div class="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
+                <div class="bg-slate-50 px-6 py-4 border-b border-slate-100">
+                    <h3 class="text-lg font-semibold text-slate-800">{{ loop.index }}. {{ item.item }}</h3>
+                </div>
+                <div class="p-6">
+                    <p class="text-slate-600 leading-relaxed mb-4">{{ item.discussion }}</p>
+
+                    {% if item.decisions %}
+                    <div class="mt-4 pt-4 border-t border-slate-100">
+                        <p class="text-sm font-semibold text-slate-500 mb-2">决议：</p>
+                        <ul class="space-y-2">
+                            {% for decision in item.decisions %}
+                            <li class="flex items-start gap-2">
+                                <svg class="w-5 h-5 text-green-500 mt-0.5 flex-shrink-0" fill="none"
+                                    stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                        d="M5 13l4 4L19 7"></path>
+                                </svg>
+                                <span class="text-slate-700">{{ decision }}</span>
+                            </li>
+                            {% endfor %}
+                        </ul>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+            {% endfor %}
+        </section>
+        {% endif %}
+
+        <!-- Action Items -->
+        {% if action_items %}
+        <section class="space-y-4">
+            <h2 class="text-xl font-bold flex items-center gap-2 text-amber-600">
+                <span class="w-1.5 h-6 bg-amber-500 rounded-full"></span>
+                行动项
+            </h2>
+            <div class="bg-amber-50 rounded-2xl border border-amber-100 overflow-hidden">
+                <table class="w-full">
+                    <thead class="bg-amber-100/50">
+                        <tr>
+                            <th class="text-left py-3 px-4 text-sm font-semibold text-amber-800">任务</th>
+                            <th class="text-left py-3 px-4 text-sm font-semibold text-amber-800">负责人</th>
+                            <th class="text-left py-3 px-4 text-sm font-semibold text-amber-800">截止日期</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-amber-100">
+                        {% for action in action_items %}
+                        <tr class="hover:bg-amber-100/30 transition-colors">
+                            <td class="py-3 px-4 text-slate-700">{{ action.task }}</td>
+                            <td class="py-3 px-4">
+                                <span
+                                    class="px-2 py-1 bg-white rounded border border-amber-200 text-amber-700 font-semibold text-sm">
+                                    {{ action.owner or '待定' }}
+                                </span>
+                            </td>
+                            <td class="py-3 px-4 text-slate-500 text-sm">{{ action.due or '待定' }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </section>
+        {% endif %}
+
+        <!-- Next Meeting -->
+        {% if next_meeting %}
+        <section class="bg-gradient-to-r from-slate-100 to-slate-50 rounded-2xl p-6 border border-slate-200">
+            <div class="flex items-center gap-4">
+                <div class="w-12 h-12 bg-slate-700 rounded-full flex items-center justify-center text-white text-xl">
+                    📅
+                </div>
+                <div>
+                    <p class="text-sm text-slate-500 font-medium">下次会议</p>
+                    <p class="text-lg font-bold text-slate-800">{{ next_meeting }}</p>
+                </div>
+            </div>
+        </section>
+        {% endif %}
+    </main>
+
+    <footer class="mt-12 text-center text-slate-400 text-sm">
+        <p>此纪要由 Gemini 企业版 AI 自动生成</p>
+        <p class="mt-1">仅供团队内部参考 · 生成时间: {{ timestamp }}</p>
+    </footer>
+</body>
+
+</html>

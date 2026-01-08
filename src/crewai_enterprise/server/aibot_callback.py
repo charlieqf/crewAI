@@ -439,12 +439,14 @@ async def _process_llm_file_output(
     response_url: str | None = None,
     file_only_mode: bool = False,
     is_report_request: bool = False,
+    template_name: str | None = None,
 ) -> str:
     """Detect and process <FILE> tags in LLM output.
     
     Args:
         file_only_mode: If True, return only the cloud link (no extra text).
         is_report_request: If True, allow auto-conversion of JSON to HTML report.
+        template_name: Template to use for JSON rendering ('daily', 'meeting', or None for free-form).
     """
     import re
     from datetime import datetime
@@ -452,19 +454,62 @@ async def _process_llm_file_output(
     from src.crewai_enterprise.utils.storage_manager import get_storage_manager
     from src.crewai_enterprise.utils.chat_context import get_context_manager
     
-    # Phase 3: Daily Report JSON-to-HTML Auto-conversion
-    # We detect if the output looks like a structured summary report 
-    # AND the user actually requested a report/summary.
-    if is_report_request and "topics" in content and "todos" in content and "{" in content:
+    # Template-based JSON-to-HTML rendering
+    # For template modes (daily, meeting), the LLM outputs structured JSON
+    # which gets rendered via the corresponding HTML template
+    if template_name in ("daily", "meeting"):
         try:
-            # Check intent - only auto-convert if "summary" or "report" intent was likely detected
-            # (In Phase 2 we already inject history, but here we gate the conversion too)
+            from datetime import timedelta, timezone
+            BEIJING_TZ = timezone(timedelta(hours=8))
+            now_bj = datetime.now(BEIJING_TZ)
+
+            logger.info(f"[AIBOT_TEMPLATE] Rendering {template_name} template for chat={chat_id}")
+            html_report, success = generate_html_report(content, chat_id, template_name=template_name)
+            
+            if success:
+                # Successfully converted JSON to HTML via template
+                storage = get_storage_manager()
+                filename_prefix = "daily_report" if template_name == "daily" else "meeting_notes"
+                report_filename = f"{filename_prefix}_{now_bj.strftime('%Y%m%d_%H%M%S')}.html"
+                upload_res = storage.upload_file(
+                    html_report.encode("utf-8"), 
+                    report_filename, 
+                    content_type="text/html"
+                )
+                logger.info(f"[AIBOT_TEMPLATE] Uploaded {template_name} report to cloud: {upload_res.url}")
+                
+                emoji = "📋" if template_name == "daily" else "📝"
+                label = "每日群聊摘要报告" if template_name == "daily" else "会议纪要"
+                
+                if file_only_mode:
+                    return f"{emoji} {label}已生成：\n{upload_res.url}"
+                else:
+                    return f"{content}\n\n---\n\n{emoji} {label}：\n{upload_res.url}"
+            else:
+                # Template rendering failed - return error HTML instead of falling back
+                logger.warning(f"[AIBOT_TEMPLATE] Template rendering failed for {template_name}, returning error report")
+                storage = get_storage_manager()
+                report_filename = f"error_report_{now_bj.strftime('%Y%m%d_%H%M%S')}.html"
+                upload_res = storage.upload_file(
+                    html_report.encode("utf-8"),  # html_report contains error HTML from render_template
+                    report_filename,
+                    content_type="text/html"
+                )
+                return f"❌ 模板渲染失败，请检查输出格式：\n{upload_res.url}"
+        except Exception as e:
+            logger.error(f"[AIBOT_TEMPLATE] Failed to render {template_name} template: {e}")
+            # Return error message instead of falling back
+            return f"❌ 生成报告时出错: {str(e)[:100]}..."
+    
+    # Legacy: Auto-conversion for daily report intent detection (backward compatibility)
+    elif is_report_request and "topics" in content and "todos" in content and "{" in content:
+        try:
             from datetime import timedelta, timezone
             BEIJING_TZ = timezone(timedelta(hours=8))
             now_bj = datetime.now(BEIJING_TZ)
 
             logger.info(f"[AIBOT_REPORT] Detected potential JSON report, converting to HTML for chat={chat_id}")
-            html_report, success = generate_html_report(content, chat_id)
+            html_report, success = generate_html_report(content, chat_id, template_name="daily")
             
             if success:
                 # Successfully converted JSON report to HTML
@@ -485,6 +530,7 @@ async def _process_llm_file_output(
                 logger.warning(f"[AIBOT_REPORT] HTML conversion success=False for chat={chat_id}, bypassing auto-upload.")
         except Exception as e:
             logger.error(f"[AIBOT_REPORT] Failed to auto-convert report JSON: {e}")
+
 
     # Robust parsing: Find all opening tags first
     # This handles cases where a tag might be opened but not closed (truncated output)
@@ -631,8 +677,13 @@ def _handle_prompt_command(
 • `/set_prompt <内容>` - 自定义系统提示词
 • `/reset_prompt` - 恢复默认系统提示词
 
+**📄 文件生成命令：**
+• `/file-html <描述>` - 自由生成HTML文件
+• `/file-html-daily` - 生成每日群聊摘要报告
+• `/file-html-meeting` - 生成会议纪要
+
 **📁 文件上下文管理：**
-• `/reset` - **[新增]** 彻底重置所有对话历史和上下文
+• `/reset` - 彻底重置所有对话历史和上下文
 • `/new` - 清除文件叠加态，开始新话题
 • Quote文件消息 - 明确引用特定文件
 • 自动上下文：文件上传后10分钟内自动使用
@@ -821,9 +872,33 @@ def _handle_prompt_command(
             "file_output_mode": True,
             "user_request": args.strip(),
             "continue_with_llm": True,  # Indicates this is NOT a terminal command
+            "template_name": None,  # Free-form HTML
+        }
+    
+    elif command == "file-html-daily":
+        # Daily summary report template
+        # LLM outputs structured JSON, rendered via daily_report.html template
+        user_prompt = args.strip() if args and args.strip() else "请根据今天的群聊记录生成一份每日摘要报告"
+        return {
+            "file_output_mode": True,
+            "user_request": user_prompt,
+            "continue_with_llm": True,
+            "template_name": "daily",  # Use daily_report.html template
+        }
+    
+    elif command == "file-html-meeting":
+        # Meeting notes template
+        # LLM outputs structured JSON, rendered via meeting_notes.html template
+        user_prompt = args.strip() if args and args.strip() else "请根据群聊内容整理一份会议纪要"
+        return {
+            "file_output_mode": True,
+            "user_request": user_prompt,
+            "continue_with_llm": True,
+            "template_name": "meeting",  # Use meeting_notes.html template
         }
     
     return None
+
 
 
 def _extract_urls(text: str) -> list[str]:
@@ -1013,13 +1088,14 @@ async def _call_llm_async(
                             _stream_tasks[stream_id]["completed_at"] = time.time()
                         return
                 
-                # Check if command wants to continue with LLM (e.g., /file-html)
+                # Check if command wants to continue with LLM (e.g., /file-html, /file-html-daily)
                 if cmd_result.get("continue_with_llm"):
                     # File output mode - continue to normal LLM flow
                     file_output_mode = cmd_result.get("file_output_mode", False)
+                    template_name = cmd_result.get("template_name")  # None for free-form, "daily" or "meeting" for templates
                     # Replace content with user's actual request (remove /file-html prefix)
                     content = cmd_result.get("user_request", content)
-                    logger.info(f"[FILE_OUTPUT] Continuing to LLM with file_output_mode={file_output_mode}")
+                    logger.info(f"[FILE_OUTPUT] Continuing to LLM with file_output_mode={file_output_mode}, template={template_name}")
                     # Fall through to normal LLM processing below
                 else:
                     # Generic command response (e.g., /help, /show_prompt)
@@ -1039,11 +1115,16 @@ async def _call_llm_async(
                 _stream_tasks[stream_id]["completed_at"] = time.time()
             return
     
-    # Initialize file_output_mode if not set by command handling above
+    # Initialize file_output_mode and template_name if not set by command handling above
     try:
         file_output_mode
     except NameError:
         file_output_mode = False
+    
+    try:
+        template_name
+    except NameError:
+        template_name = None
 
     # Check for GitLab Code Review Request
     # Pattern: https://<any-domain>/<path>/-/commit/<sha>
@@ -1148,18 +1229,62 @@ async def _call_llm_async(
             system_prompt = config["system_prompt"]
             logger.info(f"[PROMPT] Using default prompt for {bot_type}")
 
+
         # If file_output_mode, append file generation instruction to system prompt
         if file_output_mode:
-            file_instruction = (
-                "\n\n[重要：文件输出模式]\n"
-                "用户请求以HTML文件形式输出。请：\n"
-                "1. 将回复内容生成为一个完整的HTML文件\n"
-                "2. 使用 <FILE name=\"output.html\">...</FILE> 标签包裹HTML内容\n"
-                "3. 使用 Tailwind CSS CDN 进行样式设计\n"
-                "4. 只输出文件，不要添加额外的解释"
-            )
+            if template_name == "daily":
+                # Daily summary template - LLM outputs structured JSON
+                file_instruction = (
+                    "\n\n[重要：JSON结构化输出模式 - 每日摘要报告]\n"
+                    "请分析群聊内容并输出以下JSON格式（不要包含其他内容）：\n"
+                    "```json\n"
+                    "{\n"
+                    '  "topics": [\n'
+                    '    {"title": "讨论主题", "summary": "详细摘要", "sentiment": "positive/neutral/negative"}\n'
+                    "  ],\n"
+                    '  "todos": [\n'
+                    '    {"task": "待办事项", "assignee": "@负责人"}\n'
+                    "  ],\n"
+                    '  "insights": ["关键见解1", "关键见解2"],\n'
+                    '  "participant_count": 5\n'
+                    "}\n"
+                    "```\n"
+                    "必须输出有效的JSON，不要添加任何解释或markdown代码块之外的内容。"
+                )
+                logger.info(f"[FILE_OUTPUT] Added daily template JSON schema to system prompt")
+            elif template_name == "meeting":
+                # Meeting notes template - LLM outputs structured JSON
+                file_instruction = (
+                    "\n\n[重要：JSON结构化输出模式 - 会议纪要]\n"
+                    "请分析群聊内容并输出以下JSON格式（不要包含其他内容）：\n"
+                    "```json\n"
+                    "{\n"
+                    '  "title": "会议主题",\n'
+                    '  "attendees": ["张三", "李四", "王五"],\n'
+                    '  "agenda": [\n'
+                    '    {"item": "议程项目", "discussion": "讨论内容", "decisions": ["决定1"]}\n'
+                    "  ],\n"
+                    '  "action_items": [\n'
+                    '    {"task": "行动项", "owner": "负责人", "due": "截止日期"}\n'
+                    "  ],\n"
+                    '  "next_meeting": "下次会议时间"\n'
+                    "}\n"
+                    "```\n"
+                    "必须输出有效的JSON，不要添加任何解释或markdown代码块之外的内容。"
+                )
+                logger.info(f"[FILE_OUTPUT] Added meeting template JSON schema to system prompt")
+            else:
+                # Free-form HTML mode (template_name is None)
+                file_instruction = (
+                    "\n\n[重要：文件输出模式]\n"
+                    "用户请求以HTML文件形式输出。请：\n"
+                    "1. 将回复内容生成为一个完整的HTML文件\n"
+                    "2. 使用 <FILE name=\"output.html\">...</FILE> 标签包裹HTML内容\n"
+                    "3. 使用 Tailwind CSS CDN 进行样式设计\n"
+                    "4. 只输出文件，不要添加额外的解释"
+                )
+                logger.info(f"[FILE_OUTPUT] Added free-form HTML instruction to system prompt")
             system_prompt = system_prompt + file_instruction
-            logger.info(f"[FILE_OUTPUT] Added file output instruction to system prompt")
 
         router = get_router()
         context_manager = get_context_manager()
@@ -1455,6 +1580,7 @@ async def _call_llm_async(
             response_url=response_url,
             file_only_mode=file_output_mode,
             is_report_request=is_report_request,
+            template_name=template_name,
         )
 
 
@@ -2289,6 +2415,7 @@ async def _call_vision_llm_async(
             user_name=user_name,
             response_url=response_url,
             is_report_request=is_report_request,
+            template_name=None,  # Vision flow doesn't use templates
         )
 
         # Update task with completed response
@@ -2722,9 +2849,10 @@ async def _call_file_llm_async(
             chat_id=chat_id,
             content=response.content,
             user_id=user_id,
-            user_name=None, # user_name not in scope here
+            user_name=None,  # user_name not in scope here
             response_url=response_url,
             is_report_request=is_report_request,
+            template_name=None,  # File flow doesn't use templates
         )
 
         # Update task with completed response
