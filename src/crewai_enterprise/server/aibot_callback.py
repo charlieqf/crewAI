@@ -568,8 +568,116 @@ async def _process_llm_file_output(
     open_tags = list(open_tag_pattern.finditer(content))
     
     if not open_tags:
-        return content
-        
+        # Fallback: If we are in file_only_mode but no tags were found, 
+        # it means the LLM might have outputted the content directly without tags.
+        # We auto-wrap it into a default report.html
+        if file_only_mode and content.strip():
+            logger.info(f"[AIBOT_FILE] No <FILE> tags found in file_only_mode, initiating auto-wrap fallback for chat={chat_id}")
+            
+            # Simple check if it looks like HTML
+            is_html = content.strip().lower().startswith("<!doctype") or "<html" in content.lower()
+            
+            if is_html:
+                file_content = content
+            else:
+                # Wrap markdown/text in a basic Tailwind terminal-style container for consistency
+                file_content = f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Generated Report</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-[#0f172a] text-slate-200 min-h-screen p-4 md:p-8">
+    <div class="max-w-4xl mx-auto bg-[#1e293b] rounded-xl shadow-2xl border border-slate-700 overflow-hidden">
+        <div class="bg-[#334155] px-4 py-2 flex items-center gap-2 border-b border-slate-700">
+            <div class="flex gap-1.5">
+                <div class="w-2.5 h-2.5 rounded-full bg-red-400"></div>
+                <div class="w-2.5 h-2.5 rounded-full bg-amber-400"></div>
+                <div class="w-2.5 h-2.5 rounded-full bg-emerald-400"></div>
+            </div>
+            <span class="text-xs text-slate-400 font-mono ml-2">generated_report.html</span>
+        </div>
+        <div class="p-6 md:p-8 font-sans leading-relaxed whitespace-pre-wrap">
+{content}
+        </div>
+    </div>
+</body>
+</html>"""
+            
+            # Process the auto-wrapped content immediately
+            filename = "generated_report.html"
+            file_manager = get_file_manager()
+            storage = get_storage_manager()
+            context_manager = get_context_manager()
+            
+            # Proceed with the same injection and upload logic
+            # 1. Save locally
+            file_info = file_manager.save_file_from_bytes(
+                chat_id=chat_id,
+                content=file_content.encode("utf-8"),
+                filename=filename
+            )
+            
+            # 2. Upload
+            mime_type = "text/html"
+            final_content = file_content
+            if raw_context:
+                import html as html_module
+                import re as re_mod
+                escaped_context = html_module.escape(raw_context)
+                context_section = f'''
+<hr style="margin-top: 40px; border: 1px dashed #ccc;">
+<details style="margin-top: 20px; padding: 15px; background: #1a1a2e; border-radius: 8px;">
+<summary style="cursor: pointer; color: #8b8b9e; font-size: 14px;">
+  📋 原始上下文数据（用于生成本报告的聊天记录）
+</summary>
+<pre style="white-space: pre-wrap; word-wrap: break-word; font-size: 12px; color: #a0a0b0; margin-top: 10px; max-height: 500px; overflow-y: auto;">
+{escaped_context}
+</pre>
+</details>
+'''
+                body_matches = list(re_mod.finditer(r'</body>', final_content, re_mod.IGNORECASE))
+                if body_matches:
+                    last_body = body_matches[-1]
+                    final_content = final_content[:last_body.start()] + context_section + final_content[last_body.start():]
+                elif '</html>' in final_content.lower():
+                    html_matches = list(re_mod.finditer(r'</html>', final_content, re_mod.IGNORECASE))
+                    if html_matches:
+                        last_html = html_matches[-1]
+                        final_content = final_content[:last_html.start()] + context_section + final_content[last_html.start():]
+                else:
+                    final_content += context_section
+            
+            upload_res = storage.upload_file(
+                data=final_content.encode("utf-8"),
+                filename=filename,
+                content_type=mime_type
+            )
+            
+            # 3. Save Context
+            context_manager.save_file(
+                chat_id=chat_id,
+                sender_id=f"bot_{bot_type}",
+                sender_name=bot_type,
+                file_uri=upload_res.url,
+                filename=filename,
+                mime_type=mime_type,
+                bot_type=bot_type,
+                storage_key=upload_res.key
+            )
+            
+            # Return summary + link
+            # Try to extract a summary from the beginning of the content
+            summary = content.strip().split('\n')[0]
+            if len(summary) > 60:
+                summary = summary[:57] + "..."
+                
+            return f"{summary}\n📄 云端链接: {upload_res.url}"
+        else:
+            return content
+    
     cleaned_content = content
     file_manager = get_file_manager()
     storage = get_storage_manager()
@@ -1060,7 +1168,7 @@ def _extract_urls(text: str) -> list[str]:
     Returns:
         List of URLs found in text
     """
-    url_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+'
+    url_pattern = r'https?://[^\s<>"{}|\^`\[\]]+'
     return re.findall(url_pattern, text)
 
 
@@ -1470,17 +1578,17 @@ async def _call_llm_async(
             else:
                 # Free-form HTML mode (template_name is None)
                 file_instruction = (
-                    "\n\n[重要：文件输出模式]\n"
-                    "用户请求以HTML文件形式输出。请严格按照以下格式回复：\n"
-                    "1. 首先用一句话（不超过50字）描述你生成/修改了什么\n"
-                    "2. 然后使用 <FILE name=\"output.html\">...</FILE> 标签包裹完整的HTML内容\n"
-                    "3. 使用 Tailwind CSS CDN 进行样式设计\n"
-                    "4. 除了摘要和文件标签，不要添加其他内容\n\n"
-                    "输出格式示例：\n"
-                    "创建了一个深色科技风的登录页面，包含用户名密码输入框和渐变按钮。\n"
-                    "<FILE name=\"login.html\">...</FILE>"
+                    "\n\n[CRITICAL SYSTEM REQUIREMENT: FILE OUTPUT MODE]\n"
+                    "The user explicitly requested an HTML file. You MUST follow this structure REGARDLESS of your adopted persona or style:\n"
+                    "1. SUMMARY: A single sentence (max 50 chars) describing your generation.\n"
+                    "2. CONTENT: The complete HTML content wrapped inside <FILE name=\"output.html\">...</FILE> tags.\n"
+                    "3. STYLING: Use Tailwind CSS CDN for all styling.\n"
+                    "Failure to use the <FILE> tags will break the system integration. This is a mandatory technical requirement.\n\n"
+                    "Example Output:\n"
+                    "生成了一份风格前卫的分析报告。\n"
+                    "<FILE name=\"report.html\"><html>...</html></FILE>"
                 )
-                logger.info(f"[FILE_OUTPUT] Added free-form HTML instruction with summary to system prompt")
+                logger.info(f"[FILE_OUTPUT] Added highly authoritative free-form HTML instruction to system prompt")
             system_prompt = system_prompt + file_instruction
 
         router = get_router()
