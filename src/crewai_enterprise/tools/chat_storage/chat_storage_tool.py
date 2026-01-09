@@ -35,9 +35,11 @@ class ChatStorageToolInput(BaseModel):
         "get_recent",
         "get_recent_json",
         "delete_chat",
+        "get_context_start",
+        "set_context_start",
     ] = Field(
         ...,
-        description="Action: 'save', 'get_by_date', 'get_count', 'get_recent', 'get_recent_json', 'delete_chat'",
+        description="Action: 'save', 'get_by_date', 'get_count', 'get_recent', 'get_recent_json', 'delete_chat', 'get_context_start', 'set_context_start'",
     )
     chat_id: str = Field(..., description="Chat/Group identifier")
     # Fields for save action
@@ -208,6 +210,34 @@ class ChatStorageTool(BaseTool):
             CREATE INDEX IF NOT EXISTS idx_custom_prompts_user
             ON custom_prompts(user_id)
         """)
+
+        # [NEW] Create chat_context_settings table for /reset support
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS chat_context_settings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL UNIQUE,  -- "{chat_id}:{bot_type}"
+                context_start_ts TEXT,            -- ISO format
+                reset_by_user TEXT,
+                reset_at TEXT,                    -- ISO format
+                created_at TEXT                   -- ISO format
+            )
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_context_session 
+            ON chat_context_settings(session_id)
+        """)
+
+        # [MIGRATION] Backfill NULL bot_type values (Mandatory for isolation)
+        cursor.execute("""
+            UPDATE chat_messages 
+            SET bot_type = CASE
+                WHEN sender_name LIKE '%gemini%' OR sender_name LIKE '%Gemini%' THEN 'gemini'
+                WHEN sender_name LIKE '%chatgpt%' OR sender_name LIKE '%ChatGPT%' THEN 'chatgpt'
+                WHEN sender_name LIKE '%grok%' OR sender_name LIKE '%Grok%' THEN 'grok'
+                ELSE 'gemini'  -- Default fallback for historical data
+            END
+            WHERE bot_type IS NULL
+        """)
         
         self._sqlite_conn.commit()
         logger.info(f"SQLite initialized: {self.db_path}")
@@ -248,6 +278,7 @@ class ChatStorageTool(BaseTool):
         limit: int = 50,
         bot_type: str | None = None,
         storage_key: str | None = None,
+        since_ts: str | None = None,
     ) -> str:
         """Execute the tool logic."""
 
@@ -273,11 +304,17 @@ class ChatStorageTool(BaseTool):
         elif action == "get_count":
             return self._get_message_count(chat_id, date)
         elif action == "get_recent":
-            return self._get_recent_messages(chat_id, limit)
+            return self._get_recent_messages(chat_id, limit, bot_type, since_ts)
         elif action == "get_recent_json":
-            return self._get_recent_messages_json(chat_id, limit)
+            return self._get_recent_messages_json(chat_id, limit, bot_type, since_ts)
         elif action == "delete_chat":
             return self._delete_chat(chat_id)
+        elif action == "get_context_start":
+            return self._get_context_start(chat_id, bot_type)
+        elif action == "set_context_start":
+            # Extract timestamp from content if passed there, or use now
+            ts = content or datetime.now().isoformat()
+            return self._set_context_start(chat_id, bot_type, sender_id, ts)
         else:
             raise ValueError(f"Unknown action: {action}")
 
@@ -386,7 +423,7 @@ class ChatStorageTool(BaseTool):
         )
         return f"Message saved successfully. ID: {message_id}"
 
-    def _get_recent_messages(self, chat_id: str, limit: int = 50) -> str:
+    def _get_recent_messages(self, chat_id: str, limit: int = 50, bot_type: str | None = None, since_ts: str | None = None) -> str:
         """Get recent messages from Redis (for real-time chat participation)."""
         messages = []
 
@@ -394,13 +431,27 @@ class ChatStorageTool(BaseTool):
         if self._redis_client and self.backend in ("redis", "hybrid"):
             try:
                 redis_key = f"chat:{chat_id}:messages"
-                raw_messages = self._redis_client.lrange(redis_key, 0, limit - 1)
+                # Get more than limit to allow for filtering
+                raw_messages = self._redis_client.lrange(redis_key, 0, (limit * 5) - 1)
                 for raw in raw_messages:
                     msg = json.loads(raw)
+                    
+                    # [FIX] Apply bot_type and since_ts filtering to Redis data
+                    if bot_type and msg.get("bot_type") != bot_type:
+                        continue
+                    # [FIX] Medium finding: Strict filtering for resets
+                    ts = msg.get("timestamp")
+                    if since_ts:
+                        if not ts or ts <= since_ts:
+                            continue
+                        
                     messages.append(msg)
+                    if len(messages) >= limit:
+                        break
+                
                 messages.reverse()  # Oldest first
-                logger.info(
-                    f"Retrieved {len(messages)} messages from Redis for {chat_id}"
+                logger.debug(
+                    f"Retrieved {len(messages)} filtered messages from Redis for {chat_id}"
                 )
             except Exception as e:
                 logger.warning(f"Redis read failed: {e}, falling back to SQLite")
@@ -408,16 +459,23 @@ class ChatStorageTool(BaseTool):
         # Fallback to SQLite if Redis has no data
         if not messages and self._sqlite_conn and self.backend in ("sqlite", "hybrid"):
             cursor = self._sqlite_conn.cursor()
-            cursor.execute(
-                """
+            query = """
                 SELECT sender_name, content, timestamp, message_type
                 FROM chat_messages
                 WHERE chat_id = ?
-                ORDER BY timestamp DESC
-                LIMIT ?
-                """,
-                (chat_id, limit),
-            )
+            """
+            params = [chat_id]
+            if bot_type:
+                query += " AND bot_type = ?"
+                params.append(bot_type)
+            if since_ts:
+                query += " AND timestamp > ?"
+                params.append(since_ts)
+            
+            query += " ORDER BY timestamp DESC LIMIT ?"
+            params.append(limit)
+            
+            cursor.execute(query, tuple(params))
             rows = cursor.fetchall()
             for row in reversed(rows):
                 sender_name, content, timestamp, msg_type = row
@@ -442,7 +500,7 @@ class ChatStorageTool(BaseTool):
 
         return result
 
-    def _get_recent_messages_json(self, chat_id: str, limit: int = 50) -> str:
+    def _get_recent_messages_json(self, chat_id: str, limit: int = 50, bot_type: str | None = None, since_ts: str | None = None) -> str:
         """
         Get recent messages in JSON format for reliable parsing.
 
@@ -455,9 +513,20 @@ class ChatStorageTool(BaseTool):
         if self._redis_client and self.backend in ("redis", "hybrid"):
             try:
                 redis_key = f"chat:{chat_id}:messages"
-                raw_messages = self._redis_client.lrange(redis_key, 0, limit - 1)
+                # Get more than limit to allow for filtering
+                raw_messages = self._redis_client.lrange(redis_key, 0, (limit * 5) - 1)
                 for raw in raw_messages:
                     msg = json.loads(raw)
+                    
+                    # [FIX] Apply bot_type and since_ts filtering to Redis data
+                    if bot_type and msg.get("bot_type") != bot_type:
+                        continue
+                    # [FIX] Medium finding: Strict filtering for resets
+                    ts = msg.get("timestamp")
+                    if since_ts:
+                        if not ts or ts <= since_ts:
+                            continue
+                        
                     # Normalize to stable schema: {sender_name, content, role, timestamp}
                     messages.append(
                         {
@@ -469,6 +538,9 @@ class ChatStorageTool(BaseTool):
                             "storage_key": msg.get("storage_key"),
                         }
                     )
+                    if len(messages) >= limit:
+                        break
+                        
                 messages.reverse()  # Oldest first
             except Exception as e:
                 logger.warning(f"Redis read failed: {e}, falling back to SQLite")
@@ -476,16 +548,23 @@ class ChatStorageTool(BaseTool):
         # Fallback to SQLite if Redis has no data
         if not messages and self._sqlite_conn and self.backend in ("sqlite", "hybrid"):
             cursor = self._sqlite_conn.cursor()
-            cursor.execute(
-                """
+            query = """
                 SELECT sender_name, content, timestamp, role, wecom_msg_id, storage_key
                 FROM chat_messages
                 WHERE chat_id = ?
-                ORDER BY timestamp DESC
-                LIMIT ?
-                """,
-                (chat_id, limit),
-            )
+            """
+            params = [chat_id]
+            if bot_type:
+                query += " AND bot_type = ?"
+                params.append(bot_type)
+            if since_ts:
+                query += " AND timestamp > ?"
+                params.append(since_ts)
+            
+            query += " ORDER BY timestamp DESC LIMIT ?"
+            params.append(limit)
+            
+            cursor.execute(query, tuple(params))
             rows = cursor.fetchall()
             for row in reversed(rows):
                 sender_name, content, timestamp, role, wecom_msg_id, storage_key = row
@@ -593,6 +672,63 @@ class ChatStorageTool(BaseTool):
 
         logger.info(f"Deleted {deleted_count} messages for chat: {chat_id}")
         return f"Deleted {deleted_count} messages for chat {chat_id}."
+
+    def _get_context_start(self, chat_id: str, bot_type: str | None = None) -> str | None:
+        """Get the context start timestamp for a specific session."""
+        if not self._sqlite_conn:
+            return None
+        
+        if not bot_type:
+            # Fallback to gemini if not provided for legacy reasons, 
+            # though caller SHOULD provide it.
+            bot_type = "gemini"
+            
+        session_id = f"{chat_id}:{bot_type}"
+        try:
+            cursor = self._sqlite_conn.cursor()
+            cursor.execute(
+                "SELECT context_start_ts FROM chat_context_settings WHERE session_id = ?",
+                (session_id,)
+            )
+            row = cursor.fetchone()
+            return row[0] if row else None
+        except Exception as e:
+            logger.error(f"Failed to get context start for {session_id}: {e}")
+            return None
+
+    def _set_context_start(self, chat_id: str, bot_type: str | None, user_id: str | None, timestamp: str) -> str:
+        """Set the context start timestamp (reset) for a session."""
+        if not self._sqlite_conn:
+            return "Error: SQLite not configured"
+        
+        if not bot_type:
+            bot_type = "gemini"
+            
+        session_id = f"{chat_id}:{bot_type}"
+        try:
+            cursor = self._sqlite_conn.cursor()
+            # [FIX] Use ON CONFLICT DO UPDATE instead of INSERT OR REPLACE to preserve created_at reliably
+            cursor.execute("""
+                INSERT INTO chat_context_settings 
+                (session_id, context_start_ts, reset_by_user, reset_at, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(session_id) DO UPDATE SET
+                    context_start_ts = EXCLUDED.context_start_ts,
+                    reset_by_user = EXCLUDED.reset_by_user,
+                    reset_at = EXCLUDED.reset_at
+            """, (
+                session_id,
+                timestamp,
+                user_id or "system",
+                timestamp,
+                timestamp
+            ))
+            self._sqlite_conn.commit()
+            logger.info(f"Context reset for session {session_id} at {timestamp}")
+            return f"Success: Context reset for {bot_type}"
+        except Exception as e:
+            logger.error(f"Failed to set context start for {session_id}: {e}")
+            return f"Error: {str(e)}"
 
     def __del__(self):
         """Close connections on cleanup."""

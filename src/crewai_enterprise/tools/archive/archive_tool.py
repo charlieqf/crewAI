@@ -27,19 +27,36 @@ def get_merged_chat_history(
     Retrieves and merges chat history from two sources:
     1. chat_history.db (Audit data)
     2. chat_storage.db (Hot data/Bot responses)
+    
+    Args:
+        date: "today", "yesterday", "last_24h", or "YYYY-MM-DD"
     """
-    # Use Beijing time for relative date keywords
+    # Use Beijing time for relative date keywords (server may be in different timezone)
     now_bj = datetime.now(BEIJING_TZ)
     
-    if date == "today":
+    # Determine query mode and parameters
+    use_range_query = False
+    since_ts = None
+    
+    if date == "last_24h":
+        # Range query: last 24 hours from now (Beijing time)
+        since_ts = (now_bj - timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
+        target_date = None
+        use_range_query = True
+        logger.info(f"[ARCHIVE] Using 24h range query, since={since_ts} (Beijing time)")
+    elif date == "today":
         target_date = now_bj.strftime("%Y-%m-%d")
     elif date == "yesterday":
         target_date = (now_bj - timedelta(days=1)).strftime("%Y-%m-%d")
     else:
         target_date = date
 
-    audit_msgs = _get_audit_messages(room_id, target_date, limit)
-    hot_msgs = _get_hot_messages(room_id, target_date, limit)
+    if use_range_query:
+        audit_msgs = _get_audit_messages_range(room_id, since_ts, limit)
+        hot_msgs = _get_hot_messages_range(room_id, since_ts, limit)
+    else:
+        audit_msgs = _get_audit_messages(room_id, target_date, limit)
+        hot_msgs = _get_hot_messages(room_id, target_date, limit)
 
     # Merge and heal
     merged = _merge_and_heal(audit_msgs, hot_msgs)
@@ -129,6 +146,64 @@ def _get_audit_messages(room_id: str, date_str: str, limit: int) -> List[Dict[st
         
     return msgs[::-1] # Reverse to restore chronological order
 
+def _get_audit_messages_range(room_id: str, since_ts: str, limit: int) -> List[Dict[str, Any]]:
+    """Fetch audit messages from chat_history.db within a time range."""
+    msgs = []
+    if not os.path.exists(ARCHIVE_DB_PATH):
+        return msgs
+
+    try:
+        conn = sqlite3.connect(ARCHIVE_DB_PATH)
+        cursor = conn.cursor()
+        
+        # Query messages since since_ts
+        query = """
+            SELECT seq, msgid, sender_id, content, created_at 
+            FROM archived_messages 
+            WHERE room_id = ? AND 
+            (
+                CASE 
+                    WHEN created_at GLOB '[0-9]*' AND created_at NOT GLOB '*:*' THEN 
+                        CASE 
+                            WHEN length(created_at) >= 13 THEN datetime(CAST(created_at AS INTEGER)/1000, 'unixepoch')
+                            ELSE datetime(CAST(created_at AS INTEGER), 'unixepoch')
+                        END
+                    ELSE created_at 
+                END
+            ) >= ?
+            ORDER BY seq DESC
+            LIMIT ?
+        """
+        cursor.execute(query, (room_id, since_ts, limit))
+        
+        for row in cursor.fetchall():
+            seq, msgid, sender_id, raw_content, created_at = row
+            try:
+                content_dict = json.loads(raw_content)
+                text_content = ""
+                if content_dict.get("msgtype") == "text":
+                    text_content = content_dict.get("text", {}).get("content", "")
+                elif content_dict.get("msgtype") == "file":
+                    text_content = f"[File: {content_dict.get('file', {}).get('filename', 'unnamed')}]"
+                
+                msgs.append({
+                    "source": "audit",
+                    "seq": seq,
+                    "msgid": msgid,
+                    "sender": sender_id,
+                    "content": text_content,
+                    "timestamp": created_at,
+                    "role": "user"
+                })
+            except Exception as e:
+                logger.error(f"Failed to parse audit message range {msgid}: {e}")
+                
+        conn.close()
+    except Exception as e:
+        logger.error(f"Error fetching audit messages range: {e}")
+        
+    return msgs[::-1]
+
 def _get_hot_messages(chat_id: str, date_str: str, limit: int) -> List[Dict[str, Any]]:
     """Fetch bot responses and @mentions from chat_storage.db (Latest first)."""
     msgs = []
@@ -186,6 +261,61 @@ def _get_hot_messages(chat_id: str, date_str: str, limit: int) -> List[Dict[str,
         logger.error(f"Error fetching hot messages: {e}")
         
     return msgs[::-1] # Reverse to restore chronological order
+
+def _get_hot_messages_range(chat_id: str, since_ts: str, limit: int) -> List[Dict[str, Any]]:
+    """Fetch bot responses and @mentions within a time range."""
+    msgs = []
+    if not os.path.exists(HOT_DB_PATH):
+        return msgs
+
+    try:
+        conn = sqlite3.connect(HOT_DB_PATH)
+        cursor = conn.cursor()
+        
+        cursor.execute("PRAGMA table_info(chat_messages)")
+        columns = [col[1] for col in cursor.fetchall()]
+        
+        select_cols = ["sender_name", "content", "timestamp", "role", "wecom_msg_id"]
+        if "bot_type" in columns:
+            select_cols.append("bot_type")
+        
+        col_string = ", ".join(select_cols)
+        query = f"""
+            SELECT {col_string}
+            FROM chat_messages
+            WHERE chat_id = ? AND 
+            (
+                CASE 
+                    WHEN timestamp GLOB '[0-9]*' AND timestamp NOT GLOB '*:*' THEN 
+                        CASE 
+                            WHEN length(timestamp) >= 13 THEN datetime(CAST(timestamp AS INTEGER)/1000, 'unixepoch')
+                            ELSE datetime(CAST(timestamp AS INTEGER), 'unixepoch')
+                        END
+                    ELSE timestamp 
+                END
+            ) >= ?
+            ORDER BY id DESC
+            LIMIT ?
+        """
+        cursor.execute(query, (chat_id, since_ts, limit))
+        
+        for row in cursor.fetchall():
+            msg_data = dict(zip(select_cols, row))
+            msgs.append({
+                "source": "hot",
+                "sender": msg_data["sender_name"],
+                "content": msg_data["content"],
+                "timestamp": str(msg_data["timestamp"]),
+                "role": msg_data["role"],
+                "bot_type": msg_data.get("bot_type"),
+                "wecom_msg_id": msg_data["wecom_msg_id"]
+            })
+            
+        conn.close()
+    except Exception as e:
+        logger.error(f"Error fetching hot messages range: {e}")
+        
+    return msgs[::-1]
 
 def _merge_and_heal(audit_msgs: List[Dict[str, Any]], hot_msgs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """

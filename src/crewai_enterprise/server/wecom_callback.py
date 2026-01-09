@@ -196,12 +196,17 @@ def create_app() -> FastAPI:
         if message.msg_type == "text" and content:
             # Check for clear command
             if is_clear_command(content):
-                logger.info(f"[CLEAR] chat_id={chat_id} user={user_name}")
+                from src.crewai_enterprise.server.handlers.text_handler import strip_reset_command
+                remaining_text = strip_reset_command(content)
+                logger.info(f"[CLEAR] chat_id={chat_id} user={user_name} has_followup={bool(remaining_text)}")
                 background_tasks.add_task(
                     handle_clear_command,
+                    bot_type,
                     chat_id,
                     user_name,
                     webhook_url,
+                    remaining_text,
+                    message.msg_id
                 )
                 return {
                     "status": "clearing",

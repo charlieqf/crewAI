@@ -807,17 +807,41 @@ def _handle_prompt_command(
         return {"content": response}
     
     elif command == "reset":
-        # Completely clear all chat metrics and history
+        # Completely clear all chat metrics and history via timestamp reset
         try:
-            # 1. Clear message history in DB
-            deleted_count = context_manager.clear_context(chat_id)
-            # 2. Clear file contexts
-            context_manager.clear_file_context(chat_id)
+            now_iso = datetime.now().isoformat()
+            
+            # 1. Set context start timestamp in DB (Per Session isolation)
+            success = context_manager.set_context_start(
+                chat_id=chat_id,
+                bot_type=bot_type,
+                user_id=user_id,
+                timestamp=now_iso
+            )
+            # 2. Note: Disabling destructive clear_file_context(chat_id) 
+            # to preserve history and maintain per-bot isolation as per audit.
+            # File context is now filtered by bot_type and timestamp in lookup.
+            pass
+            
             # 3. Clear project context if any
+            # Note: We keep this per-chat for now as project context is shared in group
             if chat_id in _user_project_context:
                 del _user_project_context[chat_id]
             
-            response = f"✅ 已彻底重置所有上下文（删除了 {deleted_count} 条历史记录）\n\n💡 现在是一个全新的开始，机器人已不再记得之前的任何对话。"
+            if success:
+                response = (
+                    f"✅ 已重置 {bot_type} 的对话上下文\n\n"
+                    f"💡 历史记录已保留但不再被引用。\n"
+                    f"📌 现在是一个全新的开始！"
+                )
+                if args.strip():
+                    # Combined command: reset + question
+                    return {
+                        "content": response + "\n\n---\n\n",
+                        "continue_with_question": args.strip()
+                    }
+            else:
+                response = "❌ 重置失败，请稍后重试"
         except Exception as e:
             logger.error(f"[PROMPT_CMD] Failed to reset context: {e}")
             response = "❌ 重置失败，请稍后重试"
@@ -1065,12 +1089,29 @@ async def _call_llm_async(
     # Check for prompt management commands
     # Commands can appear after @mention, so search for / anywhere in content
     content_stripped = content.strip()
-    slash_index = content_stripped.find("/")
+    # [FIX] Strict command detection: must be at start or immediately after a mention
+    is_valid_command_start = False
+    command_part = ""
     
-    if slash_index != -1:
+    if content_stripped.startswith("/"):
+        is_valid_command_start = True
+        command_part = content_stripped
+    elif content_stripped.startswith("@"):
+        # Handle cases like "@bot /command" or "@bot/command"
+        slash_idx = content_stripped.find("/")
+        if slash_idx != -1:
+            prefix = content_stripped[:slash_idx].strip()
+            # If prefix is just the mention (no spaces before the slash)
+            if prefix.startswith("@") and " " not in prefix:
+                is_valid_command_start = True
+                command_part = content_stripped[slash_idx:]
+            # If prefix is like "@bot " and slash is at the start of the next word
+            elif prefix.startswith("@") and prefix.count("@") == 1:
+                is_valid_command_start = True
+                command_part = content_stripped[slash_idx:]
+
+    if is_valid_command_start and command_part:
         try:
-            # Extract command part (everything from / onwards)
-            command_part = content_stripped[slash_index:]
             parts = command_part.split(maxsplit=1)
             command = parts[0][1:]  # Remove leading /
             args = parts[1] if len(parts) > 1 else ""
@@ -1146,6 +1187,27 @@ async def _call_llm_async(
                     content = cmd_result.get("user_request", content)
                     logger.info(f"[FILE_OUTPUT] Continuing to LLM with file_output_mode={file_output_mode}, template={template_name}")
                     # Fall through to normal LLM processing below
+                elif cmd_result.get("continue_with_question"):
+                    # [FIX] Combined command (e.g., /reset question)
+                    logger.info(f"[CMD_FLOW] Command /{command} continuing with question: {cmd_result['continue_with_question'][:50]}...")
+                    # Prepend command response (e.g., "Reset complete") to the stream
+                    if stream_id in _stream_tasks:
+                        _stream_tasks[stream_id]["content"] = cmd_result["content"]
+                    
+                    # Override content for the LLM call and fall through
+                    content = cmd_result["continue_with_question"]
+                    
+                    # [NEW] Re-add to context after reset to ensure it's in the DB with a newer timestamp
+                    # so that get_messages_for_llm (which filters by reset_ts) will pick it up.
+                    context_manager.add_message(
+                        chat_id=chat_id,
+                        sender_id=user_id,
+                        sender_name=user_name or user_id,
+                        content=content,
+                        role="user",
+                        wecom_msg_id=f"reset_{wecom_msg_id}" if wecom_msg_id else None,
+                        bot_type=bot_type,
+                    )
                 else:
                     # Generic command response (e.g., /help, /show_prompt)
                     # Update status and finish
@@ -1361,13 +1423,13 @@ async def _call_llm_async(
         if file_output_mode and _detect_daily_report_intent(content):
             logger.info(f"[AIBOT_INTENT] Daily Report intent detected for chat={chat_id}")
             is_report_request = True
-            # Fetch today's merged transcript for the report
-            history = get_merged_chat_history(chat_id, date="today", limit=100)
+            # Fetch last 24 hours of merged transcript for the report
+            history = get_merged_chat_history(chat_id, date="last_24h", limit=100)
             if history:
                 archive_context = _format_chat_history(history)
-                logger.info(f"[AIBOT_CTX] Injected {len(history)} messages from archive for report")
+                logger.info(f"[AIBOT_CTX] Injected {len(history)} messages from archive (24h window) for report")
             else:
-                logger.warning(f"[AIBOT_CTX] No history found for today in chat={chat_id}")
+                logger.warning(f"[AIBOT_CTX] No history found for last 24h in chat={chat_id}")
         else:
             is_report_request = False
 
@@ -1386,6 +1448,7 @@ async def _call_llm_async(
         messages = context_manager.get_messages_for_llm(
             chat_id,
             system_prompt=system_prompt,
+            bot_type=bot_type,
         )
         
         # If URLs were fetched, prepend their content to the user's message context
@@ -1410,22 +1473,22 @@ async def _call_llm_async(
         file_ctx = None
         if quoted_msg_id:
             # Try original ID first
-            file_ctx = context_manager.get_active_file(chat_id, wecom_msg_id=quoted_msg_id)
+            file_ctx = context_manager.get_active_file(chat_id, wecom_msg_id=quoted_msg_id, bot_type=bot_type)
             if not file_ctx:
                 # Fallback: try derived image ID (file_{id}) to maintain vision quote matching
-                file_ctx = context_manager.get_active_file(chat_id, wecom_msg_id=f"file_{quoted_msg_id}")
+                file_ctx = context_manager.get_active_file(chat_id, wecom_msg_id=f"file_{quoted_msg_id}", bot_type=bot_type)
             
             if file_ctx:
                 logger.info(f"[AIBOT_CTX] Found quoted file by MsgId: {file_ctx['filename']}")
         
         if not file_ctx and quoted_filename:
-             file_ctx = context_manager.get_active_file(chat_id, filename=quoted_filename)
+             file_ctx = context_manager.get_active_file(chat_id, filename=quoted_filename, bot_type=bot_type)
              if file_ctx:
                  logger.info(f"[AIBOT_CTX] Found quoted file by Filename: {file_ctx['filename']}")
 
         # 2. Latest File (Sticky/Global) - with 10-minute time window
         if not file_ctx:
-             file_ctx = context_manager.get_active_file(chat_id, limit=50)
+             file_ctx = context_manager.get_active_file(chat_id, limit=50, bot_type=bot_type)
              
              # Check if file is within 10-minute window
              if file_ctx:
@@ -1494,7 +1557,7 @@ async def _call_llm_async(
                     full_prompt = f"对话历史:\n{history_text}\n\n(注意：用户之前上传了文件 {filename}，请基于该文件回答)"
                     
                     # Fetch limited history for file analysis to avoid hallucinating old results
-                    context = context_manager.get_context(chat_id)
+                    context = context_manager.get_context(chat_id, bot_type=bot_type)
                     limited_messages = context.messages[-5:] if len(context.messages) > 5 else context.messages
                     
                     messages = []
@@ -2427,7 +2490,7 @@ async def _call_vision_llm_async(
         start_time = time.time()
 
         # Fetch limited history (last 5 messages) for vision LLM call to prevent history-based hallucinations
-        context = context_manager.get_context(chat_id)
+        context = context_manager.get_context(chat_id, bot_type=bot_type)
         limited_messages = context.messages[-5:] if len(context.messages) > 5 else context.messages
         
         messages = []
@@ -2867,7 +2930,7 @@ async def _call_file_llm_async(
             # Fetch limited history (last 5 messages) for file LLM call
             from src.crewai_enterprise.utils.chat_context import get_context_manager
             ctx_mgr = get_context_manager()
-            context = ctx_mgr.get_context(chat_id)
+            context = ctx_mgr.get_context(chat_id, bot_type=bot_type)
             limited_messages = context.messages[-5:] if len(context.messages) > 5 else context.messages
             
             messages = []

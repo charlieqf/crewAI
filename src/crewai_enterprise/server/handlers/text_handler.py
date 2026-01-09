@@ -57,10 +57,52 @@ def detect_bot_type(content: str) -> str:
 
 
 def is_clear_command(content: str) -> bool:
-    """Check if the message is a context clear command."""
-    clear_commands = ["/clear", "/reset", "/清空", "清空记忆", "忘记之前的"]
-    content_lower = content.lower().strip()
-    return any(cmd in content_lower for cmd in clear_commands)
+    """确认是否为重置指令（严格起始位判断）"""
+    tokens = content.replace("\u00a0", " ").split()
+    if not tokens:
+        return False
+        
+    first_token = tokens[0].lower()
+    canonical_reset = "/reset"
+    
+    # 场景1：直接以 /reset 开头 (1:1 或 直接指令)
+    if first_token == canonical_reset:
+        return True
+        
+    # 场景2：艾特机器人后紧跟 /reset
+    if first_token.startswith("@"):
+        # @gemini/reset
+        if first_token.endswith(canonical_reset) and first_token == f"{first_token.split('/')[0]}{canonical_reset}":
+            return True
+        # @gemini /reset
+        if len(tokens) >= 2 and tokens[1].lower().replace("\u00a0", " ") == canonical_reset:
+            return True
+            
+    return False
+
+
+def strip_reset_command(content: str) -> str:
+    """提取重置后的提问内容（严格对齐 is_clear_command 的逻辑）"""
+    tokens = content.split()
+    if not tokens:
+        return ""
+        
+    first_token = tokens[0].lower().replace("\u00a0", " ")
+    canonical_reset = "/reset"
+    
+    # 判断哪一部分是开头的动作指令，并返回其后的内容
+    if first_token == canonical_reset:
+        return " ".join(tokens[1:]).strip()
+        
+    if first_token.startswith("@"):
+        # 情况 A: @gemini/reset ...
+        if first_token.endswith(canonical_reset) and first_token == f"{first_token.split('/')[0]}{canonical_reset}":
+            return " ".join(tokens[1:]).strip()
+        # 情况 B: @gemini /reset ...
+        if len(tokens) >= 2 and tokens[1].lower().replace("\u00a0", " ") == canonical_reset:
+            return " ".join(tokens[2:]).strip()
+            
+    return content.strip()
 
 
 async def process_text_message(
@@ -181,9 +223,12 @@ async def process_text_message(
 
 
 async def handle_clear_command(
+    bot_type: str,
     chat_id: str,
     user_name: str,
     webhook_url: str,
+    remaining_text: str | None = None,
+    wecom_msg_id: str | None = None,
     context_manager: ChatContextManager | None = None,
 ) -> None:
     """
@@ -198,14 +243,34 @@ async def handle_clear_command(
     if context_manager is None:
         context_manager = get_context_manager()
 
-    deleted_count = context_manager.clear_context(chat_id)
-    logger.info(f"Cleared context for {chat_id}: {deleted_count} messages")
+    # [FIX] Medium finding: Use the new per-bot reset logic instead of the deleted clear_context
+    success = context_manager.set_context_start(
+        chat_id=chat_id,
+        bot_type=bot_type,
+        user_id=user_name
+    )
+    logger.info(f"Reset context for {chat_id} bot={bot_type}: {success}")
 
     try:
+        # 1. Send confirmation of reset
         send_webhook_message(
             webhook_url,
-            f"@{user_name} 已清空本群的对话记忆 (删除了 {deleted_count} 条消息)，让我们重新开始吧！",
+            f"@{user_name} 已重置针对 {bot_type.upper()} 的对话记忆，让我们重新开始吧！",
             msg_type="text",
         )
+        
+        # 2. If there's a follow-up question, process it immediately
+        if remaining_text:
+            logger.info(f"[CLEAR_FLOW] Processing follow-up question: {remaining_text[:50]}...")
+            await process_text_message(
+                bot_type=bot_type,
+                chat_id=chat_id,
+                user_name=user_name,
+                content=remaining_text,
+                webhook_url=webhook_url,
+                wecom_msg_id=wecom_msg_id,
+                context_manager=context_manager,
+            )
+            
     except WeComWebhookError as e:
-        logger.error(f"Failed to send clear confirmation: {e}")
+        logger.error(f"Failed to handle clear command: {e}")

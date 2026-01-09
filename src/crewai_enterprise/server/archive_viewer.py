@@ -46,17 +46,19 @@ async def list_messages(room_id: Optional[str] = None, limit: int = 100, offset:
     
     if room_id:
         cursor.execute("""
-            SELECT id, seq, msgid, msgtype, sender_id, room_id, content, created_at
-            FROM archived_messages
-            WHERE room_id = ?
-            ORDER BY seq DESC
+            SELECT m.id, m.seq, m.msgid, m.msgtype, m.sender_id, m.room_id, m.content, m.created_at, f.file_uri
+            FROM archived_messages m
+            LEFT JOIN chat_files f ON m.msgid = f.msgid
+            WHERE m.room_id = ?
+            ORDER BY m.seq DESC
             LIMIT ? OFFSET ?
         """, (room_id, limit, offset))
     else:
         cursor.execute("""
-            SELECT id, seq, msgid, msgtype, sender_id, room_id, content, created_at
-            FROM archived_messages
-            ORDER BY seq DESC
+            SELECT m.id, m.seq, m.msgid, m.msgtype, m.sender_id, m.room_id, m.content, m.created_at, f.file_uri
+            FROM archived_messages m
+            LEFT JOIN chat_files f ON m.msgid = f.msgid
+            ORDER BY m.seq DESC
             LIMIT ? OFFSET ?
         """, (limit, offset))
     
@@ -76,7 +78,8 @@ async def list_messages(room_id: Optional[str] = None, limit: int = 100, offset:
             "sender_id": row[4],
             "room_id": row[5],
             "content": content_parsed,
-            "created_at": row[7]
+            "created_at": row[7],
+            "file_uri": row[8]  # Joined from chat_files
         })
     
     conn.close()
@@ -369,6 +372,18 @@ async def archive_viewer(request: Request):
         .sender-name { font-weight: 500; color: #1e293b; }
         .sender-id { font-size: 12px; color: #94a3b8; }
         .time-cell { color: #64748b; font-size: 13px; white-space: nowrap; }
+        
+        /* Image Preview */
+        .img-preview { 
+            max-width: 200px; 
+            max-height: 200px; 
+            border-radius: 8px; 
+            margin-top: 8px; 
+            cursor: pointer;
+            border: 1px solid #e2e8f0;
+            transition: transform 0.2s;
+        }
+        .img-preview:hover { transform: scale(1.02); }
     </style>
 </head>
 <body>
@@ -413,6 +428,18 @@ async def archive_viewer(request: Request):
         let currentRoom = null;
         let currentTab = 'messages';
         const roomNames = {};  // Cache for room display names
+        
+        function escapeHtml(str) {
+            if (!str) return '';
+            const map = {
+                '&': '&amp;',
+                '<': '&lt;',
+                '>': '&gt;',
+                '"': '&quot;',
+                "'": '&#039;'
+            };
+            return String(str).replace(/[&<>"']/g, m => map[m]);
+        }
         
         async function loadStats() {
             const res = await fetch('/archive/api/stats');
@@ -508,7 +535,7 @@ async def archive_viewer(request: Request):
                                     <td>${m.seq}</td>
                                     <td><span class="msgtype-badge ${getMsgTypeBadge(m.msgtype)}">${m.msgtype}</span></td>
                                     <td>${getSenderDisplay(m)}</td>
-                                    <td class="content-cell" title="${JSON.stringify(m.content).replace(/"/g, '&quot;').replace(/</g, '&lt;')}">${getContentPreview(m)}</td>
+                                    <td class="content-cell" title="${escapeHtml(JSON.stringify(m.content))}">${getContentPreview(m)}</td>
                                     <td class="time-cell">${formatTime(m.created_at)}</td>
                                 </tr>
                             `).join('')}
@@ -541,7 +568,7 @@ async def archive_viewer(request: Request):
                                     <td>📄 ${f.filename}</td>
                                     <td>${formatSize(f.file_size)}</td>
                                     <td>${f.sender_id || '-'}</td>
-                                    <td><a class="file-link" href="${f.file_uri}" target="_blank">⬇️ 下载</a></td>
+                                    <td><a class="file-link" href="${escapeHtml(f.file_uri)}" target="_blank">⬇️ 下载</a></td>
                                     <td class="time-cell">${formatTime(f.created_at)}</td>
                                 </tr>
                             `).join('')}
@@ -555,7 +582,17 @@ async def archive_viewer(request: Request):
             const c = msg.content;
             if (c.text?.content) return c.text.content;
             if (c.file?.filename) return '📎 ' + c.file.filename;
-            if (c.image) return '🖼️ 图片';
+            if (c.image) {
+                if (msg.file_uri) {
+                    return `
+                        <div>🖼️ 图片</div>
+                        <a href="${escapeHtml(msg.file_uri)}" target="_blank">
+                            <img src="${escapeHtml(msg.file_uri)}" class="img-preview" alt="Image preview">
+                        </a>
+                    `;
+                }
+                return '🖼️ 图片 (未下载)';
+            }
             if (c.video) return '🎬 视频';
             if (c.voice) return '🎤 语音';
             if (c.emotion) return '😊 表情';

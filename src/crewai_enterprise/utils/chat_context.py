@@ -105,7 +105,7 @@ class ChatContextManager:
             f"Added message to context: {chat_id}/{sender_name}: {content[:30]}..."
         )
 
-    def get_context(self, chat_id: str) -> ChatContext:
+    def get_context(self, chat_id: str, bot_type: str | None = None) -> ChatContext:
         """
         Get conversation context for a chat.
 
@@ -114,14 +114,26 @@ class ChatContextManager:
 
         Args:
             chat_id: Group chat ID
+            bot_type: Bot identifier (gemini, chatgpt, grok)
 
         Returns:
             ChatContext with formatted messages
         """
-        # Get recent messages from storage as JSON for reliable parsing
+        # 1. Get context start timestamp (if any)
+        context_start = self.storage._run(
+            action="get_context_start",
+            chat_id=chat_id,
+            bot_type=bot_type
+        )
+        if context_start == "None": # Tool might return string None
+            context_start = None
+
+        # 2. Get recent messages from storage as JSON for reliable parsing
         result = self.storage._run(
             action="get_recent_json",
             chat_id=chat_id,
+            bot_type=bot_type,
+            since_ts=context_start,
             limit=self.max_messages * 2,  # Get more to account for filtering
         )
 
@@ -150,33 +162,41 @@ class ChatContextManager:
             total_chars=total_chars,
         )
 
-    def clear_context(self, chat_id: str) -> int:
+
+    def set_context_start(
+        self, 
+        chat_id: str, 
+        bot_type: str, 
+        user_id: str, 
+        timestamp: str | None = None
+    ) -> bool:
         """
-        Clear all context for a specific chat.
-
+        Set context start timestamp for a specific chat and bot.
+        
         Args:
-            chat_id: Group chat ID to clear
-
+            chat_id: Group chat ID
+            bot_type: Bot identifier
+            user_id: User requesting the reset
+            timestamp: ISO format timestamp (optional, defaults to now)
+            
         Returns:
-            Number of messages deleted
+            True if successful
         """
         result = self.storage._run(
-            action="delete_chat",
+            action="set_context_start",
             chat_id=chat_id,
+            bot_type=bot_type,
+            sender_id=user_id,
+            content=timestamp
         )
-        # Parse the result to extract count (format: "Deleted N messages for chat X.")
-        try:
-            deleted_count = int(result.split()[1])
-        except (IndexError, ValueError):
-            deleted_count = 0
-        logger.info(f"Cleared context for chat: {chat_id}")
-        return deleted_count
+        return "Success" in result
 
     def get_messages_for_llm(
         self,
         chat_id: str,
         system_prompt: str | None = None,
         current_message: str | None = None,
+        bot_type: str | None = None,
     ) -> list[dict]:
         """
         Get messages formatted for LLM API.
@@ -185,11 +205,12 @@ class ChatContextManager:
             chat_id: Group chat ID
             system_prompt: Optional system prompt to prepend
             current_message: Current user message to append
+            bot_type: Bot identifier (gemini, chatgpt, grok)
 
         Returns:
             List of message dicts for LLM API
         """
-        context = self.get_context(chat_id)
+        context = self.get_context(chat_id, bot_type=bot_type)
 
         messages = []
 
@@ -304,7 +325,8 @@ class ChatContextManager:
         chat_id: str, 
         limit: int = 50,
         filename: str | None = None,
-        wecom_msg_id: str | None = None
+        wecom_msg_id: str | None = None,
+        bot_type: str | None = None,
     ) -> dict | None:
         """
         Get the most recent or specifically requested file context from storage history.
@@ -315,10 +337,24 @@ class ChatContextManager:
             filename: If provided, find the latest file with this name.
             wecom_msg_id: If provided, find the specific file with this MsgId.
         """
+        # 1. Get context start timestamp for isolation (if bot_type provided)
+        since_ts = None
+        if bot_type:
+            since_ts = self.storage._run(
+                action="get_context_start",
+                chat_id=chat_id,
+                bot_type=bot_type
+            )
+            if since_ts == "None":
+                since_ts = None
+
+        # 2. Retrieve recent messages (as JSON) with bot_type and since_ts filters
         result = self.storage._run(
             action="get_recent_json",
             chat_id=chat_id,
             limit=limit,
+            bot_type=bot_type,
+            since_ts=since_ts,
         )
         
         if not result or result == "[]":
