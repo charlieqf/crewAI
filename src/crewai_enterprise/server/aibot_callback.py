@@ -625,8 +625,31 @@ async def _process_llm_file_output(
             cloud_key = None
             try:
                 mime_type = "text/html" if filename.endswith(".html") or filename.endswith(".htm") else "text/plain"
+                
+                # Append raw_context to HTML files for transparency
+                final_content = file_content
+                if raw_context and mime_type == "text/html":
+                    import html as html_module
+                    escaped_context = html_module.escape(raw_context)
+                    context_section = f'''
+<hr style="margin-top: 40px; border: 1px dashed #ccc;">
+<details style="margin-top: 20px; padding: 15px; background: #1a1a2e; border-radius: 8px;">
+<summary style="cursor: pointer; color: #8b8b9e; font-size: 14px;">
+  📋 原始上下文数据（用于生成本报告的聊天记录）
+</summary>
+<pre style="white-space: pre-wrap; word-wrap: break-word; font-size: 12px; color: #a0a0b0; margin-top: 10px; max-height: 500px; overflow-y: auto;">
+{escaped_context}
+</pre>
+</details>
+'''
+                    if '</body>' in final_content:
+                        final_content = final_content.replace('</body>', f'{context_section}</body>')
+                    else:
+                        final_content += context_section
+                    logger.info(f"[AIBOT_FILE] Appended raw_context ({len(raw_context)} chars) to HTML")
+                
                 upload_res = storage.upload_file(
-                    data=file_content.encode("utf-8"),
+                    data=final_content.encode("utf-8"),
                     filename=filename,
                     content_type=mime_type
                 )
