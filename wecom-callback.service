@@ -1,0 +1,23 @@
+[Unit]
+Description=WeCom Callback Server with VPN Support
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/wecom-callback
+EnvironmentFile=/etc/wecom-callback/env
+
+# ExecStartPre=-/root/setup_vpn_linux.sh connect
+
+ExecStart=/opt/wecom-callback/venv/bin/python -m uvicorn src.crewai_enterprise.server.wecom_callback:app --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=10
+
+# 日志 - 使用 journal 而不是文件追加，避免重复
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=wecom-callback
+
+[Install]
+WantedBy=multi-user.target

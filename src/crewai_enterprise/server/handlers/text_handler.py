@@ -57,7 +57,7 @@ def detect_bot_type(content: str) -> str:
 
 
 def is_clear_command(content: str) -> bool:
-    """确认是否为重置指令（严格起始位判断）"""
+    """确认是否为重置指令（严格起始位判断，必须有空格分隔）"""
     tokens = content.replace("\u00a0", " ").split()
     if not tokens:
         return False
@@ -69,12 +69,9 @@ def is_clear_command(content: str) -> bool:
     if first_token == canonical_reset:
         return True
         
-    # 场景2：艾特机器人后紧跟 /reset
+    # 场景2：艾特机器人后紧跟 /reset (必须有空格分隔)
     if first_token.startswith("@"):
-        # @gemini/reset
-        if first_token.endswith(canonical_reset) and first_token == f"{first_token.split('/')[0]}{canonical_reset}":
-            return True
-        # @gemini /reset
+        # @gemini /reset (必须有空格)
         if len(tokens) >= 2 and tokens[1].lower().replace("\u00a0", " ") == canonical_reset:
             return True
             
@@ -95,10 +92,7 @@ def strip_reset_command(content: str) -> str:
         return " ".join(tokens[1:]).strip()
         
     if first_token.startswith("@"):
-        # 情况 A: @gemini/reset ...
-        if first_token.endswith(canonical_reset) and first_token == f"{first_token.split('/')[0]}{canonical_reset}":
-            return " ".join(tokens[1:]).strip()
-        # 情况 B: @gemini /reset ...
+        # @gemini /reset ... (必须有空格分隔)
         if len(tokens) >= 2 and tokens[1].lower().replace("\u00a0", " ") == canonical_reset:
             return " ".join(tokens[2:]).strip()
             

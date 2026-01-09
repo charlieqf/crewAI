@@ -726,10 +726,12 @@ def _handle_prompt_command(
 • `/set_prompt <内容>` - 自定义系统提示词
 • `/reset_prompt` - 恢复默认系统提示词
 
-**📄 文件生成命令：**
-• `/file-html <描述>` - 自由生成HTML文件
-• `/file-html-daily` - 生成每日群聊摘要报告
-• `/file-html-meeting` - 生成会议纪要
+**📄 文件生成命令（支持时间范围：1d/2d/1w）：**
+• `/file-html [时间] <描述>` - 自由生成HTML文件
+• `/file-html-daily [时间]` - 生成群聊摘要报告
+• `/file-html-meeting [时间]` - 生成会议纪要
+  示例: `/file-html-daily 1w` (最近1周)
+        `/file-html 2d 总结最近两天的讨论`
 
 **📁 文件上下文管理：**
 • `/reset` - 彻底重置所有对话历史和上下文
@@ -937,37 +939,76 @@ def _handle_prompt_command(
     elif command == "file-html":
         # File generation mode - NOT a terminal command
         # Pass through to normal LLM flow with file output flag
-        # This allows full context while still producing file output
-        if not args or len(args.strip()) < 2:
-            return {"content": "❌ 请提供生成需求\n\n用法：/file-html 制作一个登录页面"}
-        # Return special marker to indicate file output mode (not a terminal command)
+        # Supports time range: /file-html [1d|2d|1w] <description>
+        import re
+        time_range = "last_24h"  # Default
+        user_request = args.strip() if args else ""
+        
+        # Check if first arg is a time range pattern
+        if args:
+            parts = args.strip().split(maxsplit=1)
+            if parts and re.match(r"^\d+[dwh]$", parts[0].lower()):
+                time_range = parts[0].lower()
+                user_request = parts[1] if len(parts) > 1 else ""
+                logger.info(f"[FILE_CMD] /file-html detected time range: {time_range}")
+        
+        if not user_request or len(user_request.strip()) < 2:
+            return {"content": "❌ 请提供生成需求\n\n用法：/file-html 制作一个登录页面\n      /file-html 1w 总结本周的对话"}
+        
         return {
             "file_output_mode": True,
-            "user_request": args.strip(),
-            "continue_with_llm": True,  # Indicates this is NOT a terminal command
+            "user_request": user_request.strip(),
+            "continue_with_llm": True,
             "template_name": None,  # Free-form HTML
+            "date_range": time_range,
         }
     
     elif command == "file-html-daily":
         # Daily summary report template
         # LLM outputs structured JSON, rendered via daily_report.html template
-        user_prompt = args.strip() if args and args.strip() else "请根据今天的群聊记录生成一份每日摘要报告"
+        # Supports time range: /file-html-daily [2d|3d|1w] [custom prompt]
+        import re
+        time_range = "last_24h"  # Default
+        user_prompt = args.strip() if args and args.strip() else "请根据群聊记录生成一份摘要报告"
+        
+        # Check if first arg is a time range pattern (e.g., 2d, 1w, 3d)
+        if args:
+            parts = args.strip().split(maxsplit=1)
+            if parts and re.match(r"^\d+[dwh]$", parts[0].lower()):
+                time_range = parts[0].lower()
+                user_prompt = parts[1] if len(parts) > 1 else "请根据群聊记录生成一份摘要报告"
+                logger.info(f"[FILE_CMD] Detected time range: {time_range}")
+        
         return {
             "file_output_mode": True,
             "user_request": user_prompt,
             "continue_with_llm": True,
             "template_name": "daily",  # Use daily_report.html template
+            "date_range": time_range,  # Pass time range to archive query
         }
     
     elif command == "file-html-meeting":
         # Meeting notes template
         # LLM outputs structured JSON, rendered via meeting_notes.html template
+        # Supports time range: /file-html-meeting [1d|2d|1w] [custom prompt]
+        import re
+        time_range = "last_24h"  # Default
         user_prompt = args.strip() if args and args.strip() else "请根据群聊内容整理一份会议纪要"
+        
+        # Check if first arg is a time range pattern
+        if args:
+            parts = args.strip().split(maxsplit=1)
+            if parts and re.match(r"^\d+[dwh]$", parts[0].lower()):
+                time_range = parts[0].lower()
+                user_prompt = parts[1] if len(parts) > 1 else "请根据群聊内容整理一份会议纪要"
+                logger.info(f"[FILE_CMD] /file-html-meeting detected time range: {time_range}")
+        
         return {
             "file_output_mode": True,
             "user_request": user_prompt,
             "continue_with_llm": True,
             "template_name": "meeting",  # Use meeting_notes.html template
+            "date_range": time_range,
         }
     
     return None
@@ -1183,9 +1224,10 @@ async def _call_llm_async(
                     # File output mode - continue to normal LLM flow
                     file_output_mode = cmd_result.get("file_output_mode", False)
                     template_name = cmd_result.get("template_name")  # None for free-form, "daily" or "meeting" for templates
+                    date_range = cmd_result.get("date_range", "last_24h")  # Time range for archive query
                     # Replace content with user's actual request (remove /file-html prefix)
                     content = cmd_result.get("user_request", content)
-                    logger.info(f"[FILE_OUTPUT] Continuing to LLM with file_output_mode={file_output_mode}, template={template_name}")
+                    logger.info(f"[FILE_OUTPUT] Continuing to LLM with file_output_mode={file_output_mode}, template={template_name}, date_range={date_range}")
                     # Fall through to normal LLM processing below
                 elif cmd_result.get("continue_with_question"):
                     # [FIX] Combined command (e.g., /reset question)
@@ -1236,6 +1278,11 @@ async def _call_llm_async(
         template_name
     except NameError:
         template_name = None
+    
+    try:
+        date_range
+    except NameError:
+        date_range = "last_24h"
 
     # Check for GitLab Code Review Request
     # Pattern: https://<any-domain>/<path>/-/commit/<sha>
@@ -1417,21 +1464,19 @@ async def _call_llm_async(
         # Detect and fetch URL content if present
         urls = _extract_urls(content)
 
-        # Phase 2: Daily Report Intent Detection & Archive Context Injection
+        # Phase 2: Archive Context Injection for ALL file commands
         archive_context = ""
         is_report_request = False
-        if file_output_mode and _detect_daily_report_intent(content):
-            logger.info(f"[AIBOT_INTENT] Daily Report intent detected for chat={chat_id}")
-            is_report_request = True
-            # Fetch last 24 hours of merged transcript for the report
-            history = get_merged_chat_history(chat_id, date="last_24h", limit=100)
+        if file_output_mode:
+            logger.info(f"[AIBOT_FILE] Injecting archive context for file command, date_range={date_range}")
+            is_report_request = True  # Mark as report to enable template auto-conversion
+            # Fetch archived messages for the specified time range
+            history = get_merged_chat_history(chat_id, date=date_range, limit=500)
             if history:
                 archive_context = _format_chat_history(history)
-                logger.info(f"[AIBOT_CTX] Injected {len(history)} messages from archive (24h window) for report")
+                logger.info(f"[AIBOT_CTX] Injected {len(history)} messages from archive ({date_range} window)")
             else:
-                logger.warning(f"[AIBOT_CTX] No history found for last 24h in chat={chat_id}")
-        else:
-            is_report_request = False
+                logger.warning(f"[AIBOT_CTX] No history found for {date_range} in chat={chat_id}")
 
         url_contents = []
         if urls:

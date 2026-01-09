@@ -18,6 +18,34 @@ BEIJING_TZ = timezone(timedelta(hours=8))
 ARCHIVE_DB_PATH = os.getenv("ARCHIVE_DB_PATH", "/var/lib/wecom-callback/chat_history.db")
 HOT_DB_PATH = os.getenv("CHAT_DB_PATH", "/var/lib/wecom-callback/chat_storage.db")
 
+
+def _parse_time_range(pattern: str) -> Optional[timedelta]:
+    """
+    Parse time range patterns like '2d', '3d', '1w'.
+    
+    Args:
+        pattern: String like '2d' (2 days), '1w' (1 week), '3d' (3 days)
+        
+    Returns:
+        timedelta object, or None if pattern doesn't match
+    """
+    import re
+    match = re.match(r"^(\d+)([dwh])$", pattern.lower().strip())
+    if not match:
+        return None
+    
+    value = int(match.group(1))
+    unit = match.group(2)
+    
+    if unit == "d":
+        return timedelta(days=value)
+    elif unit == "w":
+        return timedelta(weeks=value)
+    elif unit == "h":
+        return timedelta(hours=value)
+    
+    return None
+
 def get_merged_chat_history(
     room_id: str, 
     date: str = "today", 
@@ -29,7 +57,8 @@ def get_merged_chat_history(
     2. chat_storage.db (Hot data/Bot responses)
     
     Args:
-        date: "today", "yesterday", "last_24h", or "YYYY-MM-DD"
+        date: "today", "yesterday", "last_24h", "2d", "3d", "1w", or "YYYY-MM-DD"
+              Supports patterns: Nd (last N days), Nw (last N weeks)
     """
     # Use Beijing time for relative date keywords (server may be in different timezone)
     now_bj = datetime.now(BEIJING_TZ)
@@ -48,6 +77,13 @@ def get_merged_chat_history(
         target_date = now_bj.strftime("%Y-%m-%d")
     elif date == "yesterday":
         target_date = (now_bj - timedelta(days=1)).strftime("%Y-%m-%d")
+    elif _parse_time_range(date):
+        # Parse patterns like "2d", "3d", "1w"
+        delta = _parse_time_range(date)
+        since_ts = (now_bj - delta).strftime("%Y-%m-%d %H:%M:%S")
+        target_date = None
+        use_range_query = True
+        logger.info(f"[ARCHIVE] Using {date} range query, since={since_ts} (Beijing time)")
     else:
         target_date = date
 
