@@ -574,107 +574,112 @@ async def _process_llm_file_output(
         if file_only_mode and content.strip():
             logger.info(f"[AIBOT_FILE] No <FILE> tags found in file_only_mode, initiating auto-wrap fallback for chat={chat_id}")
             
-            # Simple check if it looks like HTML
-            is_html = content.strip().lower().startswith("<!doctype") or "<html" in content.lower()
-            
-            if is_html:
-                file_content = content
-            else:
-                # Wrap markdown/text in a basic Tailwind terminal-style container for consistency
-                file_content = f"""<!DOCTYPE html>
+            try:
+                # Simple check if it looks like HTML
+                is_html = content.strip().lower().startswith("<!doctype") or "<html" in content.lower()
+                
+                import html as html_module
+                if is_html:
+                    file_content = content
+                else:
+                    # Escape content to prevent XSS when wrapping as plain text
+                    safe_content = html_module.escape(content)
+                    # Wrap markdown/text in a basic styled container (using inline CSS to avoid external dependencies)
+                    file_content = f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Generated Report</title>
-    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #0f172a; color: #e2e8f0; line-height: 1.6; margin: 0; padding: 20px; }}
+        .container {{ max-width: 800px; margin: 0 auto; background-color: #1e293b; border-radius: 12px; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1); border: 1px solid #334155; overflow: hidden; }}
+        .header {{ background-color: #334155; padding: 10px 20px; border-bottom: 1px solid #475569; display: flex; align-items: center; gap: 8px; }}
+        .dot {{ width: 10px; height: 10px; border-radius: 50%; }}
+        .red {{ background-color: #f87171; }} .amber {{ background-color: #fbbf24; }} .emerald {{ background-color: #34d399; }}
+        .title {{ font-family: monospace; font-size: 12px; color: #94a3b8; margin-left: 8px; }}
+        .content {{ padding: 30px; white-space: pre-wrap; word-wrap: break-word; font-size: 15px; }}
+    </style>
 </head>
-<body class="bg-[#0f172a] text-slate-200 min-h-screen p-4 md:p-8">
-    <div class="max-w-4xl mx-auto bg-[#1e293b] rounded-xl shadow-2xl border border-slate-700 overflow-hidden">
-        <div class="bg-[#334155] px-4 py-2 flex items-center gap-2 border-b border-slate-700">
-            <div class="flex gap-1.5">
-                <div class="w-2.5 h-2.5 rounded-full bg-red-400"></div>
-                <div class="w-2.5 h-2.5 rounded-full bg-amber-400"></div>
-                <div class="w-2.5 h-2.5 rounded-full bg-emerald-400"></div>
-            </div>
-            <span class="text-xs text-slate-400 font-mono ml-2">generated_report.html</span>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="dot red"></div><div class="dot amber"></div><div class="dot emerald"></div>
+            <span class="title">generated_report.html</span>
         </div>
-        <div class="p-6 md:p-8 font-sans leading-relaxed whitespace-pre-wrap">
-{content}
-        </div>
+        <div class="content">{safe_content}</div>
     </div>
 </body>
 </html>"""
-            
-            # Process the auto-wrapped content immediately
-            filename = "generated_report.html"
-            file_manager = get_file_manager()
-            storage = get_storage_manager()
-            context_manager = get_context_manager()
-            
-            # Proceed with the same injection and upload logic
-            # 1. Save locally
-            file_info = file_manager.save_file_from_bytes(
-                chat_id=chat_id,
-                content=file_content.encode("utf-8"),
-                filename=filename
-            )
-            
-            # 2. Upload
-            mime_type = "text/html"
-            final_content = file_content
-            if raw_context:
-                import html as html_module
-                import re as re_mod
-                escaped_context = html_module.escape(raw_context)
-                context_section = f'''
+                
+                filename = "generated_report.html"
+                file_manager = get_file_manager()
+                storage = get_storage_manager()
+                context_manager = get_context_manager()
+                
+                # PRE-INJECTION: Append raw_context BEFORE any saving (Fix Storage Inconsistency)
+                final_content = file_content
+                if raw_context:
+                    import re as re_mod
+                    escaped_context = html_module.escape(raw_context)
+                    context_section = f'''
 <hr style="margin-top: 40px; border: 1px dashed #ccc;">
-<details style="margin-top: 20px; padding: 15px; background: #1a1a2e; border-radius: 8px;">
-<summary style="cursor: pointer; color: #8b8b9e; font-size: 14px;">
+<details style="margin-top: 20px; padding: 15px; background: #1a1a2e; border-radius: 8px; color: #a0a0b0;">
+<summary style="cursor: pointer; color: #8b8b9e; font-size: 14px; font-weight: bold; margin-bottom: 10px;">
   📋 原始上下文数据（用于生成本报告的聊天记录）
 </summary>
-<pre style="white-space: pre-wrap; word-wrap: break-word; font-size: 12px; color: #a0a0b0; margin-top: 10px; max-height: 500px; overflow-y: auto;">
+<pre style="white-space: pre-wrap; word-wrap: break-word; font-size: 12px; color: #888; background: #0c0c16; padding: 10px; border-radius: 4px; border: 1px solid #2d2d3a; margin-top: 10px; max-height: 500px; overflow-y: auto; font-family: monospace;">
 {escaped_context}
 </pre>
 </details>
 '''
-                body_matches = list(re_mod.finditer(r'</body>', final_content, re_mod.IGNORECASE))
-                if body_matches:
-                    last_body = body_matches[-1]
-                    final_content = final_content[:last_body.start()] + context_section + final_content[last_body.start():]
-                elif '</html>' in final_content.lower():
-                    html_matches = list(re_mod.finditer(r'</html>', final_content, re_mod.IGNORECASE))
-                    if html_matches:
-                        last_html = html_matches[-1]
-                        final_content = final_content[:last_html.start()] + context_section + final_content[last_html.start():]
-                else:
-                    final_content += context_section
-            
-            upload_res = storage.upload_file(
-                data=final_content.encode("utf-8"),
-                filename=filename,
-                content_type=mime_type
-            )
-            
-            # 3. Save Context
-            context_manager.save_file(
-                chat_id=chat_id,
-                sender_id=f"bot_{bot_type}",
-                sender_name=bot_type,
-                file_uri=upload_res.url,
-                filename=filename,
-                mime_type=mime_type,
-                bot_type=bot_type,
-                storage_key=upload_res.key
-            )
-            
-            # Return summary + link
-            # Try to extract a summary from the beginning of the content
-            summary = content.strip().split('\n')[0]
-            if len(summary) > 60:
-                summary = summary[:57] + "..."
+                    body_matches = list(re_mod.finditer(r'</body>', final_content, re_mod.IGNORECASE))
+                    if body_matches:
+                        last_body = body_matches[-1]
+                        final_content = final_content[:last_body.start()] + context_section + final_content[last_body.start():]
+                    elif '</html>' in final_content.lower():
+                        html_matches = list(re_mod.finditer(r'</html>', final_content, re_mod.IGNORECASE))
+                        if html_matches:
+                            last_html = html_matches[-1]
+                            final_content = final_content[:last_html.start()] + context_section + final_content[last_html.start():]
+                    else:
+                        final_content += context_section
+
+                # 1. Save locally (now contains context)
+                file_info = file_manager.save_file_from_bytes(
+                    chat_id=chat_id,
+                    content=final_content.encode("utf-8"),
+                    filename=filename
+                )
                 
-            return f"{summary}\n📄 云端链接: {upload_res.url}"
+                # 2. Upload to Qiniu (now contains context)
+                upload_res = storage.upload_file(
+                    data=final_content.encode("utf-8"),
+                    filename=filename,
+                    content_type="text/html"
+                )
+                
+                # 3. Save Context
+                context_manager.save_file(
+                    chat_id=chat_id,
+                    sender_id=f"bot_{bot_type}",
+                    sender_name=bot_type,
+                    file_uri=upload_res.url,
+                    filename=filename,
+                    mime_type="text/html",
+                    bot_type=bot_type,
+                    storage_key=upload_res.key
+                )
+                
+                # Return summary + link
+                summary = content.strip().split('\n')[0]
+                if len(summary) > 60:
+                    summary = summary[:57] + "..."
+                    
+                return f"{summary}\n📄 云端链接: {upload_res.url}"
+            except Exception as fallback_err:
+                logger.error(f"[AIBOT_FILE] Fallback file processing failed: {fallback_err}")
+                return content # Graceful return of text if file logic fails
         else:
             return content
     
@@ -721,26 +726,15 @@ async def _process_llm_file_output(
             filename = _sanitize_filename(original_filename)
             logger.info(f"[AIBOT_FILE] Processing generated file: {filename} (original: {original_filename}, {len(file_content)} chars)")
             
-            # 1. Save to local storage
-            file_info = file_manager.save_file_from_bytes(
-                chat_id=chat_id,
-                content=file_content.encode("utf-8"),
-                filename=filename
-            )
+            # 1. Pre-process and Append raw_context (ensure both local and cloud copies match)
+            mime_type = "text/html" if filename.endswith(".html") or filename.endswith(".htm") else "text/plain"
+            final_content = file_content
             
-            # 2. Upload to Qiniu (UCS)
-            cloud_url = None
-            cloud_key = None
-            try:
-                mime_type = "text/html" if filename.endswith(".html") or filename.endswith(".htm") else "text/plain"
-                
-                # Append raw_context to HTML files for transparency
-                final_content = file_content
-                if raw_context and mime_type == "text/html":
-                    import html as html_module
-                    import re
-                    escaped_context = html_module.escape(raw_context)
-                    context_section = f'''
+            if raw_context and mime_type == "text/html":
+                import html as html_module
+                import re as re_mod
+                escaped_context = html_module.escape(raw_context)
+                context_section = f'''
 <hr style="margin-top: 40px; border: 1px dashed #ccc;">
 <details style="margin-top: 20px; padding: 15px; background: #1a1a2e; border-radius: 8px;">
 <summary style="cursor: pointer; color: #8b8b9e; font-size: 14px;">
@@ -751,36 +745,42 @@ async def _process_llm_file_output(
 </pre>
 </details>
 '''
-                    # Find the LAST </body> tag to ensure we're at the true document end
-                    body_matches = list(re.finditer(r'</body>', final_content, re.IGNORECASE))
-                    if body_matches:
-                        last_body = body_matches[-1]
-                        final_content = final_content[:last_body.start()] + context_section + final_content[last_body.start():]
-                    elif '</html>' in final_content.lower():
-                        # Fallback: insert before </html>
-                        html_matches = list(re.finditer(r'</html>', final_content, re.IGNORECASE))
-                        if html_matches:
-                            last_html = html_matches[-1]
-                            final_content = final_content[:last_html.start()] + context_section + final_content[last_html.start():]
-                    else:
-                        # Last resort: append to end
-                        final_content += context_section
-                    logger.info(f"[AIBOT_FILE] Appended raw_context ({len(raw_context)} chars) to HTML")
-                
+                # Use regex to find LAST tag for correct placement
+                body_matches = list(re_mod.finditer(r'</body>', final_content, re_mod.IGNORECASE))
+                if body_matches:
+                    last_body = body_matches[-1]
+                    final_content = final_content[:last_body.start()] + context_section + final_content[last_body.start():]
+                elif '</html>' in final_content.lower():
+                    html_matches = list(re_mod.finditer(r'</html>', final_content, re_mod.IGNORECASE))
+                    if html_matches:
+                        last_html = html_matches[-1]
+                        final_content = final_content[:last_html.start()] + context_section + final_content[last_html.start():]
+                else:
+                    final_content += context_section
+                logger.info(f"[AIBOT_FILE] Appended raw_context to {filename}")
+
+            # 2. Save to local storage (consistent with fallback logic)
+            file_info = file_manager.save_file_from_bytes(
+                chat_id=chat_id,
+                content=final_content.encode("utf-8"),
+                filename=filename
+            )
+            
+            # 3. Upload to Qiniu (consistent with local content)
+            cloud_url = None
+            cloud_key = None
+            try:
                 upload_res = storage.upload_file(
                     data=final_content.encode("utf-8"),
                     filename=filename,
                     content_type=mime_type
                 )
                 cloud_url = upload_res.url
-
                 cloud_key = upload_res.key
-                # For public bucket, use direct URL (no signature needed)
-                qiniu_url_display = cloud_url
                 logger.info(f"[AIBOT_FILE] Uploaded to Qiniu: {cloud_url}")
             except Exception as qiniu_err:
                 logger.error(f"[AIBOT_FILE] Qiniu upload failed: {qiniu_err}")
-                qiniu_url_display = "(上传云端失败)"
+                cloud_url = None # ensure fallback to local is clear
 
             # 3. Save to conversation context (Auditor Refinement)
             try:
@@ -806,6 +806,8 @@ async def _process_llm_file_output(
             logger.info(f"[AIBOT_FILE] File available at cloud link (robot response_url does not support file attachments)")
             
             # 5. Final text cleanup (replace the entire tag with info)
+            display_url = cloud_url if cloud_url else "(上传去云端失败，仅保存本地)"
+            
             # Extract summary: first line of text before the first <FILE> tag
             summary_text = ""
             if i == 0:  # Only extract summary for the first file
@@ -822,16 +824,16 @@ async def _process_llm_file_output(
             if file_only_mode:
                 # In file_only_mode, return link + summary (with fallback)
                 if summary_text:
-                    return f"📄 云端链接: {qiniu_url_display}\n✨ {summary_text}"
+                    return f"📄 云端链接: {display_url}\n✨ {summary_text}"
                 else:
                     # Fallback description when LLM omits summary
-                    return f"📄 云端链接: {qiniu_url_display}\n✨ 已生成HTML文件"
+                    return f"📄 云端链接: {display_url}\n✨ 已生成HTML文件"
             else:
                 if summary_text:
-                    link_display = f"\n\n✨ {summary_text}\n📄 云端链接: {qiniu_url_display}"
+                    link_display = f"\n\n✨ {summary_text}\n📄 云端链接: {display_url}"
                 else:
                     # Fallback description when LLM omits summary
-                    link_display = f"\n\n✨ 已生成HTML文件\n📄 云端链接: {qiniu_url_display}"
+                    link_display = f"\n\n✨ 已生成HTML文件\n📄 云端链接: {display_url}"
                 cleaned_content = cleaned_content[:match.start()] + link_display + cleaned_content[full_tag_end_pos:]
             
         except Exception as e:
