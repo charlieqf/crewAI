@@ -630,6 +630,7 @@ async def _process_llm_file_output(
                 final_content = file_content
                 if raw_context and mime_type == "text/html":
                     import html as html_module
+                    import re
                     escaped_context = html_module.escape(raw_context)
                     context_section = f'''
 <hr style="margin-top: 40px; border: 1px dashed #ccc;">
@@ -642,9 +643,19 @@ async def _process_llm_file_output(
 </pre>
 </details>
 '''
-                    if '</body>' in final_content:
-                        final_content = final_content.replace('</body>', f'{context_section}</body>')
+                    # Find the LAST </body> tag to ensure we're at the true document end
+                    body_matches = list(re.finditer(r'</body>', final_content, re.IGNORECASE))
+                    if body_matches:
+                        last_body = body_matches[-1]
+                        final_content = final_content[:last_body.start()] + context_section + final_content[last_body.start():]
+                    elif '</html>' in final_content.lower():
+                        # Fallback: insert before </html>
+                        html_matches = list(re.finditer(r'</html>', final_content, re.IGNORECASE))
+                        if html_matches:
+                            last_html = html_matches[-1]
+                            final_content = final_content[:last_html.start()] + context_section + final_content[last_html.start():]
                     else:
+                        # Last resort: append to end
                         final_content += context_section
                     logger.info(f"[AIBOT_FILE] Appended raw_context ({len(raw_context)} chars) to HTML")
                 
