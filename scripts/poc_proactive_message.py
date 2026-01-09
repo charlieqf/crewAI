@@ -27,12 +27,12 @@ def get_access_token(corp_id, secret):
 
 def send_proactive_message(chat_id, content, agent_id, access_token):
     """Send a proactive message to a specific chat_id."""
-    url = f"https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token={access_token}"
+    # Group messages use appchat/send instead of message/send
+    url = f"https://qyapi.weixin.qq.com/cgi-bin/appchat/send?access_token={access_token}"
     
     payload = {
         "chatid": chat_id,
         "msgtype": "text",
-        "agentid": agent_id,
         "text": {
             "content": content
         },
