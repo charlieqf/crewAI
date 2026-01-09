@@ -56,7 +56,8 @@ def render_template(
     json_data: str,
     template_name: str,
     room_id: str,
-    room_name: str = None
+    room_name: str = None,
+    raw_context: str = None
 ) -> tuple[str, bool]:
     """
     Generic template renderer.
@@ -66,6 +67,7 @@ def render_template(
         template_name: One of 'daily', 'meeting'
         room_id: Chat room ID
         room_name: Optional display name
+        raw_context: Optional raw chat context to append for debugging
         
     Returns:
         (html_content, is_success)
@@ -106,6 +108,28 @@ def render_template(
         env = Environment(loader=FileSystemLoader(TEMPLATE_DIR))
         template = env.get_template(config["file"])
         html = template.render(**render_data)
+        
+        # Append raw context for transparency if provided
+        if raw_context:
+            import html as html_module
+            escaped_context = html_module.escape(raw_context)
+            context_section = f'''
+<hr style="margin-top: 40px; border: 1px dashed #ccc;">
+<details style="margin-top: 20px; padding: 15px; background: #1a1a2e; border-radius: 8px;">
+<summary style="cursor: pointer; color: #8b8b9e; font-size: 14px;">
+  📋 原始上下文数据（用于生成本报告的聊天记录）
+</summary>
+<pre style="white-space: pre-wrap; word-wrap: break-word; font-size: 12px; color: #a0a0b0; margin-top: 10px; max-height: 500px; overflow-y: auto;">
+{escaped_context}
+</pre>
+</details>
+'''
+            # Insert before closing </body> tag
+            if '</body>' in html:
+                html = html.replace('</body>', f'{context_section}</body>')
+            else:
+                html += context_section
+        
         logger.info(f"[TEMPLATE] Successfully rendered {template_name} template for {room_id}")
         return html, True
     except Exception as e:
@@ -118,7 +142,8 @@ def generate_html_report(
     json_data: str,
     room_id: str,
     room_name: str = None,
-    template_name: str = "daily"
+    template_name: str = "daily",
+    raw_context: str = None
 ) -> tuple[str, bool]:
     """
     Parses LLM JSON output and renders it using the specified template.
@@ -128,11 +153,12 @@ def generate_html_report(
         room_id: Chat room ID
         room_name: Optional display name
         template_name: Template to use ('daily' or 'meeting')
+        raw_context: Optional raw chat context to append for debugging
         
     Returns:
         (html_content, is_success)
     """
-    return render_template(json_data, template_name, room_id, room_name)
+    return render_template(json_data, template_name, room_id, room_name, raw_context)
 
 
 def generate_meeting_notes_report(

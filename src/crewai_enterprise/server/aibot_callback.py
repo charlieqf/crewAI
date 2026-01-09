@@ -440,6 +440,7 @@ async def _process_llm_file_output(
     file_only_mode: bool = False,
     is_report_request: bool = False,
     template_name: str | None = None,
+    raw_context: str | None = None,
 ) -> str:
     """Detect and process <FILE> tags in LLM output.
     
@@ -447,6 +448,7 @@ async def _process_llm_file_output(
         file_only_mode: If True, return only the cloud link (no extra text).
         is_report_request: If True, allow auto-conversion of JSON to HTML report.
         template_name: Template to use for JSON rendering ('daily', 'meeting', or None for free-form).
+        raw_context: Raw chat context to append to HTML for debugging/transparency.
     """
     import re
     from datetime import datetime
@@ -464,7 +466,7 @@ async def _process_llm_file_output(
             now_bj = datetime.now(BEIJING_TZ)
 
             logger.info(f"[AIBOT_TEMPLATE] Rendering {template_name} template for chat={chat_id}")
-            html_report, success = generate_html_report(content, chat_id, template_name=template_name)
+            html_report, success = generate_html_report(content, chat_id, template_name=template_name, raw_context=raw_context)
             
             if success:
                 # Successfully converted JSON to HTML via template
@@ -1741,6 +1743,7 @@ async def _call_llm_async(
             file_only_mode=file_output_mode,
             is_report_request=is_report_request,
             template_name=template_name,
+            raw_context=archive_context,
         )
 
 
@@ -2576,6 +2579,7 @@ async def _call_vision_llm_async(
             response_url=response_url,
             is_report_request=is_report_request,
             template_name=None,  # Vision flow doesn't use templates
+            raw_context=None,
         )
 
         # Update task with completed response
@@ -3013,6 +3017,7 @@ async def _call_file_llm_async(
             response_url=response_url,
             is_report_request=is_report_request,
             template_name=None,  # File flow doesn't use templates
+            raw_context=None,
         )
 
         # Update task with completed response
