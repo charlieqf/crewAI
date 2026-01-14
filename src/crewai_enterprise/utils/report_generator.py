@@ -12,6 +12,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from jinja2 import Environment, FileSystemLoader
 
+from src.crewai_enterprise.utils.html_context import append_context_section
 logger = logging.getLogger(__name__)
 
 # UTC+8 Timezone for Beijing
@@ -111,24 +112,7 @@ def render_template(
         
         # Append raw context for transparency if provided
         if raw_context:
-            import html as html_module
-            escaped_context = html_module.escape(raw_context)
-            context_section = f'''
-<hr style="margin-top: 40px; border: 1px dashed #ccc;">
-<details style="margin-top: 20px; padding: 15px; background: #1a1a2e; border-radius: 8px;">
-<summary style="cursor: pointer; color: #8b8b9e; font-size: 14px;">
-  📋 原始上下文数据（用于生成本报告的聊天记录）
-</summary>
-<pre style="white-space: pre-wrap; word-wrap: break-word; font-size: 12px; color: #a0a0b0; margin-top: 10px; max-height: 500px; overflow-y: auto;">
-{escaped_context}
-</pre>
-</details>
-'''
-            # Insert before closing </body> tag
-            if '</body>' in html:
-                html = html.replace('</body>', f'{context_section}</body>')
-            else:
-                html += context_section
+            html = append_context_section(html, raw_context, max_len=100_000)
         
         logger.info(f"[TEMPLATE] Successfully rendered {template_name} template for {room_id}")
         return html, True

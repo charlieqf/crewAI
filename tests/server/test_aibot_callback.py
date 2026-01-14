@@ -24,7 +24,9 @@ class TestExtractMsgId(unittest.TestCase):
     """Tests for _extract_msg_id helper function."""
 
     def setUp(self):
-        from src.crewai_enterprise.server.aibot_callback import _extract_msg_id
+        from src.crewai_enterprise.server.handlers.aibot.payload_extractors import (
+            _extract_msg_id,
+        )
         self.extract_msg_id = _extract_msg_id
 
     def test_extract_from_top_level_msgid(self):
@@ -74,7 +76,9 @@ class TestExtractChatId(unittest.TestCase):
     """Tests for _extract_chat_id helper function."""
 
     def setUp(self):
-        from src.crewai_enterprise.server.aibot_callback import _extract_chat_id
+        from src.crewai_enterprise.server.handlers.aibot.payload_extractors import (
+            _extract_chat_id,
+        )
         self.extract_chat_id = _extract_chat_id
 
     def test_extract_from_chat_id(self):
@@ -115,7 +119,9 @@ class TestExtractQuoteContent(unittest.TestCase):
     """Tests for _extract_quote_content helper function."""
 
     def setUp(self):
-        from src.crewai_enterprise.server.aibot_callback import _extract_quote_content
+        from src.crewai_enterprise.server.handlers.aibot.payload_extractors import (
+            _extract_quote_content,
+        )
         self.extract_quote_content = _extract_quote_content
 
     def test_extract_from_top_level_quote(self):
@@ -124,8 +130,9 @@ class TestExtractQuoteContent(unittest.TestCase):
             "msgtype": "text",
             "quote": {"content": "This is the quoted message"}
         }
-        result = self.extract_quote_content(data)
-        self.assertEqual(result, "This is the quoted message")
+        content, msgid = self.extract_quote_content(data)
+        self.assertEqual(content, "This is the quoted message")
+        self.assertIn(msgid, (None, "q123"))  # msgid may be absent in current implementation
 
     def test_extract_from_quote_text_key(self):
         """Test extracting from data['quote']['text']."""
@@ -133,8 +140,9 @@ class TestExtractQuoteContent(unittest.TestCase):
             "msgtype": "text",
             "quote": {"text": "Quoted via text key"}
         }
-        result = self.extract_quote_content(data)
-        self.assertEqual(result, "Quoted via text key")
+        content, msgid = self.extract_quote_content(data)
+        self.assertEqual(content, "Quoted via text key")
+        self.assertIn(msgid, (None, "q234"))  # msgid may be absent in current implementation
 
     def test_extract_from_nested_text_quote(self):
         """Test extracting from data['text']['quote']['content']."""
@@ -145,8 +153,9 @@ class TestExtractQuoteContent(unittest.TestCase):
                 "quote": {"content": "nested quote content"}
             }
         }
-        result = self.extract_quote_content(data)
-        self.assertEqual(result, "nested quote content")
+        content, msgid = self.extract_quote_content(data)
+        self.assertEqual(content, "nested quote content")
+        self.assertIn(msgid, (None, "q345"))  # msgid may be absent in current implementation
 
     def test_extract_from_text_quote_string(self):
         """Test extracting when text.quote is a string directly."""
@@ -157,8 +166,9 @@ class TestExtractQuoteContent(unittest.TestCase):
                 "quote": "direct string quote"
             }
         }
-        result = self.extract_quote_content(data)
-        self.assertEqual(result, "direct string quote")
+        content, msgid = self.extract_quote_content(data)
+        self.assertEqual(content, "direct string quote")
+        self.assertIsNone(msgid)
 
     def test_extract_from_reference_field(self):
         """Test extracting from alternative 'reference' field."""
@@ -166,22 +176,25 @@ class TestExtractQuoteContent(unittest.TestCase):
             "msgtype": "text",
             "reference": {"content": "referenced message"}
         }
-        result = self.extract_quote_content(data)
-        self.assertEqual(result, "referenced message")
+        content, msgid = self.extract_quote_content(data)
+        self.assertEqual(content, "referenced message")
+        self.assertIn(msgid, (None, "ref_id"))  # msgid may be absent in current implementation
 
     def test_returns_none_when_no_quote(self):
         """Test returns None when no quote is present."""
         data = {"msgtype": "text", "text": {"content": "hello"}}
-        result = self.extract_quote_content(data)
-        self.assertIsNone(result)
+        content, msgid = self.extract_quote_content(data)
+        self.assertIsNone(content)
+        self.assertIsNone(msgid)
 
     def test_strips_whitespace(self):
         """Test that extracted content is stripped of whitespace."""
         data = {
             "quote": {"content": "  whitespace padded  "}
         }
-        result = self.extract_quote_content(data)
-        self.assertEqual(result, "whitespace padded")
+        content, msgid = self.extract_quote_content(data)
+        self.assertEqual(content, "whitespace padded")
+        self.assertIn(msgid, (None, "q999"))  # msgid may be absent in current implementation
 
 
 class TestMakeTextStream(unittest.TestCase):

@@ -18,6 +18,18 @@ BEIJING_TZ = timezone(timedelta(hours=8))
 ARCHIVE_DB_PATH = os.getenv("ARCHIVE_DB_PATH", "/var/lib/wecom-callback/chat_history.db")
 HOT_DB_PATH = os.getenv("CHAT_DB_PATH", "/var/lib/wecom-callback/chat_storage.db")
 
+# Shared SQL fragment to normalize timestamps across ISO/epoch(ms/s)
+SQL_TS_NORM = """
+CASE 
+    WHEN {col} GLOB '[0-9]*' AND {col} NOT GLOB '*:*' THEN 
+        CASE 
+            WHEN length({col}) >= 13 THEN datetime(CAST({col} AS INTEGER)/1000, 'unixepoch')
+            ELSE datetime(CAST({col} AS INTEGER), 'unixepoch')
+        END
+    ELSE {col} 
+END
+"""
+
 
 def _parse_time_range(pattern: str) -> Optional[timedelta]:
     """
@@ -88,270 +100,150 @@ def get_merged_chat_history(
         target_date = date
 
     if use_range_query:
-        audit_msgs = _get_audit_messages_range(room_id, since_ts, limit)
-        hot_msgs = _get_hot_messages_range(room_id, since_ts, limit)
+        audit_msgs = _fetch_audit_messages(room_id, since_ts, limit, is_range=True)
+        hot_msgs = _fetch_hot_messages(room_id, since_ts, limit, is_range=True)
     else:
-        audit_msgs = _get_audit_messages(room_id, target_date, limit)
-        hot_msgs = _get_hot_messages(room_id, target_date, limit)
+        audit_msgs = _fetch_audit_messages(room_id, target_date, limit, is_range=False)
+        hot_msgs = _fetch_hot_messages(room_id, target_date, limit, is_range=False)
 
     # Merge and heal
     merged = _merge_and_heal(audit_msgs, hot_msgs)
     
     # Robust Sort: Convert all timestamps to a comparable ISO format or epoch
     def get_sort_key(m):
-        ts = m.get("timestamp", "")
-        # Handle numeric types directly
-        if isinstance(ts, (int, float)):
-            return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
-        
-        # Handle digit-only strings as epochs
-        ts_str = str(ts).strip()
-        if ts_str.isdigit() and len(ts_str) >= 10:
-            try:
-                # Handle ms vs s automatically
-                val = float(ts_str)
-                if val > 1e11: val /= 1000 # Convert ms to s
-                return datetime.fromtimestamp(val, tz=timezone.utc).isoformat()
-            except: pass
-            
-        return ts_str
+        return _normalize_ts_to_iso(m.get("timestamp", ""))
 
     merged.sort(key=get_sort_key)
     
     return merged[-limit:]
 
-def _get_audit_messages(room_id: str, date_str: str, limit: int) -> List[Dict[str, Any]]:
-    """Fetch pure audit messages from chat_history.db."""
-    msgs = []
+def _normalize_ts_to_iso(ts: Any) -> str:
+    """Normalize various timestamp formats to ISO strings for sorting/signatures."""
+    # Handle numeric types directly
+    if isinstance(ts, (int, float)):
+        return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+
+    ts_str = str(ts).strip()
+    if ts_str.isdigit() and len(ts_str) >= 10:
+        try:
+            val = float(ts_str)
+            if val > 1e11:
+                val /= 1000  # Convert ms to s
+            return datetime.fromtimestamp(val, tz=timezone.utc).isoformat()
+        except Exception:
+            return ts_str
+    return ts_str
+
+
+def _fetch_audit_messages(room_id: str, ts_filter: str, limit: int, is_range: bool) -> List[Dict[str, Any]]:
+    """Fetch audit messages by date or range from chat_history.db."""
+    msgs: List[Dict[str, Any]] = []
     if not os.path.exists(ARCHIVE_DB_PATH):
         logger.warning(f"Archive DB not found: {ARCHIVE_DB_PATH}")
         return msgs
 
+    ts_expr = SQL_TS_NORM.format(col="created_at")
+    if is_range:
+        # For range queries, compare the full timestamp expression
+        filter_expr = ts_expr
+        comparator = ">="
+    else:
+        # For date queries, extract only the date part
+        filter_expr = f"strftime('%Y-%m-%d', {ts_expr})"
+        comparator = "="
+
+    query = f"""
+        SELECT seq, msgid, sender_id, content, created_at 
+        FROM archived_messages 
+        WHERE room_id = ? AND 
+        {filter_expr} {comparator} ?
+        ORDER BY seq DESC
+        LIMIT ?
+    """
+
     try:
-        conn = sqlite3.connect(ARCHIVE_DB_PATH)
-        cursor = conn.cursor()
-        
-        # Note: We query by room_id and date. 
-        # Content is stored as JSON string in 'content' column.
-        # Query the LATEST messages of the day
-        # Robustly handle both ISO strings and numeric epochs (seconds or milliseconds)
-        query = """
-            SELECT seq, msgid, sender_id, content, created_at 
-            FROM archived_messages 
-            WHERE room_id = ? AND 
-            strftime('%Y-%m-%d', 
-                CASE 
-                    WHEN created_at GLOB '[0-9]*' AND created_at NOT GLOB '*:*' THEN 
-                        CASE 
-                            WHEN length(created_at) >= 13 THEN datetime(CAST(created_at AS INTEGER)/1000, 'unixepoch')
-                            ELSE datetime(CAST(created_at AS INTEGER), 'unixepoch')
-                        END
-                    ELSE created_at 
-                END
-            ) = ?
-            ORDER BY seq DESC
-            LIMIT ?
-        """
-        cursor.execute(query, (room_id, date_str, limit))
-        
-        for row in cursor.fetchall():
-            seq, msgid, sender_id, raw_content, created_at = row
-            try:
-                content_dict = json.loads(raw_content)
-                text_content = ""
-                if content_dict.get("msgtype") == "text":
-                    text_content = content_dict.get("text", {}).get("content", "")
-                elif content_dict.get("msgtype") == "file":
-                    text_content = f"[File: {content_dict.get('file', {}).get('filename', 'unnamed')}]"
-                
-                msgs.append({
-                    "source": "audit",
-                    "seq": seq,
-                    "msgid": msgid,
-                    "sender": sender_id,
-                    "content": text_content,
-                    "timestamp": created_at,
-                    "role": "user"
-                })
-            except Exception as e:
-                logger.error(f"Failed to parse audit message {msgid}: {e}")
-                
-        conn.close()
+        with sqlite3.connect(ARCHIVE_DB_PATH) as conn:
+            cursor = conn.cursor()
+            cursor.execute(query, (room_id, ts_filter, limit))
+            for row in cursor.fetchall():
+                seq, msgid, sender_id, raw_content, created_at = row
+                try:
+                    content_dict = json.loads(raw_content)
+                    text_content = ""
+                    if content_dict.get("msgtype") == "text":
+                        text_content = content_dict.get("text", {}).get("content", "")
+                    elif content_dict.get("msgtype") == "file":
+                        text_content = f"[File: {content_dict.get('file', {}).get('filename', 'unnamed')}]"
+                    
+                    msgs.append({
+                        "source": "audit",
+                        "seq": seq,
+                        "msgid": msgid,
+                        "sender": sender_id,
+                        "content": text_content,
+                        "timestamp": created_at,
+                        "role": "user"
+                    })
+                except Exception as e:
+                    logger.error(f"Failed to parse audit message {msgid}: {e}")
     except Exception as e:
         logger.error(f"Error fetching audit messages: {e}")
-        
-    return msgs[::-1] # Reverse to restore chronological order
 
-def _get_audit_messages_range(room_id: str, since_ts: str, limit: int) -> List[Dict[str, Any]]:
-    """Fetch audit messages from chat_history.db within a time range."""
-    msgs = []
-    if not os.path.exists(ARCHIVE_DB_PATH):
-        return msgs
+    return msgs[::-1]  # Reverse to restore chronological order
 
-    try:
-        conn = sqlite3.connect(ARCHIVE_DB_PATH)
-        cursor = conn.cursor()
-        
-        # Query messages since since_ts
-        query = """
-            SELECT seq, msgid, sender_id, content, created_at 
-            FROM archived_messages 
-            WHERE room_id = ? AND 
-            (
-                CASE 
-                    WHEN created_at GLOB '[0-9]*' AND created_at NOT GLOB '*:*' THEN 
-                        CASE 
-                            WHEN length(created_at) >= 13 THEN datetime(CAST(created_at AS INTEGER)/1000, 'unixepoch')
-                            ELSE datetime(CAST(created_at AS INTEGER), 'unixepoch')
-                        END
-                    ELSE created_at 
-                END
-            ) >= ?
-            ORDER BY seq DESC
-            LIMIT ?
-        """
-        cursor.execute(query, (room_id, since_ts, limit))
-        
-        for row in cursor.fetchall():
-            seq, msgid, sender_id, raw_content, created_at = row
-            try:
-                content_dict = json.loads(raw_content)
-                text_content = ""
-                if content_dict.get("msgtype") == "text":
-                    text_content = content_dict.get("text", {}).get("content", "")
-                elif content_dict.get("msgtype") == "file":
-                    text_content = f"[File: {content_dict.get('file', {}).get('filename', 'unnamed')}]"
-                
-                msgs.append({
-                    "source": "audit",
-                    "seq": seq,
-                    "msgid": msgid,
-                    "sender": sender_id,
-                    "content": text_content,
-                    "timestamp": created_at,
-                    "role": "user"
-                })
-            except Exception as e:
-                logger.error(f"Failed to parse audit message range {msgid}: {e}")
-                
-        conn.close()
-    except Exception as e:
-        logger.error(f"Error fetching audit messages range: {e}")
-        
-    return msgs[::-1]
 
-def _get_hot_messages(chat_id: str, date_str: str, limit: int) -> List[Dict[str, Any]]:
-    """Fetch bot responses and @mentions from chat_storage.db (Latest first)."""
-    msgs = []
+def _fetch_hot_messages(chat_id: str, ts_filter: str, limit: int, is_range: bool) -> List[Dict[str, Any]]:
+    """Fetch bot responses and @mentions by date or range from chat_storage.db."""
+    msgs: List[Dict[str, Any]] = []
     if not os.path.exists(HOT_DB_PATH):
         logger.warning(f"Hot DB not found: {HOT_DB_PATH}")
         return msgs
 
     try:
-        conn = sqlite3.connect(HOT_DB_PATH)
-        cursor = conn.cursor()
-        
-        # Check available columns to be resilient to schema variations
-        cursor.execute("PRAGMA table_info(chat_messages)")
-        columns = [col[1] for col in cursor.fetchall()]
-        
-        select_cols = ["sender_name", "content", "timestamp", "role", "wecom_msg_id"]
-        if "bot_type" in columns:
-            select_cols.append("bot_type")
-        
-        col_string = ", ".join(select_cols)
-        # Query the LATEST messages of the day using CASE for epoch/ISO robustness
-        query = f"""
-            SELECT {col_string}
-            FROM chat_messages
-            WHERE chat_id = ? AND 
-            strftime('%Y-%m-%d', 
-                CASE 
-                    WHEN timestamp GLOB '[0-9]*' AND timestamp NOT GLOB '*:*' THEN 
-                        CASE 
-                            WHEN length(timestamp) >= 13 THEN datetime(CAST(timestamp AS INTEGER)/1000, 'unixepoch')
-                            ELSE datetime(CAST(timestamp AS INTEGER), 'unixepoch')
-                        END
-                    ELSE timestamp 
-                END
-            ) = ?
-            ORDER BY id DESC
-            LIMIT ?
-        """
-        cursor.execute(query, (chat_id, date_str, limit))
-        
-        for row in cursor.fetchall():
-            msg_data = dict(zip(select_cols, row))
-            msgs.append({
-                "source": "hot",
-                "sender": msg_data["sender_name"],
-                "content": msg_data["content"],
-                "timestamp": str(msg_data["timestamp"]),
-                "role": msg_data["role"],
-                "bot_type": msg_data.get("bot_type"),
-                "wecom_msg_id": msg_data["wecom_msg_id"]
-            })
+        with sqlite3.connect(HOT_DB_PATH) as conn:
+            cursor = conn.cursor()
+            cursor.execute("PRAGMA table_info(chat_messages)")
+            columns = [col[1] for col in cursor.fetchall()]
+
+            select_cols = ["sender_name", "content", "timestamp", "role", "wecom_msg_id"]
+            if "bot_type" in columns:
+                select_cols.append("bot_type")
+
+            col_string = ", ".join(select_cols)
+            ts_expr = SQL_TS_NORM.format(col="timestamp")
             
-        conn.close()
+            if is_range:
+                filter_expr = ts_expr
+                comparator = ">="
+            else:
+                filter_expr = f"strftime('%Y-%m-%d', {ts_expr})"
+                comparator = "="
+
+            query = f"""
+                SELECT {col_string}
+                FROM chat_messages
+                WHERE chat_id = ? AND 
+                {filter_expr} {comparator} ?
+                ORDER BY id DESC
+                LIMIT ?
+            """
+
+            cursor.execute(query, (chat_id, ts_filter, limit))
+            for row in cursor.fetchall():
+                msg_data = dict(zip(select_cols, row))
+                msgs.append({
+                    "source": "hot",
+                    "sender": msg_data["sender_name"],
+                    "content": msg_data["content"],
+                    "timestamp": str(msg_data["timestamp"]),
+                    "role": msg_data["role"],
+                    "bot_type": msg_data.get("bot_type"),
+                    "wecom_msg_id": msg_data["wecom_msg_id"]
+                })
     except Exception as e:
         logger.error(f"Error fetching hot messages: {e}")
-        
-    return msgs[::-1] # Reverse to restore chronological order
 
-def _get_hot_messages_range(chat_id: str, since_ts: str, limit: int) -> List[Dict[str, Any]]:
-    """Fetch bot responses and @mentions within a time range."""
-    msgs = []
-    if not os.path.exists(HOT_DB_PATH):
-        return msgs
-
-    try:
-        conn = sqlite3.connect(HOT_DB_PATH)
-        cursor = conn.cursor()
-        
-        cursor.execute("PRAGMA table_info(chat_messages)")
-        columns = [col[1] for col in cursor.fetchall()]
-        
-        select_cols = ["sender_name", "content", "timestamp", "role", "wecom_msg_id"]
-        if "bot_type" in columns:
-            select_cols.append("bot_type")
-        
-        col_string = ", ".join(select_cols)
-        query = f"""
-            SELECT {col_string}
-            FROM chat_messages
-            WHERE chat_id = ? AND 
-            (
-                CASE 
-                    WHEN timestamp GLOB '[0-9]*' AND timestamp NOT GLOB '*:*' THEN 
-                        CASE 
-                            WHEN length(timestamp) >= 13 THEN datetime(CAST(timestamp AS INTEGER)/1000, 'unixepoch')
-                            ELSE datetime(CAST(timestamp AS INTEGER), 'unixepoch')
-                        END
-                    ELSE timestamp 
-                END
-            ) >= ?
-            ORDER BY id DESC
-            LIMIT ?
-        """
-        cursor.execute(query, (chat_id, since_ts, limit))
-        
-        for row in cursor.fetchall():
-            msg_data = dict(zip(select_cols, row))
-            msgs.append({
-                "source": "hot",
-                "sender": msg_data["sender_name"],
-                "content": msg_data["content"],
-                "timestamp": str(msg_data["timestamp"]),
-                "role": msg_data["role"],
-                "bot_type": msg_data.get("bot_type"),
-                "wecom_msg_id": msg_data["wecom_msg_id"]
-            })
-            
-        conn.close()
-    except Exception as e:
-        logger.error(f"Error fetching hot messages range: {e}")
-        
-    return msgs[::-1]
+    return msgs[::-1]  # Reverse to restore chronological order
 
 def _merge_and_heal(audit_msgs: List[Dict[str, Any]], hot_msgs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
@@ -373,13 +265,7 @@ def _merge_and_heal(audit_msgs: List[Dict[str, Any]], hot_msgs: List[Dict[str, A
             clean_text = clean_text.split(None, 1)[-1].strip() if " " in clean_text else clean_text
         
         if clean_text:
-            # Normalize timestamp for signature (works for ISO or epoch)
-            ts_sig = str(msg['timestamp']).strip()
-            if ts_sig.isdigit() and len(ts_sig) >= 10:
-                val = float(ts_sig)
-                if val > 1e11: val /= 1000
-                ts_sig = datetime.fromtimestamp(val, tz=timezone.utc).isoformat()
-            
+            ts_sig = _normalize_ts_to_iso(msg['timestamp'])
             sig = f"{ts_sig[:16]}_{clean_text}" # Match within the same minute
             content_lookup[sig] = msg
 
@@ -391,12 +277,7 @@ def _merge_and_heal(audit_msgs: List[Dict[str, Any]], hot_msgs: List[Dict[str, A
             if not match:
                 # Try content matching
                 clean_audit = amsg["content"][2:].strip()
-                ts_sig = str(amsg['timestamp']).strip()
-                if ts_sig.isdigit() and len(ts_sig) >= 10:
-                    val = float(ts_sig)
-                    if val > 1e11: val /= 1000
-                    ts_sig = datetime.fromtimestamp(val, tz=timezone.utc).isoformat()
-                
+                ts_sig = _normalize_ts_to_iso(amsg['timestamp'])
                 sig = f"{ts_sig[:16]}_{clean_audit}"
                 match = content_lookup.get(sig)
             

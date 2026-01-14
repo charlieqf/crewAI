@@ -12,7 +12,7 @@ Key differences from self-built application:
 
 Streaming Flow:
 1. User sends message -> WeCom calls POST /ai-bot/{bot_type}
-2. We immediately store task with finish=False & return "思考中..."
+2. We immediately store task with finish=False & return "µÇ¥ΦÇâΣ╕¡..."
 3. LLM is called asynchronously, result stored when complete
 4. WeCom polls with msgtype=stream, we return current progress
 5. When LLM completes, we return finish=True with full response
@@ -32,48 +32,37 @@ from typing import Any
 
 import requests
 import urllib3
-from Crypto.Cipher import AES
 from fastapi import APIRouter, BackgroundTasks, FastAPI, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse, Response
 
-from src.crewai_enterprise.utils.wecom_json_crypto import WXBizJsonMsgCrypt
 from src.crewai_enterprise.utils.llm_router import LLMError, get_router
 from src.crewai_enterprise.utils.chat_context import get_context_manager
 from src.crewai_enterprise.utils.storage_manager import get_storage_manager
+from src.crewai_enterprise.utils.report_generator import generate_html_report
+from src.crewai_enterprise.tools.archive.archive_tool import get_merged_chat_history
 from src.crewai_enterprise.flows.code_review_flow import CodeReviewFlow
 from src.crewai_enterprise.flows.codebase_qa_flow import CodebaseQAFlow
-from src.crewai_enterprise.tools.archive.archive_tool import get_merged_chat_history
-from src.crewai_enterprise.utils.report_generator import generate_html_report
-
-# Global cache for user project context (chat_id -> {project_path, gitlab_url})
-# In production, this should be in Redis
-_user_project_context: dict[str, dict[str, str]] = {}
-
-# Predefined project nicknames to bypass WeCom URL filtering
-# Usage: @gemini /codebase <nickname> <question>
-PROJECT_NICKNAMES = {
-    "qd": {
-        "project_path": "qd-team/quick-deal",
-        "gitlab_url": "http://gitlab.goldenstand.com",
-        "branch": "project-meituan"
-    },
-    "quick-deal": {
-        "project_path": "qd-team/quick-deal",
-        "gitlab_url": "http://gitlab.goldenstand.com",
-        "branch": "project-meituan"
-    },
-    "project-meituan": {
-        "project_path": "qd-team/quick-deal",
-        "gitlab_url": "http://gitlab.goldenstand.com",
-        "branch": "project-meituan"
-    },
-    "investorportal": {
-        "project_path": "didi/investorportal",
-        "gitlab_url": "http://gitlab.goldenstand.com",
-        "branch": "master"
-    }
-}
-
+from src.crewai_enterprise.server.handlers.aibot import (
+    BOT_CONFIGS,
+    PROJECT_NICKNAMES,
+    _decrypt_media,
+    _encrypt_response,
+    _extract_chat_id,
+    _extract_file_info,
+    _extract_image_urls_from_mixed,
+    _extract_msg_id,
+    _extract_quote_content,
+    _extract_text_from_mixed,
+    _generate_stream_id,
+    _get_bot_aes_key,
+    _get_bot_crypto,
+    _has_image_in_mixed,
+    _make_text_stream,
+    _processed_messages,
+    _sanitize_text,
+    _stream_tasks,
+    _user_project_context,
+)
 
 # Configure logging
 logging.basicConfig(
@@ -86,7 +75,7 @@ def _detect_daily_report_intent(text: str) -> bool:
     """Detect if the user is requesting a daily/group summary."""
     keywords = [
         r"daily", r"today", r"summary", r"report", r"group chat", 
-        r"报告", r"总结", r"今天", r"群聊", r"内容", r"干了什么", r"纪要"
+        r"µèÑσæè", r"µÇ╗τ╗ô", r"Σ╗èσñ⌐", r"τ╛ñΦüè", r"σåàσ«╣", r"σ╣▓Σ║åΣ╗ÇΣ╣ê", r"τ║¬Φªü"
     ]
     # Check for direct file-html context or keywords
     for kw in keywords:
@@ -105,7 +94,7 @@ def _format_chat_history(history: list[dict]) -> str:
         else:
             time_str = time_str[:5]
         
-        sender = msg.get("sender", "未知")
+        sender = msg.get("sender", "µ£¬τƒÑ")
         content = msg.get("content", "")
         role_label = ""
         if msg.get("role") == "assistant":
@@ -115,731 +104,6 @@ def _format_chat_history(history: list[dict]) -> str:
     
     return "\n".join(lines)
 
-# ============================================================================
-# WARNING: In-memory caches - NOT suitable for multi-worker/multi-instance!
-# For production with multiple Uvicorn workers or load-balanced instances,
-# replace these with Redis or a shared database.
-# ============================================================================
-# Global storage for streaming tasks and processed messages
-# In production, use Redis instead of memory
-_stream_tasks: dict[str, dict[str, Any]] = {}
-_processed_messages: dict[str, str] = {}  # msgid -> stream_id (dedup)
-
-
-# Bot configurations
-# EncodingAESKey and Token must match WeCom admin console
-BOT_CONFIGS: dict[str, dict[str, str | bool]] = {
-    "gemini": {
-        "provider": "gemini",
-        "token_env": "GEMINI_BOT_TOKEN",
-        "aes_key_env": "GEMINI_BOT_ENCODING_AES_KEY",
-        "supports_file_analysis": True,
-        "system_prompt": (
-            "You are a helpful assistant. Respond naturally to conversations in Chinese or English. "
-            "Be concise, friendly, and helpful."
-        ),
-    },
-    "chatgpt": {
-        "provider": "openai",
-        "token_env": "OPENAI_BOT_TOKEN",
-        "aes_key_env": "OPENAI_BOT_ENCODING_AES_KEY",
-        "supports_file_analysis": True,
-        "system_prompt": (
-            "You are a helpful assistant. Respond naturally to conversations. "
-            "Be concise, friendly, and helpful."
-        ),
-    },
-    "grok": {
-        "provider": "xai",
-        "token_env": "XAI_BOT_TOKEN",
-        "aes_key_env": "XAI_BOT_ENCODING_AES_KEY",
-        "supports_file_analysis": False,
-        "system_prompt": (
-            "You are a helpful assistant. Respond naturally to conversations. "
-            "Be concise, friendly, and helpful."
-        ),
-    },
-}
-
-
-
-def _generate_stream_id() -> str:
-    """Generate a unique stream ID for task tracking."""
-    import random
-    import string
-
-    return "".join(random.choices(string.ascii_letters + string.digits, k=16))
-
-
-def _sanitize_text(text: str) -> str:
-    """Remove hidden/invisible characters from text that may come from WeCom copy-paste.
-    
-    This cleans:
-    - Zero-width spaces (U+200B, U+200C, U+200D, U+FEFF)
-    - Various invisible Unicode characters
-    - Normalizes whitespace (full-width to half-width)
-    """
-    if not text:
-        return text
-    
-    # Characters to remove completely
-    invisible_chars = [
-        '\u200b',  # Zero-width space
-        '\u200c',  # Zero-width non-joiner
-        '\u200d',  # Zero-width joiner
-        '\ufeff',  # BOM / Zero-width no-break space
-        '\u00a0',  # Non-breaking space (replace with regular space)
-        '\u3000',  # Ideographic space (full-width space)
-        '\u2028',  # Line separator
-        '\u2029',  # Paragraph separator
-    ]
-    
-    result = text
-    for char in invisible_chars:
-        result = result.replace(char, ' ' if char in ['\u00a0', '\u3000'] else '')
-    
-    # Normalize multiple spaces to single space
-    result = ' '.join(result.split())
-    
-    return result
-
-
-
-def _get_bot_crypto(bot_type: str) -> WXBizJsonMsgCrypt:
-    """Get WXBizJsonMsgCrypt instance for a specific bot."""
-    config = BOT_CONFIGS.get(bot_type)
-    if not config:
-        raise ValueError(f"Unknown bot type: {bot_type}")
-
-    token = os.getenv(config["token_env"], "")
-    aes_key = os.getenv(config["aes_key_env"], "")
-
-    if not token or not aes_key:
-        raise ValueError(
-            f"Missing configuration for {bot_type}: "
-            f"set {config['token_env']} and {config['aes_key_env']}"
-        )
-
-    # For intelligent robots, receiveid is empty string
-    return WXBizJsonMsgCrypt(token, aes_key, "")
-
-
-def _get_bot_aes_key(bot_type: str) -> str:
-    """Get the EncodingAESKey for a specific bot."""
-    config = BOT_CONFIGS.get(bot_type)
-    if not config:
-        raise ValueError(f"Unknown bot type: {bot_type}")
-    return os.getenv(config["aes_key_env"], "")
-
-
-def _decrypt_media(media_url: str, aes_key_base64: str) -> tuple[bool, bytes | str]:
-    """Download and decrypt encrypted media (image/file) from WeCom.
-
-    Args:
-        media_url: URL of the encrypted media
-        aes_key_base64: Base64-encoded AES key (same as EncodingAESKey)
-
-    Returns:
-        tuple: (success, data) - if success, data is decrypted bytes; otherwise error message
-    """
-    try:
-        # 1. Download encrypted media
-        logger.info(f"[MEDIA] Downloading encrypted media: {media_url[:80]}...")
-        response = requests.get(media_url, timeout=60)  # Increase timeout for files
-        response.raise_for_status()
-        encrypted_data = response.content
-        logger.info(f"[MEDIA] Downloaded {len(encrypted_data)} bytes")
-
-        # 2. Prepare AES key and IV
-        if not aes_key_base64:
-            raise ValueError("AES key is empty")
-
-        # Base64 decode key (handle padding)
-        aes_key = base64.b64decode(aes_key_base64 + "=" * (-len(aes_key_base64) % 4))
-        if len(aes_key) != 32:
-            raise ValueError(f"Invalid AES key length: expected 32, got {len(aes_key)}")
-
-        iv = aes_key[:16]  # IV is first 16 bytes of key
-
-        # 3. Decrypt data
-        cipher = AES.new(aes_key, AES.MODE_CBC, iv)
-        decrypted_data = cipher.decrypt(encrypted_data)
-
-        # 4. Remove PKCS#7 padding
-        pad_len = decrypted_data[-1]
-        if pad_len > 32:  # AES-256 block size
-            raise ValueError(f"Invalid padding length: {pad_len}")
-
-        decrypted_data = decrypted_data[:-pad_len]
-        logger.info(f"[MEDIA] Decrypted to {len(decrypted_data)} bytes")
-
-        return True, decrypted_data
-
-    except requests.exceptions.RequestException as e:
-        error_msg = f"Media download failed: {e}"
-        logger.error(f"[MEDIA] {error_msg}")
-        return False, error_msg
-
-    except ValueError as e:
-        error_msg = f"Decryption error: {e}"
-        logger.error(f"[MEDIA] {error_msg}")
-        return False, error_msg
-
-    except Exception as e:
-        error_msg = f"Media processing error: {e}"
-        logger.error(f"[MEDIA] {error_msg}")
-        return False, error_msg
-
-
-def _make_text_stream(stream_id: str, content: str, finish: bool) -> str:
-    """Create a text stream response message."""
-    return json.dumps(
-        {
-            "msgtype": "stream",
-            "stream": {"id": stream_id, "finish": finish, "content": content},
-        },
-        ensure_ascii=False,
-    )
-
-
-def _encrypt_response(
-    bot_type: str, stream_json: str, nonce: str, timestamp: str
-) -> str:
-    """Encrypt response message for WeCom."""
-    crypto = _get_bot_crypto(bot_type)
-    ret, encrypted = crypto.EncryptMsg(stream_json, nonce, timestamp)
-    if ret != 0:
-        raise ValueError(f"Encryption failed with error code: {ret}")
-    return encrypted
-
-
-def _extract_msg_id(data: dict) -> str | None:
-    """Extract message ID from WeCom payload for dedup.
-
-    The intelligent bot payload may use different keys.
-    Try common variations including nested objects.
-    """
-    # Try top-level keys first
-    for key in ["msgid", "msg_id", "MsgId", "message_id"]:
-        if key in data:
-            return str(data[key])
-            
-    # Fallback to nested msg object
-    if "msg" in data and isinstance(data["msg"], dict):
-        return data["msg"].get("msgid")
-
-    # Check nested structures - msgid often inside text, image, etc.
-    for nested_key in ["text", "image", "voice", "file", "link"]:
-        if nested_key in data and isinstance(data[nested_key], dict):
-            nested = data[nested_key]
-            for key in ["msgid", "msg_id", "MsgId"]:
-                if key in nested:
-                    return str(nested[key])
-
-    # Log available keys for debugging (helps identify correct field names)
-    # Include nested structure hint for better debugging
-    nested_info = {
-        k: list(v.keys())[:5] if isinstance(v, dict) else type(v).__name__
-        for k, v in list(data.items())[:8]
-    }
-    logger.debug(f"[AIBOT_MSGID] Could not extract msgid, structure: {nested_info}")
-    return None
-
-
-def _extract_chat_id(data: dict, user_id: str) -> str:
-    """Extract chat/group ID from WeCom payload.
-
-    The intelligent bot payload may have different structures.
-    Try common variations and fall back to user_id for 1-on-1 chats.
-    """
-    # Try various possible key names for group chat ID
-    for key in ["chat_id", "chatid", "ChatId", "roomid", "room_id", "groupid"]:
-        if key in data and data[key]:
-            return str(data[key])
-
-    # Check nested structures
-    if "chat" in data and isinstance(data["chat"], dict):
-        chat_data = data["chat"]
-        for key in ["id", "chat_id", "chatid"]:
-            if key in chat_data and chat_data[key]:
-                return str(chat_data[key])
-
-    # Fall back to user_id for 1-on-1 chats
-    return user_id
-
-
-def _extract_quote_content(data: dict) -> tuple[str | None, str | None]:
-    """Extract quoted message content and ID from WeCom payload.
-
-    Returns:
-        tuple: (content, msgid)
-
-    WeCom intelligent bot payloads may include quoted/referenced messages.
-    Common structures include:
-    - data["quote"]["content"] - direct quote object
-    - data["text"]["quote"] - nested in text object
-    - data["reference"] - alternative naming
-    """
-    # Try top-level quote field
-    if "quote" in data and isinstance(data["quote"], dict):
-        quote_data = data["quote"]
-        # Try different content field names
-        msgid = quote_data.get("msgid") or quote_data.get("msg_id") or quote_data.get("MsgId")
-        for key in ["content", "text", "Content", "Text"]:
-            if key in quote_data and quote_data[key]:
-                return str(quote_data[key]).strip(), msgid
-        # If quote has type info, try to extract based on type
-        if "msgtype" in quote_data:
-            msgtype = quote_data["msgtype"]
-            if msgtype == "text" and "text" in quote_data:
-                text_obj = quote_data["text"]
-                if isinstance(text_obj, dict) and "content" in text_obj:
-                    msgid = quote_data.get("msgid") or quote_data.get("msg_id") or quote_data.get("MsgId")
-                    return str(text_obj["content"]).strip(), msgid
-
-    # Try quote nested in text object
-    text_data = data.get("text", {})
-    if isinstance(text_data, dict) and "quote" in text_data:
-        quote_in_text = text_data["quote"]
-        if isinstance(quote_in_text, dict):
-            msgid = quote_in_text.get("msgid") or quote_in_text.get("msg_id") or quote_in_text.get("MsgId")
-            for key in ["content", "text"]:
-                if key in quote_in_text and quote_in_text[key]:
-                    return str(quote_in_text[key]).strip(), msgid
-        elif isinstance(quote_in_text, str):
-            return quote_in_text.strip(), None
-
-    # Try reference field (alternative naming)
-    for ref_key in ["reference", "ref", "reply_to"]:
-        if ref_key in data and isinstance(data[ref_key], dict):
-            ref_data = data[ref_key]
-            msgid = ref_data.get("msgid") or ref_data.get("msg_id") or ref_data.get("MsgId")
-            for key in ["content", "text", "message"]:
-                if key in ref_data and ref_data[key]:
-                    return str(ref_data[key]).strip(), msgid
-
-    # Log structure if we suspect there might be a quote but couldn't extract
-    # Only check top-level keys to avoid performance issues with large payloads
-    quote_related_keys = ["quote", "reference", "ref", "reply_to", "reply"]
-    if any(k in data for k in quote_related_keys):
-        logger.debug(
-            f"[AIBOT_QUOTE] Possible quote detected but not extracted, "
-            f"keys: {list(data.keys())[:10]}"
-        )
-
-    return None, None
-
-
-async def _process_llm_file_output(
-    content: str, 
-    chat_id: str, 
-    bot_type: str, 
-    user_id: str | None = None,
-    user_name: str | None = None,
-    response_url: str | None = None,
-    file_only_mode: bool = False,
-    is_report_request: bool = False,
-    template_name: str | None = None,
-    raw_context: str | None = None,
-) -> str:
-    """Detect and process <FILE> tags in LLM output.
-    
-    Args:
-        file_only_mode: If True, return only the cloud link (no extra text).
-        is_report_request: If True, allow auto-conversion of JSON to HTML report.
-        template_name: Template to use for JSON rendering ('daily', 'meeting', or None for free-form).
-        raw_context: Raw chat context to append to HTML for debugging/transparency.
-    """
-    import re
-    from datetime import datetime
-    from src.crewai_enterprise.utils.file_storage import get_file_manager
-    from src.crewai_enterprise.utils.storage_manager import get_storage_manager
-    from src.crewai_enterprise.utils.chat_context import get_context_manager
-    
-    # Template-based JSON-to-HTML rendering
-    # For template modes (daily, meeting), the LLM outputs structured JSON
-    # which gets rendered via the corresponding HTML template
-    if template_name in ("daily", "meeting"):
-        try:
-            from datetime import timedelta, timezone
-            BEIJING_TZ = timezone(timedelta(hours=8))
-            now_bj = datetime.now(BEIJING_TZ)
-
-            logger.info(f"[AIBOT_TEMPLATE] Rendering {template_name} template for chat={chat_id}")
-            html_report, success = generate_html_report(content, chat_id, template_name=template_name, raw_context=raw_context)
-            
-            if success:
-                # Successfully converted JSON to HTML via template
-                storage = get_storage_manager()
-                filename_prefix = "daily_report" if template_name == "daily" else "meeting_notes"
-                report_filename = f"{filename_prefix}_{now_bj.strftime('%Y%m%d_%H%M%S')}.html"
-                upload_res = storage.upload_file(
-                    html_report.encode("utf-8"), 
-                    report_filename, 
-                    content_type="text/html"
-                )
-                logger.info(f"[AIBOT_TEMPLATE] Uploaded {template_name} report to cloud: {upload_res.url}")
-                
-                emoji = "📋" if template_name == "daily" else "📝"
-                label = "每日群聊摘要报告" if template_name == "daily" else "会议纪要"
-                
-                # Generate content-specific description by parsing JSON
-                try:
-                    import json
-                    clean_json = content.strip()
-                    if "```json" in clean_json:
-                        clean_json = clean_json.split("```json")[-1].split("```")[0].strip()
-                    data = json.loads(clean_json)
-                    
-                    if template_name == "daily":
-                        topics_count = len(data.get("topics", []))
-                        todos_count = len(data.get("todos", []))
-                        desc = f"提取了{topics_count}个讨论话题和{todos_count}个待办事项"
-                    else:
-                        agenda_count = len(data.get("agenda", []))
-                        actions_count = len(data.get("action_items", []))
-                        desc = f"整理了{agenda_count}个议程项目和{actions_count}个行动项"
-                except:
-                    desc = "已生成"
-                
-                # Never echo raw JSON content - only return link with description
-                return f"{emoji} {label}：{desc}\n📄 云端链接: {upload_res.url}"
-            else:
-                # Template rendering failed - return error HTML instead of falling back
-                logger.warning(f"[AIBOT_TEMPLATE] Template rendering failed for {template_name}, returning error report")
-                storage = get_storage_manager()
-                report_filename = f"error_report_{now_bj.strftime('%Y%m%d_%H%M%S')}.html"
-                upload_res = storage.upload_file(
-                    html_report.encode("utf-8"),  # html_report contains error HTML from render_template
-                    report_filename,
-                    content_type="text/html"
-                )
-                return f"❌ 模板渲染失败，请检查输出格式：\n{upload_res.url}"
-        except Exception as e:
-            logger.error(f"[AIBOT_TEMPLATE] Failed to render {template_name} template: {e}")
-            # Return error message instead of falling back
-            return f"❌ 生成报告时出错: {str(e)[:100]}..."
-    
-    # Legacy: Auto-conversion for daily report intent detection (backward compatibility)
-    elif is_report_request and "topics" in content and "todos" in content and "{" in content:
-        try:
-            from datetime import timedelta, timezone
-            BEIJING_TZ = timezone(timedelta(hours=8))
-            now_bj = datetime.now(BEIJING_TZ)
-
-            logger.info(f"[AIBOT_REPORT] Detected potential JSON report, converting to HTML for chat={chat_id}")
-            html_report, success = generate_html_report(content, chat_id, template_name="daily")
-            
-            if success:
-                # Successfully converted JSON report to HTML
-                storage = get_storage_manager()
-                report_filename = f"daily_report_{now_bj.strftime('%Y%m%d_%H%M%S')}.html"
-                upload_res = storage.upload_file(
-                    html_report.encode("utf-8"), 
-                    report_filename, 
-                    content_type="text/html"
-                )
-                logger.info(f"[AIBOT_REPORT] Uploaded generated report to cloud: {upload_res.url}")
-                
-                # Generate content-specific description (same as template path)
-                try:
-                    import json
-                    clean_json = content.strip()
-                    if "```json" in clean_json:
-                        clean_json = clean_json.split("```json")[-1].split("```")[0].strip()
-                    data = json.loads(clean_json)
-                    topics_count = len(data.get("topics", []))
-                    todos_count = len(data.get("todos", []))
-                    desc = f"提取了{topics_count}个讨论话题和{todos_count}个待办事项"
-                except:
-                    desc = "已生成"
-                
-                # Never echo raw JSON - consistent with template path
-                return f"📋 每日群聊摘要报告：{desc}\n📄 云端链接: {upload_res.url}"
-            else:
-                logger.warning(f"[AIBOT_REPORT] HTML conversion success=False for chat={chat_id}, bypassing auto-upload.")
-        except Exception as e:
-            logger.error(f"[AIBOT_REPORT] Failed to auto-convert report JSON: {e}")
-
-
-    # Robust parsing: Find all opening tags first
-    # This handles cases where a tag might be opened but not closed (truncated output)
-    open_tag_pattern = re.compile(r'<FILE\s+name="([^"]+)">', re.IGNORECASE)
-    open_tags = list(open_tag_pattern.finditer(content))
-    
-    if not open_tags:
-        # Fallback: If we are in file_only_mode but no tags were found, 
-        # it means the LLM might have outputted the content directly without tags.
-        # We auto-wrap it into a default report.html
-        if file_only_mode and content.strip():
-            logger.info(f"[AIBOT_FILE] No <FILE> tags found in file_only_mode, initiating auto-wrap fallback for chat={chat_id}")
-            
-            try:
-                # Simple check if it looks like HTML
-                is_html = content.strip().lower().startswith("<!doctype") or "<html" in content.lower()
-                
-                import html as html_module
-                if is_html:
-                    file_content = content
-                else:
-                    # Escape content to prevent XSS when wrapping as plain text
-                    safe_content = html_module.escape(content)
-                    # Wrap markdown/text in a basic styled container (using inline CSS to avoid external dependencies)
-                    file_content = f"""<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Generated Report</title>
-    <style>
-        body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #0f172a; color: #e2e8f0; line-height: 1.6; margin: 0; padding: 20px; }}
-        .container {{ max-width: 800px; margin: 0 auto; background-color: #1e293b; border-radius: 12px; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1); border: 1px solid #334155; overflow: hidden; }}
-        .header {{ background-color: #334155; padding: 10px 20px; border-bottom: 1px solid #475569; display: flex; align-items: center; gap: 8px; }}
-        .dot {{ width: 10px; height: 10px; border-radius: 50%; }}
-        .red {{ background-color: #f87171; }} .amber {{ background-color: #fbbf24; }} .emerald {{ background-color: #34d399; }}
-        .title {{ font-family: monospace; font-size: 12px; color: #94a3b8; margin-left: 8px; }}
-        .content {{ padding: 30px; white-space: pre-wrap; word-wrap: break-word; font-size: 15px; }}
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <div class="dot red"></div><div class="dot amber"></div><div class="dot emerald"></div>
-            <span class="title">generated_report.html</span>
-        </div>
-        <div class="content">{safe_content}</div>
-    </div>
-</body>
-</html>"""
-                
-                filename = "generated_report.html"
-                file_manager = get_file_manager()
-                storage = get_storage_manager()
-                context_manager = get_context_manager()
-                
-                # PRE-INJECTION: Append raw_context BEFORE any saving (Fix Storage Inconsistency)
-                final_content = file_content
-                if raw_context:
-                    import re as re_mod
-                    escaped_context = html_module.escape(raw_context)
-                    context_section = f'''
-<hr style="margin-top: 40px; border: 1px dashed #ccc;">
-<details style="margin-top: 20px; padding: 15px; background: #1a1a2e; border-radius: 8px; color: #a0a0b0;">
-<summary style="cursor: pointer; color: #8b8b9e; font-size: 14px; font-weight: bold; margin-bottom: 10px;">
-  📋 原始上下文数据（用于生成本报告的聊天记录）
-</summary>
-<pre style="white-space: pre-wrap; word-wrap: break-word; font-size: 12px; color: #888; background: #0c0c16; padding: 10px; border-radius: 4px; border: 1px solid #2d2d3a; margin-top: 10px; max-height: 500px; overflow-y: auto; font-family: monospace;">
-{escaped_context}
-</pre>
-</details>
-'''
-                    body_matches = list(re_mod.finditer(r'</body>', final_content, re_mod.IGNORECASE))
-                    if body_matches:
-                        last_body = body_matches[-1]
-                        final_content = final_content[:last_body.start()] + context_section + final_content[last_body.start():]
-                    elif '</html>' in final_content.lower():
-                        html_matches = list(re_mod.finditer(r'</html>', final_content, re_mod.IGNORECASE))
-                        if html_matches:
-                            last_html = html_matches[-1]
-                            final_content = final_content[:last_html.start()] + context_section + final_content[last_html.start():]
-                    else:
-                        final_content += context_section
-
-                # 1. Save locally (now contains context)
-                file_info = file_manager.save_file_from_bytes(
-                    chat_id=chat_id,
-                    content=final_content.encode("utf-8"),
-                    filename=filename
-                )
-                
-                # 2. Upload to Qiniu (now contains context)
-                upload_res = storage.upload_file(
-                    data=final_content.encode("utf-8"),
-                    filename=filename,
-                    content_type="text/html"
-                )
-                
-                # 3. Save Context
-                context_manager.save_file(
-                    chat_id=chat_id,
-                    sender_id=f"bot_{bot_type}",
-                    sender_name=bot_type,
-                    file_uri=upload_res.url,
-                    filename=filename,
-                    mime_type="text/html",
-                    bot_type=bot_type,
-                    storage_key=upload_res.key
-                )
-                
-                # Return summary + link
-                summary = content.strip().split('\n')[0]
-                if len(summary) > 60:
-                    summary = summary[:57] + "..."
-                    
-                return f"{summary}\n📄 云端链接: {upload_res.url}"
-            except Exception as fallback_err:
-                logger.error(f"[AIBOT_FILE] Fallback file processing failed: {fallback_err}")
-                return content # Graceful return of text if file logic fails
-        else:
-            return content
-    
-    cleaned_content = content
-    file_manager = get_file_manager()
-    storage = get_storage_manager()
-    context_manager = get_context_manager()
-    
-    def _sanitize_filename(name: str) -> str:
-        """Sanitize filename to prevent path traversal and remove weird characters."""
-        import os
-        # Only take the basename to prevent path traversal
-        name = os.path.basename(name)
-        # Remove any non-alphanumeric/dot/hyphen/underscore characters
-        import re
-        name = re.sub(r'[^\w\.\-\u4e00-\u9fa5]', '_', name)
-        # Limit length
-        if len(name) > 100:
-            name = name[:90] + "_" + name[-9:]
-        return name
-
-    # Process tags from last to first to maintain correct string indices after replacement
-    for i in range(len(open_tags) - 1, -1, -1):
-        match = open_tags[i]
-        original_filename = match.group(1)
-        start_pos = match.end()
-        
-        # Determine end of file content (either next opening tag or end of string)
-        # But we also search for a closing tag within this range
-        next_tag_start = open_tags[i+1].start() if i + 1 < len(open_tags) else len(content)
-        segment = content[start_pos:next_tag_start]
-        
-        closing_match = re.search(r'</FILE>', segment, re.IGNORECASE)
-        if closing_match:
-            file_content = segment[:closing_match.start()]
-            full_tag_end_pos = start_pos + closing_match.end()
-        else:
-            # Fallback for truncated/unclosed tags: take until next tag or end
-            file_content = segment
-            full_tag_end_pos = next_tag_start
-            logger.warning(f"[AIBOT_FILE] Tag for {original_filename} was not closed, taking content until end/next tag")
-
-        try:
-            filename = _sanitize_filename(original_filename)
-            logger.info(f"[AIBOT_FILE] Processing generated file: {filename} (original: {original_filename}, {len(file_content)} chars)")
-            
-            # 1. Pre-process and Append raw_context (ensure both local and cloud copies match)
-            mime_type = "text/html" if filename.endswith(".html") or filename.endswith(".htm") else "text/plain"
-            final_content = file_content
-            
-            if raw_context and mime_type == "text/html":
-                import html as html_module
-                import re as re_mod
-                escaped_context = html_module.escape(raw_context)
-                context_section = f'''
-<hr style="margin-top: 40px; border: 1px dashed #ccc;">
-<details style="margin-top: 20px; padding: 15px; background: #1a1a2e; border-radius: 8px;">
-<summary style="cursor: pointer; color: #8b8b9e; font-size: 14px;">
-  📋 原始上下文数据（用于生成本报告的聊天记录）
-</summary>
-<pre style="white-space: pre-wrap; word-wrap: break-word; font-size: 12px; color: #a0a0b0; margin-top: 10px; max-height: 500px; overflow-y: auto;">
-{escaped_context}
-</pre>
-</details>
-'''
-                # Use regex to find LAST tag for correct placement
-                body_matches = list(re_mod.finditer(r'</body>', final_content, re_mod.IGNORECASE))
-                if body_matches:
-                    last_body = body_matches[-1]
-                    final_content = final_content[:last_body.start()] + context_section + final_content[last_body.start():]
-                elif '</html>' in final_content.lower():
-                    html_matches = list(re_mod.finditer(r'</html>', final_content, re_mod.IGNORECASE))
-                    if html_matches:
-                        last_html = html_matches[-1]
-                        final_content = final_content[:last_html.start()] + context_section + final_content[last_html.start():]
-                else:
-                    final_content += context_section
-                logger.info(f"[AIBOT_FILE] Appended raw_context to {filename}")
-
-            # 2. Save to local storage (consistent with fallback logic)
-            file_info = file_manager.save_file_from_bytes(
-                chat_id=chat_id,
-                content=final_content.encode("utf-8"),
-                filename=filename
-            )
-            
-            # 3. Upload to Qiniu (consistent with local content)
-            cloud_url = None
-            cloud_key = None
-            try:
-                upload_res = storage.upload_file(
-                    data=final_content.encode("utf-8"),
-                    filename=filename,
-                    content_type=mime_type
-                )
-                cloud_url = upload_res.url
-                cloud_key = upload_res.key
-                logger.info(f"[AIBOT_FILE] Uploaded to Qiniu: {cloud_url}")
-            except Exception as qiniu_err:
-                logger.error(f"[AIBOT_FILE] Qiniu upload failed: {qiniu_err}")
-                cloud_url = None # ensure fallback to local is clear
-
-            # 3. Save to conversation context (Auditor Refinement)
-            try:
-                # Use file:// prefix for local paths to ensure context manager compatibility
-                final_file_uri = cloud_url or f"file://{file_info.file_path}"
-                context_manager.save_file(
-                    chat_id=chat_id,
-                    sender_id=f"bot_{bot_type}",
-                    sender_name=bot_type,
-                    file_uri=final_file_uri,
-                    filename=filename,
-                    mime_type="text/html" if filename.endswith(".html") else "text/plain",
-                    bot_type=bot_type,
-                    storage_key=cloud_key
-                )
-                logger.info(f"[AIBOT_FILE] Saved generated file to context: {filename}")
-            except Exception as ctx_err:
-                logger.error(f"[AIBOT_FILE] Failed to save to context: {ctx_err}")
-            
-            # Note: WeCom intelligent robot response_url does NOT support file message type
-            # Only text/markdown messages are supported, so we skip file attachment sending
-            # The cloud link in the text response is sufficient
-            logger.info(f"[AIBOT_FILE] File available at cloud link (robot response_url does not support file attachments)")
-            
-            # 5. Final text cleanup (replace the entire tag with info)
-            display_url = cloud_url if cloud_url else "(上传去云端失败，仅保存本地)"
-            
-            # Extract summary: first line of text before the first <FILE> tag
-            summary_text = ""
-            if i == 0:  # Only extract summary for the first file
-                pre_tag_content = content[:match.start()].strip()
-                if pre_tag_content:
-                    # Take only the first line, truncate to 100 chars
-                    first_line = pre_tag_content.split('\n')[0].strip()
-                    if len(first_line) > 100:
-                        summary_text = first_line[:97] + "..."
-                    else:
-                        summary_text = first_line
-                    logger.info(f"[AIBOT_FILE] Extracted summary: {summary_text}")
-            
-            if file_only_mode:
-                # In file_only_mode, return link + summary (with fallback)
-                if summary_text:
-                    return f"📄 云端链接: {display_url}\n✨ {summary_text}"
-                else:
-                    # Fallback description when LLM omits summary
-                    return f"📄 云端链接: {display_url}\n✨ 已生成HTML文件"
-            else:
-                if summary_text:
-                    link_display = f"\n\n✨ {summary_text}\n📄 云端链接: {display_url}"
-                else:
-                    # Fallback description when LLM omits summary
-                    link_display = f"\n\n✨ 已生成HTML文件\n📄 云端链接: {display_url}"
-                cleaned_content = cleaned_content[:match.start()] + link_display + cleaned_content[full_tag_end_pos:]
-            
-        except Exception as e:
-            logger.error(f"[AIBOT_FILE] Error processing file {original_filename}: {e}")
-            
-    return cleaned_content
 
 
 def _handle_prompt_command(
@@ -865,67 +129,67 @@ def _handle_prompt_command(
     
     if command == "help":
         # Show help message with all available commands
-        help_text = """🤖 **AI Bot 使用指南**
+        help_text = """≡ƒñû **AI Bot Σ╜┐τö¿µîçσìù**
 
-**💬 Prompt 管理命令：**
-• `/show_prompt` - 查看当前系统提示词
-• `/set_prompt <内容>` - 自定义系统提示词
-• `/reset_prompt` - 恢复默认系统提示词
+**≡ƒÆ¼ Prompt τ«íτÉåσæ╜Σ╗ñ∩╝Ü**
+ΓÇó `/show_prompt` - µƒÑτ£ïσ╜ôσëìτ│╗τ╗ƒµÅÉτñ║Φ»ì
+ΓÇó `/set_prompt <σåàσ«╣>` - Φç¬σ«ÜΣ╣ëτ│╗τ╗ƒµÅÉτñ║Φ»ì
+ΓÇó `/reset_prompt` - µüóσñìΘ╗ÿΦ«ñτ│╗τ╗ƒµÅÉτñ║Φ»ì
 
-**📄 文件生成命令（支持范围：1d/1w/3h等）：**
-• `/file-html [时间] <描述>` - 自由生成HTML文件
-• `/file-html-daily [时间]` - 生成群聊摘要报告
-• `/file-html-meeting [时间]` - 生成会议纪要
-  示例: `/file-html-daily 1w` (最近1周记录)
-        `/file-html 3h 毒舌总结这三小时消息`
-  💡 *生成的HTML底部包含“原始上下文”用于数据核对*
+**≡ƒôä µûçΣ╗╢τöƒµêÉσæ╜Σ╗ñ∩╝êµö»µîüΦîâσ¢┤∩╝Ü1d/1w/3hτ¡ë∩╝ë∩╝Ü**
+ΓÇó `/file-html [µù╢Θù┤] <µÅÅΦ┐░>` - Φç¬τö▒τöƒµêÉHTMLµûçΣ╗╢
+ΓÇó `/file-html-daily [µù╢Θù┤]` - τöƒµêÉτ╛ñΦüèµæÿΦªüµèÑσæè
+ΓÇó `/file-html-meeting [µù╢Θù┤]` - τöƒµêÉΣ╝ÜΦ««τ║¬Φªü
+  τñ║Σ╛ï: `/file-html-daily 1w` (µ£ÇΦ┐æ1σæ¿Φ«░σ╜ò)
+        `/file-html 3h µ»ÆΦêîµÇ╗τ╗ôΦ┐ÖΣ╕ëσ░Åµù╢µ╢êµü»`
+  ≡ƒÆí *τöƒµêÉτÜäHTMLσ║òΘâ¿σîàσÉ½ΓÇ£σÄƒσºïΣ╕èΣ╕ïµûçΓÇ¥τö¿Σ║Äµò░µì«µá╕σ»╣*
 
-**📁 上下文管理：**
-• `/reset` - 彻底重置所有对话历史和上下文
-• `/new` - 清除临时文件上下文，开始新话题
-• Quote文件消息 - 明确引用特定文件
-• 自动注入：文件生成命令会自动注入群聊归档记录
+**≡ƒôü Σ╕èΣ╕ïµûçτ«íτÉå∩╝Ü**
+ΓÇó `/reset` - σ╜╗σ║òΘçìτ╜«µëÇµ£ëσ»╣Φ»¥σÄåσÅ▓σÆîΣ╕èΣ╕ïµûç
+ΓÇó `/new` - µ╕àΘÖñΣ╕┤µù╢µûçΣ╗╢Σ╕èΣ╕ïµûç∩╝îσ╝Çσºïµû░Φ»¥Θóÿ
+ΓÇó QuoteµûçΣ╗╢µ╢êµü» - µÿÄτí«σ╝òτö¿τë╣σ«ÜµûçΣ╗╢
+ΓÇó Φç¬σè¿µ│¿σàÑ∩╝ÜµûçΣ╗╢τöƒµêÉσæ╜Σ╗ñΣ╝ÜΦç¬σè¿µ│¿σàÑτ╛ñΦüèσ╜ÆµíúΦ«░σ╜ò
 
-**💻 代码库分析：**
-• `/codebase <gitlab_url>` - 设置代码库上下文
-• 之后可直接提问代码相关问题，或发送截图分析
+**≡ƒÆ╗ Σ╗úτáüσ║ôσêåµ₧É∩╝Ü**
+ΓÇó `/codebase <gitlab_url>` - Φ«╛τ╜«Σ╗úτáüσ║ôΣ╕èΣ╕ïµûç
+ΓÇó Σ╣ïσÉÄσÅ»τ¢┤µÄÑµÅÉΘù«Σ╗úτáüτ¢╕σà│Θù«Θóÿ∩╝îµêûσÅæΘÇüµê¬σ¢╛σêåµ₧É
 
-**📝 文件分析能力：**
-• Gemini：✅ 支持大文件原生分析（PDF/DOC等）
-• ChatGPT/Grok：❌ 仅支持图片和文本对话
+**≡ƒô¥ µûçΣ╗╢σêåµ₧ÉΦâ╜σè¢∩╝Ü**
+ΓÇó Gemini∩╝ÜΓ£à µö»µîüσñºµûçΣ╗╢σÄƒτöƒσêåµ₧É∩╝êPDF/DOCτ¡ë∩╝ë
+ΓÇó ChatGPT/Grok∩╝ÜΓ¥î Σ╗àµö»µîüσ¢╛τëçσÆîµûçµ£¼σ»╣Φ»¥
 
-**💡 使用技巧：**
-1. 发送文件后10分钟内无需重复引用
-2. 使用 /new 切换话题，避免旧文件干扰
-3. 审查代码可以使用 /codebase 或发送 Commit URL
-4. 自定义 Prompt 可让AI扮演特定角色（如毒舌、专家等）
+**≡ƒÆí Σ╜┐τö¿µèÇσ╖º∩╝Ü**
+1. σÅæΘÇüµûçΣ╗╢σÉÄ10σêåΘÆƒσåàµùáΘ£ÇΘçìσñìσ╝òτö¿
+2. Σ╜┐τö¿ /new σêçµìóΦ»¥Θóÿ∩╝îΘü┐σàìµùºµûçΣ╗╢σ╣▓µë░
+3. σ«íµƒÑΣ╗úτáüσÅ»Σ╗ÑΣ╜┐τö¿ /codebase µêûσÅæΘÇü Commit URL
+4. Φç¬σ«ÜΣ╣ë Prompt σÅ»Φ«⌐AIµë«µ╝öτë╣σ«ÜΦºÆΦë▓∩╝êσªéµ»ÆΦêîπÇüΣ╕ôσ«╢τ¡ë∩╝ë
 
-有问题随时使用 /help 查看本帮助！"""
+µ£ëΘù«ΘóÿΘÜÅµù╢Σ╜┐τö¿ /help µƒÑτ£ïµ£¼σ╕«σè⌐∩╝ü"""
         return {"content": help_text}
     
     elif command == "show_prompt":
         # Show current prompt
         custom_prompt = context_manager.get_custom_prompt(chat_id, bot_type)
         if custom_prompt:
-            response = f"📝 当前使用的自定义 Prompt:\n\n{custom_prompt}\n\n💡 使用 /reset_prompt 可以恢复默认设置"
+            response = f"≡ƒô¥ σ╜ôσëìΣ╜┐τö¿τÜäΦç¬σ«ÜΣ╣ë Prompt:\n\n{custom_prompt}\n\n≡ƒÆí Σ╜┐τö¿ /reset_prompt σÅ»Σ╗ÑµüóσñìΘ╗ÿΦ«ñΦ«╛τ╜«"
         else:
             default_prompt = BOT_CONFIGS[bot_type]["system_prompt"]
-            response = f"📝 当前使用默认 Prompt:\n\n{default_prompt}\n\n💡 使用 /set_prompt <内容> 可以自定义\n💡 使用 /reset_prompt 可以恢复默认（如果已自定义）"
+            response = f"≡ƒô¥ σ╜ôσëìΣ╜┐τö¿Θ╗ÿΦ«ñ Prompt:\n\n{default_prompt}\n\n≡ƒÆí Σ╜┐τö¿ /set_prompt <σåàσ«╣> σÅ»Σ╗ÑΦç¬σ«ÜΣ╣ë\n≡ƒÆí Σ╜┐τö¿ /reset_prompt σÅ»Σ╗ÑµüóσñìΘ╗ÿΦ«ñ∩╝êσªéµ₧£σ╖▓Φç¬σ«ÜΣ╣ë∩╝ë"
         return {"content": response}
     
     elif command == "set_prompt":
         # Set custom prompt
         if not args or len(args.strip()) < 10:
-            return {"content": "❌ 请提供有效的 prompt 内容\n\n用法：/set_prompt 你是一个专业的Python开发专家..."}
+            return {"content": "Γ¥î Φ»╖µÅÉΣ╛¢µ£ëµòêτÜä prompt σåàσ«╣\n\nτö¿µ│ò∩╝Ü/set_prompt Σ╜áµÿ»Σ╕ÇΣ╕¬Σ╕ôΣ╕ÜτÜäPythonσ╝ÇσÅæΣ╕ôσ«╢..."}
         
         if len(args) > 2000:
-            return {"content": "❌ Prompt 内容过长，请限制在 2000 字符以内"}
+            return {"content": "Γ¥î Prompt σåàσ«╣Φ┐çΘò┐∩╝îΦ»╖ΘÖÉσê╢σ£¿ 2000 σ¡ùτ¼ªΣ╗Ñσåà"}
         
         success = context_manager.set_custom_prompt(chat_id, user_id, bot_type, args.strip())
         if success:
-            response = f"✅ 已设置自定义 Prompt\n\n预览:\n{args.strip()[:200]}{'...' if len(args) > 200 else ''}\n\n💡 使用 /show_prompt 查看完整内容"
+            response = f"Γ£à σ╖▓Φ«╛τ╜«Φç¬σ«ÜΣ╣ë Prompt\n\nΘóäΦºê:\n{args.strip()[:200]}{'...' if len(args) > 200 else ''}\n\n≡ƒÆí Σ╜┐τö¿ /show_prompt µƒÑτ£ïσ«îµò┤σåàσ«╣"
         else:
-            response = "❌ 设置失败，请稍后重试"
+            response = "Γ¥î Φ«╛τ╜«σñ▒Φ┤Ñ∩╝îΦ»╖τ¿ìσÉÄΘçìΦ»ò"
         return {"content": response}
     
     elif command == "reset_prompt":
@@ -933,9 +197,9 @@ def _handle_prompt_command(
         success = context_manager.delete_custom_prompt(chat_id, bot_type)
         default_prompt = BOT_CONFIGS[bot_type]["system_prompt"]
         if success:
-            response = f"✅ 已恢复默认 Prompt\n\n{default_prompt[:200]}{'...' if len(default_prompt) > 200 else ''}"
+            response = f"Γ£à σ╖▓µüóσñìΘ╗ÿΦ«ñ Prompt\n\n{default_prompt[:200]}{'...' if len(default_prompt) > 200 else ''}"
         else:
-            response = "❌ 重置失败，或当前已在使用默认 Prompt"
+            response = "Γ¥î Θçìτ╜«σñ▒Φ┤Ñ∩╝îµêûσ╜ôσëìσ╖▓σ£¿Σ╜┐τö¿Θ╗ÿΦ«ñ Prompt"
         return {"content": response}
     
     elif command == "new":
@@ -944,12 +208,12 @@ def _handle_prompt_command(
             # Clear file contexts for this chat
             success = context_manager.clear_file_context(chat_id)
             if success:
-                response = "✅ 已清除文件上下文，开始新对话\n\n💡 之前的文件将不再自动使用，如需引用请重新发送或 Quote"
+                response = "Γ£à σ╖▓µ╕àΘÖñµûçΣ╗╢Σ╕èΣ╕ïµûç∩╝îσ╝Çσºïµû░σ»╣Φ»¥\n\n≡ƒÆí Σ╣ïσëìτÜäµûçΣ╗╢σ░åΣ╕ìσåìΦç¬σè¿Σ╜┐τö¿∩╝îσªéΘ£Çσ╝òτö¿Φ»╖Θçìµû░σÅæΘÇüµêû Quote"
             else:
-                response = "✅ 已清除上下文\n\n💡 当前没有活跃的文件上下文"
+                response = "Γ£à σ╖▓µ╕àΘÖñΣ╕èΣ╕ïµûç\n\n≡ƒÆí σ╜ôσëìµ▓íµ£ëµ┤╗Φ╖âτÜäµûçΣ╗╢Σ╕èΣ╕ïµûç"
         except Exception as e:
             logger.error(f"[PROMPT_CMD] Failed to clear context: {e}")
-            response = "❌ 清除失败，请稍后重试"
+            response = "Γ¥î µ╕àΘÖñσñ▒Φ┤Ñ∩╝îΦ»╖τ¿ìσÉÄΘçìΦ»ò"
         return {"content": response}
     
     elif command == "reset":
@@ -976,9 +240,9 @@ def _handle_prompt_command(
             
             if success:
                 response = (
-                    f"✅ 已重置 {bot_type} 的对话上下文\n\n"
-                    f"💡 历史记录已保留但不再被引用。\n"
-                    f"📌 现在是一个全新的开始！"
+                    f"Γ£à σ╖▓Θçìτ╜« {bot_type} τÜäσ»╣Φ»¥Σ╕èΣ╕ïµûç\n\n"
+                    f"≡ƒÆí σÄåσÅ▓Φ«░σ╜òσ╖▓Σ┐¥τòÖΣ╜åΣ╕ìσåìΦó½σ╝òτö¿πÇé\n"
+                    f"≡ƒôî τÄ░σ£¿µÿ»Σ╕ÇΣ╕¬σà¿µû░τÜäσ╝Çσºï∩╝ü"
                 )
                 if args.strip():
                     # Combined command: reset + question
@@ -987,10 +251,10 @@ def _handle_prompt_command(
                         "continue_with_question": args.strip()
                     }
             else:
-                response = "❌ 重置失败，请稍后重试"
+                response = "Γ¥î Θçìτ╜«σñ▒Φ┤Ñ∩╝îΦ»╖τ¿ìσÉÄΘçìΦ»ò"
         except Exception as e:
             logger.error(f"[PROMPT_CMD] Failed to reset context: {e}")
-            response = "❌ 重置失败，请稍后重试"
+            response = "Γ¥î Θçìτ╜«σñ▒Φ┤Ñ∩╝îΦ»╖τ¿ìσÉÄΘçìΦ»ò"
         return {"content": response}
     
     elif command == "codebase":
@@ -998,10 +262,10 @@ def _handle_prompt_command(
         # Supports: /codebase <url> [optional question]
         if not args.strip():
             response = (
-                "❌ 用法: `/codebase <gitlab_url> [问题]`\n\n"
-                "示例:\n"
+                "Γ¥î τö¿µ│ò: `/codebase <gitlab_url> [Θù«Θóÿ]`\n\n"
+                "τñ║Σ╛ï:\n"
                 "- `/codebase https://gitlab.example.com/team/myproject`\n"
-                "- `/codebase https://gitlab.example.com/team/myproject 登录功能在哪里？`"
+                "- `/codebase https://gitlab.example.com/team/myproject τÖ╗σ╜òσèƒΦâ╜σ£¿σô¬Θçî∩╝ƒ`"
             )
             return {"content": response}
         
@@ -1062,7 +326,7 @@ def _handle_prompt_command(
         # If there's an inline question, return it for further processing
         if inline_question:
             return {
-                "content": f"🔍 正在分析 `{project_path}` 代码库 (分支: `{branch}`)...",
+                "content": f"≡ƒöì µ¡úσ£¿σêåµ₧É `{project_path}` Σ╗úτáüσ║ô (σêåµö»: `{branch}`)...",
                 "continue_with_question": inline_question,
                 "project_path": project_path,
                 "branch": branch
@@ -1070,13 +334,13 @@ def _handle_prompt_command(
         
         # No question, just confirm context set
         response = (
-            f"✅ 已设置代码库上下文: `{project_path}`\n"
-            f"📌 当前分支: `{branch}`\n\n"
-            f"现在你可以直接提问，例如:\n"
-            f"- \"这些表名在哪些文件中出现过？\"\n"
-            f"- \"creditor_code 字段是在哪里处理的？\"\n"
-            f"- \"项目的原始权益人判断逻辑在哪里？\"\n\n"
-            f"_提示: 发送截图也可以分析代码问题_"
+            f"Γ£à σ╖▓Φ«╛τ╜«Σ╗úτáüσ║ôΣ╕èΣ╕ïµûç: `{project_path}`\n"
+            f"≡ƒôî σ╜ôσëìσêåµö»: `{branch}`\n\n"
+            f"τÄ░σ£¿Σ╜áσÅ»Σ╗Ñτ¢┤µÄÑµÅÉΘù«∩╝îΣ╛ïσªé:\n"
+            f"- \"Φ┐ÖΣ║¢Φí¿σÉìσ£¿σô¬Σ║¢µûçΣ╗╢Σ╕¡σç║τÄ░Φ┐ç∩╝ƒ\"\n"
+            f"- \"creditor_code σ¡ùµ«╡µÿ»σ£¿σô¬ΘçîσñäτÉåτÜä∩╝ƒ\"\n"
+            f"- \"Θí╣τ¢«τÜäσÄƒσºïµ¥âτ¢èΣ║║σêñµû¡ΘÇ╗Φ╛æσ£¿σô¬Θçî∩╝ƒ\"\n\n"
+            f"_µÅÉτñ║: σÅæΘÇüµê¬σ¢╛Σ╣ƒσÅ»Σ╗Ñσêåµ₧ÉΣ╗úτáüΘù«Θóÿ_"
         )
         return {"content": response}
     
@@ -1097,7 +361,7 @@ def _handle_prompt_command(
                 logger.info(f"[FILE_CMD] /file-html detected time range: {time_range}")
         
         if not user_request or len(user_request.strip()) < 2:
-            return {"content": "❌ 请提供生成需求\n\n用法：/file-html 制作一个登录页面\n      /file-html 1w 总结本周的对话"}
+            return {"content": "Γ¥î Φ»╖µÅÉΣ╛¢τöƒµêÉΘ£Çµ▒é\n\nτö¿µ│ò∩╝Ü/file-html σê╢Σ╜£Σ╕ÇΣ╕¬τÖ╗σ╜òΘí╡Θ¥ó\n      /file-html 1w µÇ╗τ╗ôµ£¼σæ¿τÜäσ»╣Φ»¥"}
         
         return {
             "file_output_mode": True,
@@ -1113,14 +377,14 @@ def _handle_prompt_command(
         # Supports time range: /file-html-daily [2d|3d|1w] [custom prompt]
         import re
         time_range = "last_24h"  # Default
-        user_prompt = args.strip() if args and args.strip() else "请根据群聊记录生成一份摘要报告"
+        user_prompt = args.strip() if args and args.strip() else "Φ»╖µá╣µì«τ╛ñΦüèΦ«░σ╜òτöƒµêÉΣ╕ÇΣ╗╜µæÿΦªüµèÑσæè"
         
         # Check if first arg is a time range pattern (e.g., 2d, 1w, 3d)
         if args:
             parts = args.strip().split(maxsplit=1)
             if parts and re.match(r"^\d+[dwh]$", parts[0].lower()):
                 time_range = parts[0].lower()
-                user_prompt = parts[1] if len(parts) > 1 else "请根据群聊记录生成一份摘要报告"
+                user_prompt = parts[1] if len(parts) > 1 else "Φ»╖µá╣µì«τ╛ñΦüèΦ«░σ╜òτöƒµêÉΣ╕ÇΣ╗╜µæÿΦªüµèÑσæè"
                 logger.info(f"[FILE_CMD] Detected time range: {time_range}")
         
         return {
@@ -1137,14 +401,14 @@ def _handle_prompt_command(
         # Supports time range: /file-html-meeting [1d|2d|1w] [custom prompt]
         import re
         time_range = "last_24h"  # Default
-        user_prompt = args.strip() if args and args.strip() else "请根据群聊内容整理一份会议纪要"
+        user_prompt = args.strip() if args and args.strip() else "Φ»╖µá╣µì«τ╛ñΦüèσåàσ«╣µò┤τÉåΣ╕ÇΣ╗╜Σ╝ÜΦ««τ║¬Φªü"
         
         # Check if first arg is a time range pattern
         if args:
             parts = args.strip().split(maxsplit=1)
             if parts and re.match(r"^\d+[dwh]$", parts[0].lower()):
                 time_range = parts[0].lower()
-                user_prompt = parts[1] if len(parts) > 1 else "请根据群聊内容整理一份会议纪要"
+                user_prompt = parts[1] if len(parts) > 1 else "Φ»╖µá╣µì«τ╛ñΦüèσåàσ«╣µò┤τÉåΣ╕ÇΣ╗╜Σ╝ÜΦ««τ║¬Φªü"
                 logger.info(f"[FILE_CMD] /file-html-meeting detected time range: {time_range}")
         
         return {
@@ -1352,13 +616,13 @@ async def _call_llm_async(
                         except Exception as e:
                             logger.error(f"[CODEBASE_CMD] Inline QA failed: {e}")
                             if stream_id in _stream_tasks:
-                                _stream_tasks[stream_id]["content"] = f"❌ 代码分析失败: {e}"
+                                _stream_tasks[stream_id]["content"] = f"Γ¥î Σ╗úτáüσêåµ₧Éσñ▒Φ┤Ñ: {e}"
                                 _stream_tasks[stream_id]["finished"] = True
                                 _stream_tasks[stream_id]["completed_at"] = time.time()
                             return
                     else:
                         if stream_id in _stream_tasks:
-                            _stream_tasks[stream_id]["content"] = "❌ GITLAB_TOKEN 未配置"
+                            _stream_tasks[stream_id]["content"] = "Γ¥î GITLAB_TOKEN µ£¬Θàìτ╜«"
                             _stream_tasks[stream_id]["finished"] = True
                             _stream_tasks[stream_id]["completed_at"] = time.time()
                         return
@@ -1398,7 +662,7 @@ async def _call_llm_async(
                     # Generic command response (e.g., /help, /show_prompt)
                     # Update status and finish
                     if stream_id in _stream_tasks:
-                        _stream_tasks[stream_id]["content"] = cmd_result.get("content", "指令已执行")
+                        _stream_tasks[stream_id]["content"] = cmd_result.get("content", "µîçΣ╗ñσ╖▓µëºΦíî")
                         _stream_tasks[stream_id]["finished"] = True
                         _stream_tasks[stream_id]["completed_at"] = time.time()
                     
@@ -1407,7 +671,7 @@ async def _call_llm_async(
         except Exception as e:
             logger.exception(f"[AIBOT_CMD_ERR] Failed to process command: {e}")
             if stream_id in _stream_tasks:
-                _stream_tasks[stream_id]["content"] = f"❌ 指令执行异常: {e}"
+                _stream_tasks[stream_id]["content"] = f"Γ¥î µîçΣ╗ñµëºΦíîσ╝éσ╕╕: {e}"
                 _stream_tasks[stream_id]["finished"] = True
                 _stream_tasks[stream_id]["completed_at"] = time.time()
             return
@@ -1435,20 +699,20 @@ async def _call_llm_async(
     gitlab_pattern = r"(https?://)([^\s/]+)/([^\s]+)/-/commit/([a-fA-F0-9]{7,40})"
     gitlab_match = re.search(gitlab_pattern, content_stripped, re.IGNORECASE)
     
-    # Trigger if URL found and content contains "review" or "审查", or if it's JUST the URL
+    # Trigger if URL found and content contains "review" or "σ«íµƒÑ", or if it's JUST the URL
     # But NOT if negative keywords are present
     has_positive_keyword = (
         "review" in content_stripped.lower() 
-        or "审查" in content_stripped
-        or "审核" in content_stripped
-        or "检查" in content_stripped
-        or "看看" in content_stripped
-        or "帮我看" in content_stripped
+        or "σ«íµƒÑ" in content_stripped
+        or "σ«íµá╕" in content_stripped
+        or "µúÇµƒÑ" in content_stripped
+        or "τ£ïτ£ï" in content_stripped
+        or "σ╕«µêæτ£ï" in content_stripped
     )
     has_negative_keyword = (
-        "不要审查" in content_stripped
-        or "别审查" in content_stripped
-        or "不用审查" in content_stripped
+        "Σ╕ìΦªüσ«íµƒÑ" in content_stripped
+        or "σê½σ«íµƒÑ" in content_stripped
+        or "Σ╕ìτö¿σ«íµƒÑ" in content_stripped
         or "don't review" in content_stripped.lower()
         or "no review" in content_stripped.lower()
     )
@@ -1477,7 +741,7 @@ async def _call_llm_async(
             
             # Update status to "Reviewing"
             if stream_id in _stream_tasks:
-                _stream_tasks[stream_id]["content"] = "🔍 正在进行多Agent代码审查，请稍候...\n(架构/性能/测试专家正在分析)"
+                _stream_tasks[stream_id]["content"] = "≡ƒöì µ¡úσ£¿Φ┐¢ΦíîσñÜAgentΣ╗úτáüσ«íµƒÑ∩╝îΦ»╖τ¿ìσÇÖ...\n(µ₧╢µ₧ä/µÇºΦâ╜/µ╡ïΦ»òΣ╕ôσ«╢µ¡úσ£¿σêåµ₧É)"
             
             # Get token from env
             gitlab_token = os.getenv("GITLAB_TOKEN")
@@ -1496,7 +760,7 @@ async def _call_llm_async(
             loop = asyncio.get_running_loop()
             result = await loop.run_in_executor(None, flow.kickoff)
             
-            final_response = f"✅ 代码审查完成\n\n{result}"
+            final_response = f"Γ£à Σ╗úτáüσ«íµƒÑσ«îµêÉ\n\n{result}"
             
             # Update task
             if stream_id in _stream_tasks:
@@ -1508,7 +772,7 @@ async def _call_llm_async(
             
         except Exception as e:
             logger.error(f"[GITLAB_REVIEW] Error during review: {e}")
-            error_msg = f"❌ 代码审查失败: {str(e)}"
+            error_msg = f"Γ¥î Σ╗úτáüσ«íµƒÑσñ▒Φ┤Ñ: {str(e)}"
             if stream_id in _stream_tasks:
                 _stream_tasks[stream_id]["content"] = error_msg
                 _stream_tasks[stream_id]["finished"] = True
@@ -1537,42 +801,42 @@ async def _call_llm_async(
             if template_name == "daily":
                 # Daily summary template - LLM outputs structured JSON
                 file_instruction = (
-                    "\n\n[重要：JSON结构化输出模式 - 每日摘要报告]\n"
-                    "请分析群聊内容并输出以下JSON格式（不要包含其他内容）：\n"
+                    "\n\n[ΘçìΦªü∩╝ÜJSONτ╗ôµ₧äσîûΦ╛ôσç║µ¿íσ╝Å - µ»ÅµùÑµæÿΦªüµèÑσæè]\n"
+                    "Φ»╖σêåµ₧Éτ╛ñΦüèσåàσ«╣σ╣╢Φ╛ôσç║Σ╗ÑΣ╕ïJSONµá╝σ╝Å∩╝êΣ╕ìΦªüσîàσÉ½σà╢Σ╗ûσåàσ«╣∩╝ë∩╝Ü\n"
                     "```json\n"
                     "{\n"
                     '  "topics": [\n'
-                    '    {"title": "讨论主题", "summary": "详细摘要", "sentiment": "positive/neutral/negative"}\n'
+                    '    {"title": "Φ«¿Φ«║Σ╕╗Θóÿ", "summary": "Φ»ªτ╗åµæÿΦªü", "sentiment": "positive/neutral/negative"}\n'
                     "  ],\n"
                     '  "todos": [\n'
-                    '    {"task": "待办事项", "assignee": "@负责人"}\n'
+                    '    {"task": "σ╛àσè₧Σ║ïΘí╣", "assignee": "@Φ┤ƒΦ┤úΣ║║"}\n'
                     "  ],\n"
-                    '  "insights": ["关键见解1", "关键见解2"],\n'
+                    '  "insights": ["σà│Θö«ΦºüΦºú1", "σà│Θö«ΦºüΦºú2"],\n'
                     '  "participant_count": 5\n'
                     "}\n"
                     "```\n"
-                    "必须输出有效的JSON，不要添加任何解释或markdown代码块之外的内容。"
+                    "σ┐àΘí╗Φ╛ôσç║µ£ëµòêτÜäJSON∩╝îΣ╕ìΦªüµ╖╗σèáΣ╗╗Σ╜òΦºúΘçèµêûmarkdownΣ╗úτáüσ¥ùΣ╣ïσñûτÜäσåàσ«╣πÇé"
                 )
                 logger.info(f"[FILE_OUTPUT] Added daily template JSON schema to system prompt")
             elif template_name == "meeting":
                 # Meeting notes template - LLM outputs structured JSON
                 file_instruction = (
-                    "\n\n[重要：JSON结构化输出模式 - 会议纪要]\n"
-                    "请分析群聊内容并输出以下JSON格式（不要包含其他内容）：\n"
+                    "\n\n[ΘçìΦªü∩╝ÜJSONτ╗ôµ₧äσîûΦ╛ôσç║µ¿íσ╝Å - Σ╝ÜΦ««τ║¬Φªü]\n"
+                    "Φ»╖σêåµ₧Éτ╛ñΦüèσåàσ«╣σ╣╢Φ╛ôσç║Σ╗ÑΣ╕ïJSONµá╝σ╝Å∩╝êΣ╕ìΦªüσîàσÉ½σà╢Σ╗ûσåàσ«╣∩╝ë∩╝Ü\n"
                     "```json\n"
                     "{\n"
-                    '  "title": "会议主题",\n'
-                    '  "attendees": ["张三", "李四", "王五"],\n'
+                    '  "title": "Σ╝ÜΦ««Σ╕╗Θóÿ",\n'
+                    '  "attendees": ["σ╝áΣ╕ë", "µ¥Äσ¢¢", "τÄïΣ║ö"],\n'
                     '  "agenda": [\n'
-                    '    {"item": "议程项目", "discussion": "讨论内容", "decisions": ["决定1"]}\n'
+                    '    {"item": "Φ««τ¿ïΘí╣τ¢«", "discussion": "Φ«¿Φ«║σåàσ«╣", "decisions": ["σå│σ«Ü1"]}\n'
                     "  ],\n"
                     '  "action_items": [\n'
-                    '    {"task": "行动项", "owner": "负责人", "due": "截止日期"}\n'
+                    '    {"task": "Φíîσè¿Θí╣", "owner": "Φ┤ƒΦ┤úΣ║║", "due": "µê¬µ¡óµùÑµ£ƒ"}\n'
                     "  ],\n"
-                    '  "next_meeting": "下次会议时间"\n'
+                    '  "next_meeting": "Σ╕ïµ¼íΣ╝ÜΦ««µù╢Θù┤"\n'
                     "}\n"
                     "```\n"
-                    "必须输出有效的JSON，不要添加任何解释或markdown代码块之外的内容。"
+                    "σ┐àΘí╗Φ╛ôσç║µ£ëµòêτÜäJSON∩╝îΣ╕ìΦªüµ╖╗σèáΣ╗╗Σ╜òΦºúΘçèµêûmarkdownΣ╗úτáüσ¥ùΣ╣ïσñûτÜäσåàσ«╣πÇé"
                 )
                 logger.info(f"[FILE_OUTPUT] Added meeting template JSON schema to system prompt")
             else:
@@ -1585,7 +849,7 @@ async def _call_llm_async(
                     "3. STYLING: Use Tailwind CSS CDN for all styling.\n"
                     "Failure to use the <FILE> tags will break the system integration. This is a mandatory technical requirement.\n\n"
                     "Example Output:\n"
-                    "生成了一份风格前卫的分析报告。\n"
+                    "τöƒµêÉΣ║åΣ╕ÇΣ╗╜ΘúÄµá╝σëìσì½τÜäσêåµ₧ÉµèÑσæèπÇé\n"
                     "<FILE name=\"report.html\"><html>...</html></FILE>"
                 )
                 logger.info(f"[FILE_OUTPUT] Added highly authoritative free-form HTML instruction to system prompt")
@@ -1643,19 +907,19 @@ async def _call_llm_async(
         # If URLs were fetched, prepend their content to the user's message context
         if url_contents:
             url_context = "\n\n---\n\n".join([
-                f"**网页内容来自 {uc['url']}:**\n\n{uc['content']}" 
+                f"**τ╜æΘí╡σåàσ«╣µ¥ÑΦç¬ {uc['url']}:**\n\n{uc['content']}" 
                 for uc in url_contents
             ])
             # Prepend URL content to the latest user message
             if messages and messages[-1]["role"] == "user":
-                messages[-1]["content"] = f"{url_context}\n\n---\n\n用户问题：{messages[-1]['content']}"
+                messages[-1]["content"] = f"{url_context}\n\n---\n\nτö¿µê╖Θù«Θóÿ∩╝Ü{messages[-1]['content']}"
                 logger.info(f"[URL_CTX] Added {len(url_contents)} URL(s) content to context")
 
         # Inject Archive Context if available
         if archive_context and messages and messages[-1]["role"] == "user":
             messages[-1]["content"] = (
-                f"### 今日群聊记录摘要 (仅供参考):\n\n{archive_context}\n\n"
-                f"---\n\n基于以上对话背景，请按照要求执行：{messages[-1]['content']}"
+                f"### Σ╗èµùÑτ╛ñΦüèΦ«░σ╜òµæÿΦªü (Σ╗àΣ╛¢σÅéΦÇâ):\n\n{archive_context}\n\n"
+                f"---\n\nσƒ║Σ║ÄΣ╗ÑΣ╕èσ»╣Φ»¥ΦâîµÖ»∩╝îΦ»╖µîëτàºΦªüµ▒éµëºΦíî∩╝Ü{messages[-1]['content']}"
             )
 
         # 1. Quoted File (Specific)
@@ -1715,7 +979,7 @@ async def _call_llm_async(
             try:
                 # Format history for file chat (since chat_with_file takes text prompt)
                 history_text = "\n\n".join(
-                    [f"{'用户' if m['role']=='user' else '模型'}: {m['content']}" for m in messages]
+                    [f"{'τö¿µê╖' if m['role']=='user' else 'µ¿íσ₧ï'}: {m['content']}" for m in messages]
                 )
                 
                 # Check if file context is inline text or cloud URI
@@ -1726,9 +990,9 @@ async def _call_llm_async(
                     # Inline Text Context
                     raw_content = file_uri[8:]
                     full_prompt = (
-                        f"对话历史:\n{history_text}\n\n"
-                        f"(注意：用户之前上传了文件 {filename}，内容如下，请基于此回答):\n"
-                        f"```\n{raw_content}\n```\n\n用户新问题: {messages[-1]['content']}" # Last msg is current query
+                        f"σ»╣Φ»¥σÄåσÅ▓:\n{history_text}\n\n"
+                        f"(µ│¿µäÅ∩╝Üτö¿µê╖Σ╣ïσëìΣ╕èΣ╝áΣ║åµûçΣ╗╢ {filename}∩╝îσåàσ«╣σªéΣ╕ï∩╝îΦ»╖σƒ║Σ║Äµ¡ñσ¢₧τ¡ö):\n"
+                        f"```\n{raw_content}\n```\n\nτö¿µê╖µû░Θù«Θóÿ: {messages[-1]['content']}" # Last msg is current query
                         # Note: messages[-1] is already in history_text, but emphasizing it here helps
                     )
                     
@@ -1743,7 +1007,7 @@ async def _call_llm_async(
                     # Inline Base64 Context (PDF/Images)
                     raw_b64 = file_uri[7:]
                     file_bytes = base64.b64decode(raw_b64)
-                    full_prompt = f"对话历史:\n{history_text}\n\n(注意：用户之前上传了文件 {filename}，请基于该文件回答)"
+                    full_prompt = f"σ»╣Φ»¥σÄåσÅ▓:\n{history_text}\n\n(µ│¿µäÅ∩╝Üτö¿µê╖Σ╣ïσëìΣ╕èΣ╝áΣ║åµûçΣ╗╢ {filename}∩╝îΦ»╖σƒ║Σ║ÄΦ»ÑµûçΣ╗╢σ¢₧τ¡ö)"
                     
                     # Fetch limited history for file analysis to avoid hallucinating old results
                     context = context_manager.get_context(chat_id, bot_type=bot_type)
@@ -1774,7 +1038,7 @@ async def _call_llm_async(
                     # For Qiniu/S3, we might need to download it first if the LLM doesn't support direct URLs
                     # Or for Gemini, if it's already a Gemini File API URI, use it directly.
                     
-                    full_prompt = f"对话历史:\n{history_text}\n\n(注意：用户之前上传了文件 {filename}，请基于该文件回答)"
+                    full_prompt = f"σ»╣Φ»¥σÄåσÅ▓:\n{history_text}\n\n(µ│¿µäÅ∩╝Üτö¿µê╖Σ╣ïσëìΣ╕èΣ╝áΣ║åµûçΣ╗╢ {filename}∩╝îΦ»╖σƒ║Σ║ÄΦ»ÑµûçΣ╗╢σ¢₧τ¡ö)"
                     
                     is_gemini_uri = file_uri.startswith("https://generativelanguage.googleapis.com")
                     
@@ -1856,7 +1120,7 @@ async def _call_llm_async(
                 logger.warning(f"[AIBOT_CTX] Failed to use file context (fallback to text): {e}")
                 use_file_context = False
                 # Auditor Suggestion: If file context was expected but failed, notify the user.
-                context_error_hint = f"\n\n(注：无法加载历史图片/文件，本次回答仅基于文字记录。错误：{str(e)[:50]}...)"
+                context_error_hint = f"\n\n(µ│¿∩╝Üµùáµ│òσèáΦ╜╜σÄåσÅ▓σ¢╛τëç/µûçΣ╗╢∩╝îµ£¼µ¼íσ¢₧τ¡öΣ╗àσƒ║Σ║Äµûçσ¡ùΦ«░σ╜òπÇéΘöÖΦ»»∩╝Ü{str(e)[:50]}...)"
 
         if not use_file_context:
             # Run standard LLM call
@@ -1909,14 +1173,14 @@ async def _call_llm_async(
         logger.error(f"[AIBOT_LLM_ERR] bot={bot_type} error={e}")
         if stream_id in _stream_tasks:
             _stream_tasks[stream_id]["content"] = (
-                f"抱歉,AI服务暂时不可用: {str(e)[:50]}"
+                f"µè▒µ¡ë,AIµ£ìσèíµÜéµù╢Σ╕ìσÅ»τö¿: {str(e)[:50]}"
             )
             _stream_tasks[stream_id]["finished"] = True
             _stream_tasks[stream_id]["error"] = True
     except Exception as e:
         logger.exception(f"[AIBOT_ERR] bot={bot_type} error={e}")
         if stream_id in _stream_tasks:
-            _stream_tasks[stream_id]["content"] = "抱歉,发生了意外错误,请稍后重试。"
+            _stream_tasks[stream_id]["content"] = "µè▒µ¡ë,σÅæτöƒΣ║åµäÅσñûΘöÖΦ»»,Φ»╖τ¿ìσÉÄΘçìΦ»òπÇé"
             _stream_tasks[stream_id]["finished"] = True
             _stream_tasks[stream_id]["error"] = True
 
@@ -2063,7 +1327,7 @@ async def _handle_text_message(
             clean_name = clean_name.split(":")[-1].strip()
             
         # Remove common marks
-        for mark in ["[文件]", "[图片]", "📋", "📄"]:
+        for mark in ["[µûçΣ╗╢]", "[σ¢╛τëç]", "≡ƒôï", "≡ƒôä"]:
             clean_name = clean_name.replace(mark, "")
         clean_name = clean_name.strip()
             
@@ -2075,12 +1339,12 @@ async def _handle_text_message(
         if original_content:
             # User has both quote and their own message
             content = (
-                f"[用户引用消息: {quoted_content}]\n\n用户提问: {original_content}"
+                f"[τö¿µê╖σ╝òτö¿µ╢êµü»: {quoted_content}]\n\nτö¿µê╖µÅÉΘù«: {original_content}"
             )
         else:
             # Quote-only: user just referenced something without adding text
             content = (
-                f"用户引用了以下消息并@你，请针对引用内容回复:\n\n{quoted_content}"
+                f"τö¿µê╖σ╝òτö¿Σ║åΣ╗ÑΣ╕ïµ╢êµü»σ╣╢@Σ╜á∩╝îΦ»╖ΘÆêσ»╣σ╝òτö¿σåàσ«╣σ¢₧σñì:\n\n{quoted_content}"
             )
         logger.info(f"[AIBOT_QUOTE] bot={bot_type} quoted={quoted_content[:50]!r}...")
 
@@ -2092,7 +1356,7 @@ async def _handle_text_message(
         )
         stream_id = _generate_stream_id()
         stream_json = _make_text_stream(
-            stream_id, "你好!请问有什么可以帮助你的?", finish=True
+            stream_id, "Σ╜áσÑ╜!Φ»╖Θù«µ£ëΣ╗ÇΣ╣êσÅ»Σ╗Ñσ╕«σè⌐Σ╜áτÜä?", finish=True
         )
         encrypted = _encrypt_response(bot_type, stream_json, nonce, timestamp)
         return Response(content=encrypted, media_type="text/plain")
@@ -2128,7 +1392,7 @@ async def _handle_text_message(
 
     # Store task with initial "thinking" state
     _stream_tasks[stream_id] = {
-        "content": "思考中...",
+        "content": "µÇ¥ΦÇâΣ╕¡...",
         "finished": False,
         "created_at": time.time(),
         "bot_type": bot_type,
@@ -2157,7 +1421,7 @@ async def _handle_text_message(
     )
 
     # Return immediate response with "thinking" status
-    stream_json = _make_text_stream(stream_id, "思考中...", finish=False)
+    stream_json = _make_text_stream(stream_id, "µÇ¥ΦÇâΣ╕¡...", finish=False)
     encrypted = _encrypt_response(bot_type, stream_json, nonce, timestamp)
 
     logger.info(
@@ -2180,7 +1444,7 @@ async def _handle_stream_refresh(
     if not task:
         # Task not found - may be expired or on different worker
         logger.warning(f"[AIBOT_STREAM] bot={bot_type} stream_id={stream_id} not found")
-        stream_json = _make_text_stream(stream_id, "任务已过期,请重新提问", finish=True)
+        stream_json = _make_text_stream(stream_id, "Σ╗╗σèíσ╖▓Φ┐çµ£ƒ,Φ»╖Θçìµû░µÅÉΘù«", finish=True)
         encrypted = _encrypt_response(bot_type, stream_json, nonce, timestamp)
         return Response(content=encrypted, media_type="text/plain")
 
@@ -2223,83 +1487,6 @@ def _cleanup_old_tasks() -> None:
 
     if expired_task_ids:
         logger.debug(f"Cleaned up {len(expired_task_ids)} expired tasks")
-
-
-def _extract_text_from_mixed(data: dict) -> str:
-    """Extract text content from a mixed (image+text) message.
-
-    Mixed messages contain a msg_item list with different content types.
-    We extract all text content and combine it.
-    """
-    text_parts = []
-
-    # Try msg_item array (common mixed message structure)
-    msg_items = data.get("msg_item", data.get("mixed", {}).get("msg_item", []))
-    if isinstance(msg_items, list):
-        for item in msg_items:
-            if isinstance(item, dict):
-                item_type = item.get("msgtype", item.get("type", ""))
-                if item_type == "text":
-                    text_obj = item.get("text", {})
-                    if isinstance(text_obj, dict):
-                        content = text_obj.get("content", "")
-                        if content:
-                            text_parts.append(content)
-                    elif isinstance(text_obj, str):
-                        text_parts.append(text_obj)
-
-    # Also check for top-level text field as fallback
-    if not text_parts:
-        text_data = data.get("text", {})
-        if isinstance(text_data, dict):
-            content = text_data.get("content", "")
-            if content:
-                text_parts.append(content)
-        elif isinstance(text_data, str):
-            text_parts.append(text_data)
-
-    return " ".join(text_parts).strip()
-
-
-def _has_image_in_mixed(data: dict) -> bool:
-    """Check if mixed message contains image content."""
-    msg_items = data.get("msg_item", data.get("mixed", {}).get("msg_item", []))
-    if isinstance(msg_items, list):
-        for item in msg_items:
-            if isinstance(item, dict):
-                item_type = item.get("msgtype", item.get("type", ""))
-                if item_type == "image":
-                    return True
-    return False
-
-
-def _extract_image_urls_from_mixed(data: dict) -> list[str]:
-    """Extract image URLs from mixed message or image message.
-
-    Returns a list of image URLs (encrypted) from the message.
-    """
-    urls = []
-
-    # Check msg_item array (mixed message structure)
-    msg_items = data.get("msg_item", data.get("mixed", {}).get("msg_item", []))
-    if isinstance(msg_items, list):
-        for item in msg_items:
-            if isinstance(item, dict):
-                item_type = item.get("msgtype", item.get("type", ""))
-                if item_type == "image":
-                    image_data = item.get("image", {})
-                    url = image_data.get("url", image_data.get("pic_url", ""))
-                    if url:
-                        urls.append(url)
-
-    # Check top-level image field (image-only message)
-    if not urls:
-        image_data = data.get("image", {})
-        url = image_data.get("url", image_data.get("pic_url", ""))
-        if url:
-            urls.append(url)
-
-    return urls
 
 
 def _upload_image_to_ucs(image_bytes: bytes) -> tuple[str | None, str | None, str, str]:
@@ -2417,11 +1604,11 @@ async def _handle_mixed_message(
     if text_content:
         prompt = text_content
     else:
-        prompt = "请描述这张图片的内容"
+        prompt = "Φ»╖µÅÅΦ┐░Φ┐Öσ╝áσ¢╛τëçτÜäσåàσ«╣"
 
     # If image decryption failed, fall back to text-only
     if not image_base64:
-        error_note = f"\n\n(注: 图片处理失败: {image_error})" if image_error else ""
+        error_note = f"\n\n(µ│¿: σ¢╛τëçσñäτÉåσñ▒Φ┤Ñ: {image_error})" if image_error else ""
         modified_data = data.copy()
         modified_data["text"] = {"content": prompt + error_note}
         modified_data["msgtype"] = "text"
@@ -2468,7 +1655,7 @@ async def _handle_image_message(
     if not image_urls:
         logger.warning(f"[AIBOT_IMAGE] bot={bot_type} no image URL found")
         stream_id = _generate_stream_id()
-        response_text = "收到您的消息，但未找到图片内容。请重新发送图片。"
+        response_text = "µö╢σê░µé¿τÜäµ╢êµü»∩╝îΣ╜åµ£¬µë╛σê░σ¢╛τëçσåàσ«╣πÇéΦ»╖Θçìµû░σÅæΘÇüσ¢╛τëçπÇé"
         _stream_tasks[stream_id] = {
             "content": response_text,
             "finished": True,
@@ -2490,7 +1677,7 @@ async def _handle_image_message(
     if not success:
         logger.error(f"[AIBOT_IMAGE] bot={bot_type} decrypt failed: {result}")
         stream_id = _generate_stream_id()
-        response_text = f"收到您的图片，但处理时出现问题：{result}\n\n请稍后重试，或添加文字说明。"
+        response_text = f"µö╢σê░µé¿τÜäσ¢╛τëç∩╝îΣ╜åσñäτÉåµù╢σç║τÄ░Θù«Θóÿ∩╝Ü{result}\n\nΦ»╖τ¿ìσÉÄΘçìΦ»ò∩╝îµêûµ╖╗σèáµûçσ¡ùΦ»┤µÿÄπÇé"
         _stream_tasks[stream_id] = {
             "content": response_text,
             "finished": True,
@@ -2507,7 +1694,7 @@ async def _handle_image_message(
 
     # Image decrypted successfully
     image_base64 = base64.b64encode(result).decode("utf-8")
-    prompt = "请描述并分析这张图片的内容"
+    prompt = "Φ»╖µÅÅΦ┐░σ╣╢σêåµ₧ÉΦ┐Öσ╝áσ¢╛τëçτÜäσåàσ«╣"
     # Use same stream_id logic to avoid duplicate uploads
     stream_id = _generate_stream_id()
     if wecom_msg_id:
@@ -2564,7 +1751,7 @@ async def _handle_vision_message(
     # Create stream task for tracking
     stream_id = existing_stream_id or _generate_stream_id()
     _stream_tasks[stream_id] = {
-        "content": "正在分析图片...",
+        "content": "µ¡úσ£¿σêåµ₧Éσ¢╛τëç...",
         "finished": False,
         "created_at": time.time(),
         "bot_type": bot_type,
@@ -2634,7 +1821,7 @@ async def _handle_vision_message(
     )
 
     # Return immediate "analyzing" response
-    stream_json = _make_text_stream(stream_id, "正在分析图片...", finish=False)
+    stream_json = _make_text_stream(stream_id, "µ¡úσ£¿σêåµ₧Éσ¢╛τëç...", finish=False)
     encrypted = _encrypt_response(bot_type, stream_json, nonce, timestamp)
 
     logger.info(f"[AIBOT_VISION] bot={bot_type} stream_id={stream_id} analyzing image")
@@ -2734,7 +1921,7 @@ async def _call_vision_llm_async(
         logger.error(f"[AIBOT_VISION_ERR] bot={bot_type} error={e}")
         if stream_id in _stream_tasks:
             _stream_tasks[stream_id]["content"] = (
-                f"抱歉，图片分析服务暂时不可用: {str(e)[:100]}"
+                f"µè▒µ¡ë∩╝îσ¢╛τëçσêåµ₧Éµ£ìσèíµÜéµù╢Σ╕ìσÅ»τö¿: {str(e)[:100]}"
             )
             _stream_tasks[stream_id]["finished"] = True
             _stream_tasks[stream_id]["completed_at"] = time.time()
@@ -2742,435 +1929,8 @@ async def _call_vision_llm_async(
     except Exception as e:
         logger.exception(f"[AIBOT_VISION_ERR] bot={bot_type} unexpected error: {e}")
         if stream_id in _stream_tasks:
-            _stream_tasks[stream_id]["content"] = "图片分析时发生错误，请稍后重试。"
+            _stream_tasks[stream_id]["content"] = "σ¢╛τëçσêåµ₧Éµù╢σÅæτöƒΘöÖΦ»»∩╝îΦ»╖τ¿ìσÉÄΘçìΦ»òπÇé"
             _stream_tasks[stream_id]["finished"] = True
             _stream_tasks[stream_id]["completed_at"] = time.time()
 
 
-def _extract_file_info(data: dict) -> tuple[str | None, str, str]:
-    """Extract file URL, filename and mimetype from message.
-    
-    Returns: (url, filename, mimetype)
-    """
-    # Deep search for filename-like keys
-    def deep_find_filename(obj):
-        if not isinstance(obj, dict):
-            return None
-        # Priority keys
-        for k in ["filename", "name", "title", "file_name"]:
-            if k in obj and obj[k] and isinstance(obj[k], str) and "." in obj[k]:
-                return obj[k]
-        # Recursion
-        for v in obj.values():
-            if isinstance(v, dict):
-                res = deep_find_filename(v)
-                if res: return res
-            elif isinstance(v, list):
-                for item in v:
-                    res = deep_find_filename(item)
-                    if res: return res
-        return None
-
-    filename = deep_find_filename(data)
-    
-    # Try to extract from URL if still unknown
-    url = data.get("url")
-    if not isinstance(url, str):
-        file_obj = data.get("file", {})
-        if isinstance(file_obj, dict):
-            url = file_obj.get("url")
-            
-    if not filename and url:
-        try:
-            from urllib.parse import urlparse
-            path = urlparse(url).path
-            filename = os.path.basename(path)
-            if not "." in filename:
-                filename = None
-        except:
-            pass
-            
-    if not filename:
-        filename = "文档"
-
-    file_data = data.get("file", {})
-    ext = ""
-    if isinstance(file_data, dict):
-        ext = file_data.get("file_ext", "")
-    if not ext:
-        ext = data.get("file_ext", "")
-    
-    if ext and filename != "文档" and not filename.endswith(f".{ext}"):
-        filename = f"{filename}.{ext}"
-        
-    logger.info(f"[AIBOT_FILE_EXTRACT] Deep search filename={filename} ext={ext}")
-        
-    mime_type, _ = mimetypes.guess_type(filename) if filename != "文档" else (None, None)
-    if not mime_type:
-        mime_type = "application/octet-stream"
-        
-    return url, filename, mime_type
-
-
-async def _handle_file_message(
-    bot_type: str,
-    data: dict,
-    nonce: str,
-    timestamp: str,
-    response_url: str | None = None,
-) -> Response:
-    """Handle file messages (PDF, Excel, Word).
-    
-    Downloads decrypted file and sends to Gemini for analysis.
-    For other bots, returns a friendly 'not supported' message.
-    """
-    _cleanup_old_tasks()
-    file_output_mode = False
-
-    # Extract user info
-    from_data = data.get("from", {})
-    user_id = from_data.get("user_id", from_data.get("userid", "unknown"))
-    user_name = from_data.get("name", from_data.get("alias", user_id))
-    
-    wecom_msg_id = _extract_msg_id(data)
-    _, quoted_msg_id = _extract_quote_content(data)
-    if wecom_msg_id and wecom_msg_id in _processed_messages:
-        existing_stream_id = _processed_messages[wecom_msg_id]
-        task = _stream_tasks.get(existing_stream_id)
-        if task:
-            logger.info(f"[AIBOT_DEDUP] bot={bot_type} file msg_id={wecom_msg_id} returning cached response")
-            stream_json = _make_text_stream(existing_stream_id, task["content"], task["finished"])
-            encrypted = _encrypt_response(bot_type, stream_json, nonce, timestamp)
-            return Response(content=encrypted, media_type="text/plain")
-    stream_id = _generate_stream_id()
-
-    # Extract file info
-    url, filename, mime_type = _extract_file_info(data)
-    
-    # Detect report intent for file flow (check filename AND message content/caption)
-    text_ctx = f"{filename} {data.get('content', '')}"
-    is_report_request = _detect_daily_report_intent(text_ctx)
-    
-    logger.info(f"[AIBOT_FILE] bot={bot_type} user={user_name} file={filename} mime={mime_type} raw_data={json.dumps(data, ensure_ascii=False)}")
-    
-    chat_id = _extract_chat_id(data, user_id)
-    
-    # Check bot support
-    config = BOT_CONFIGS[bot_type]
-    provider = config.get("provider", "openai")
-
-    # Support check: All bots now support at least PDF/Text via fallback
-    # But Gemini is still the preferred provider for native multi-modal docs.
-    if provider != "gemini" and mime_type != "application/pdf" and not mime_type.startswith("text/"):
-        response_text = (
-            f"收到文件：{filename}\n\n"
-            f"抱歉，目前的“大文档原生分析”能力仅在 Gemini 系列机器人上可用。{bot_type} 目前仅额外支持 PDF 和 纯文本分析。"
-        )
-        _stream_tasks[stream_id] = {
-            "content": response_text,
-            "finished": True,
-            "created_at": time.time(),
-            "bot_type": bot_type,
-            "chat_id": chat_id,
-            "user_id": user_id,
-        }
-        stream_json = _make_text_stream(stream_id, response_text, finish=True)
-        return Response(content=_encrypt_response(bot_type, stream_json, nonce, timestamp), media_type="text/plain")
-
-    if not url:
-        logger.warning(f"[AIBOT_FILE] bot={bot_type} No file URL found in {data}")
-        response_text = f"收到文件：{filename}\n\n无法获取文件下载链接，请稍后重试。"
-        _stream_tasks[stream_id] = {
-            "content": response_text,
-            "finished": True,
-            "created_at": time.time(),
-            "bot_type": bot_type,
-            "chat_id": chat_id,
-            "user_id": user_id,
-        }
-        stream_json = _make_text_stream(stream_id, response_text, finish=True)
-        return Response(content=_encrypt_response(bot_type, stream_json, nonce, timestamp), media_type="text/plain")
-        
-    # Start processing task
-    if wecom_msg_id:
-        _processed_messages[wecom_msg_id] = stream_id
-        
-    _stream_tasks[stream_id] = {
-        "content": f"正在下载并分析文档：{filename} ...",
-        "finished": False,
-        "created_at": time.time(),
-        "bot_type": bot_type,
-        "chat_id": chat_id,
-        "user_id": user_id,
-        "wecom_msg_id": wecom_msg_id,
-    }
-    
-    # Start async download and analysis
-    asyncio.create_task(
-        _call_file_llm_async(
-            stream_id=stream_id,
-            bot_type=bot_type,
-            provider=provider,
-            file_url=url,
-            filename=filename,
-            mime_type=mime_type,
-            is_report_request=is_report_request,
-            system_prompt=config["system_prompt"],
-            user_id=user_id,
-            chat_id=chat_id,
-            wecom_msg_id=wecom_msg_id,
-            quoted_msg_id=quoted_msg_id,
-            response_url=response_url,
-            file_output_mode=file_output_mode,
-        )
-    )
-    
-    stream_json = _make_text_stream(stream_id, f"正在分析文档：{filename} ...", finish=False)
-    return Response(content=_encrypt_response(bot_type, stream_json, nonce, timestamp), media_type="text/plain")
-
-
-async def _call_file_llm_async(
-    stream_id: str,
-    bot_type: str,
-    provider: str,
-    file_url: str,
-    filename: str,
-    mime_type: str,
-    system_prompt: str,
-    user_id: str,
-    chat_id: str,
-    wecom_msg_id: str | None = None,
-    quoted_msg_id: str | None = None,
-    response_url: str | None = None,
-    file_output_mode: bool = False,
-    is_report_request: bool = False,
-) -> None:
-    """Download file, upload to LLM, and generate analysis."""
-    try:
-        router = get_router()
-        aes_key = _get_bot_aes_key(bot_type)
-        
-        if not aes_key:
-            raise ValueError(f"AES Key not found for {bot_type}")
-
-        success, media_data = _decrypt_media(file_url, aes_key)
-        if not success:
-            raise ValueError(f"File download failed: {media_data}")
-            
-        file_bytes = media_data if isinstance(media_data, bytes) else media_data.encode("utf-8")
-        
-        # 1.5 Robust MIME Type Detection (Gemini 3 is strict about this for inline_data)
-        original_mime = mime_type
-        
-        # If filename is generic or missing, try magic bytes
-        if filename in ["unknown_file", "文档", "file"]:
-            if file_bytes.startswith(b'%PDF-'):
-                mime_type = "application/pdf"
-                filename = "document.pdf"
-            else:
-                try:
-                    file_bytes.decode('utf-8')
-                    mime_type = "text/plain"
-                    filename = "content.txt"
-                except:
-                    # Keep as is, or default to octet-stream
-                    pass
-        
-        # Trust extension more than WeCom's reported mime_type
-        ext = os.path.splitext(filename)[1].lower()
-        if ext == '.pdf':
-            mime_type = "application/pdf"
-        elif ext in ['.sql', '.py', '.js', '.ts', '.html', '.css', '.md', '.json', '.xml', '.sh', '.yaml', '.yml', '.c', '.cpp', '.java', '.go', '.rs', '.php', '.txt']:
-            mime_type = "text/plain"
-        elif not mime_type or mime_type == "application/octet-stream":
-            guessed = mimetypes.guess_type(filename)[0]
-            if guessed:
-                mime_type = guessed
-        
-        logger.info(f"[AIBOT_FILE_REQ] bot={bot_type} file={filename} size={len(file_bytes)} original_mime={original_mime} final_mime={mime_type}")
-        
-        prompt = f"请详细分析这份文档的内容：{filename}"
-        
-        start_time = time.time()
-        loop = asyncio.get_running_loop()
-
-        # 2. Upload file OR Prepare inline content
-        file_uri = None
-        is_inline_text = False
-        
-        # Check if it is a code/text file suitable for inline processing
-        ext = os.path.splitext(filename)[1].lower()
-        is_code_file = ext in ['.sql', '.py', '.js', '.ts', '.html', '.css', '.txt', '.md', '.json', '.xml', '.sh', '.yaml', '.yml', '.c', '.cpp', '.java', '.go', '.rs', '.php']
-        
-        if is_code_file:
-            try:
-                # 1. Try decoding with specific encodings
-                text_content = None
-                for enc in ['utf-8', 'gbk', 'gb18030', 'iso-8859-1']:
-                    try:
-                        text_content = file_bytes.decode(enc)
-                        break
-                    except UnicodeDecodeError:
-                        continue
-                
-                # 2. Safe Fallback
-                if text_content is None:
-                    text_content = file_bytes.decode('utf-8', errors='replace')
-                    logger.warning(f"Used lossy decoding for {filename}")
-
-                # 3. Validation
-                if not text_content:
-                    text_content = "<Empty File>"
-
-                # 4. Success -> Inline Text
-                file_uri = f"content:{text_content}"
-                is_inline_text = True
-                logger.info(f"[AIBOT_FILE] Treating {filename} as inline text ({len(text_content)} chars)")
-
-            except Exception as e:
-                logger.error(f"Decoding error for {filename}: {e}. Fallback to Safe Decode.")
-                # EMERGENCY FALLBACK: Force decode
-                try:
-                    safe_text = file_bytes.decode('utf-8', errors='replace')
-                    file_uri = f"content:{safe_text}"
-                    is_inline_text = True
-                except:
-                   # Only if everything fails, allow fallback (likely 400)
-                   is_code_file = False
-
-        if not is_code_file and provider == "gemini":
-            try:
-                # Use Inline Data (Base64) for files under 20MB (Verified working for gemini-3)
-                if len(file_bytes) < 20 * 1024 * 1024:
-                    b64_data = base64.b64encode(file_bytes).decode('utf-8')
-                    file_uri = f"base64:{b64_data}"
-                    logger.info(f"[AIBOT_FILE] Prepared Inline Data (base64) for {filename} ({len(file_bytes)} bytes)")
-                else:
-                    # Fallback to standard File API for larger files
-                    file_uri = await loop.run_in_executor(
-                        None, 
-                        lambda: router.upload_file(provider, file_bytes, mime_type, filename)
-                    )
-                    logger.info(f"[AIBOT_FILE] Uploaded large file {filename} to Gemini File API: {file_uri}")
-            except Exception as e:
-                logger.error(f"Failed to process Gemini file {filename}: {e}")
-                # Emergency fallback to inline text if upload fails
-                is_code_file = True
-                try:
-                    text_content = file_bytes.decode('utf-8', errors='replace')
-                    file_uri = f"content:{text_content}"
-                    is_inline_text = True
-                except:
-                    pass
-
-        # 2.5 Cloud Storage Upload (UCS Phase 1)
-        cloud_url = None
-        cloud_key = None
-        try:
-            storage = get_storage_manager()
-            upload_res = storage.upload_file(file_bytes, filename, content_type=mime_type)
-            cloud_url = upload_res.url
-            cloud_key = upload_res.key
-            logger.info(f"[AIBOT_FILE] Uploaded file to cloud: {cloud_url} (key={cloud_key})")
-        except Exception as e:
-            logger.error(f"[AIBOT_FILE] Cloud upload failed: {e}")
-
-        # 3. Save context for future turns (PERSISTENT - UCS Phase 1)
-        # We ALWAYS store the cloud URL in the DB if available, for cross-bot access.
-        # If cloud upload failed, we fallback to storing the temporary file_uri.
-        # Fix: Prevent DB bloat if fallback is a large Base64 blob.
-        db_file_uri = cloud_url or file_uri
-        should_save = True
-        if not cloud_url and db_file_uri and db_file_uri.startswith("base64:"):
-            if len(db_file_uri) > 1 * 1024 * 1024: # Limit to 1MB total (approx 750KB data)
-                logger.warning(f"[AIBOT_CTX] Skipping DB persistence for large Base64 fallback ({len(db_file_uri)} chars)")
-                should_save = False
-
-        if db_file_uri and should_save:
-            get_context_manager().save_file(
-                chat_id=chat_id,
-                sender_id=user_id,
-                sender_name=user_id,
-                file_uri=db_file_uri,
-                filename=filename,
-                mime_type=mime_type,
-                wecom_msg_id=wecom_msg_id,
-                bot_type=bot_type,
-                storage_key=cloud_key,
-            )
-            logger.info(f"[AIBOT_CTX] Saved persistent file context for chat={chat_id} (UCS={bool(cloud_url)})")
-
-        # 4. Call LLM
-        if is_inline_text:
-            # Chat directly with text content
-            # Ensure file_uri is not None before slicing
-            raw_text = file_uri[8:] if (file_uri and file_uri.startswith("content:")) else "<Error: Text missing>"
-            full_prompt = f"请分析以下文件内容 ({filename}):\n\n```\n{raw_text}\n```\n\n{prompt}"
-            response = await loop.run_in_executor(
-                None,
-                lambda: router.chat(
-                    provider=provider,
-                    messages=[{"role": "user", "content": full_prompt}]
-                )
-            )
-        else:
-            # Chat with Cloud URI or Base64 URI
-            real_file_data = file_bytes
-            real_file_uri = file_uri
-            
-            # Fetch limited history (last 5 messages) for file LLM call
-            from src.crewai_enterprise.utils.chat_context import get_context_manager
-            ctx_mgr = get_context_manager()
-            context = ctx_mgr.get_context(chat_id, bot_type=bot_type)
-            limited_messages = context.messages[-5:] if len(context.messages) > 5 else context.messages
-            
-            messages = []
-            if system_prompt:
-                messages.append({"role": "system", "content": system_prompt})
-            for msg in limited_messages:
-                messages.append({"role": msg.get("role", "user"), "content": msg.get("content", "")})
-            messages.append({"role": "user", "content": prompt})
-            
-            response = await loop.run_in_executor(
-                None,
-                lambda: router.chat_with_file(
-                    provider=provider,
-                    text=messages[-1]["content"],
-                    file_data=real_file_data,
-                    file_uri=real_file_uri,
-                    file_mime_type=mime_type,
-                    filename=filename,
-                    history=messages[:-1],
-                    system_prompt=system_prompt,
-                    max_tokens=4096,
-                )
-            )
-
-        
-        elapsed_ms = int((time.time() - start_time) * 1000)
-        
-        # Post-process response for generated files (Auditor Refinement)
-        final_content = await _process_llm_file_output(
-            bot_type=bot_type,
-            chat_id=chat_id,
-            content=response.content,
-            user_id=user_id,
-            user_name=None,  # user_name not in scope here
-            response_url=response_url,
-            is_report_request=is_report_request,
-            template_name=None,  # File flow doesn't use templates
-            raw_context=None,
-        )
-
-        # Update task with completed response
-        if stream_id in _stream_tasks:
-            _stream_tasks[stream_id]["content"] = final_content
-            _stream_tasks[stream_id]["finished"] = True
-            _stream_tasks[stream_id]["completed_at"] = time.time()
-            
-    except Exception as e:
-        logger.exception(f"[AIBOT_FILE_ERR] bot={bot_type} error: {e}")
-        if stream_id in _stream_tasks:
-            _stream_tasks[stream_id]["content"] = f"文档分析失败：{str(e)[:100]}"
-            _stream_tasks[stream_id]["finished"] = True
-            _stream_tasks[stream_id]["completed_at"] = time.time()
