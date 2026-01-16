@@ -25,6 +25,14 @@ from .payload_extractors import (
 )
 from .commands import _detect_daily_report_intent, _handle_prompt_command
 from .file_output import _format_chat_history, _upload_image_to_ucs
+from .llm_orchestrator import (
+    _call_llm_async,
+    _call_vision_llm_async,
+    _extract_urls,
+    _fetch_url_content,
+    _process_llm_file_output,
+    _sanitize_filename,
+)
 
 __all__ = [
     "BOT_CONFIGS",
@@ -50,4 +58,10 @@ __all__ = [
     "_handle_prompt_command",
     "_format_chat_history",
     "_upload_image_to_ucs",
+    "_call_llm_async",
+    "_call_vision_llm_async",
+    "_extract_urls",
+    "_fetch_url_content",
+    "_process_llm_file_output",
+    "_sanitize_filename",
 ]
