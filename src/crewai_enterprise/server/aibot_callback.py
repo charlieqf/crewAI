@@ -12,7 +12,7 @@ Key differences from self-built application:
 
 Streaming Flow:
 1. User sends message -> WeCom calls POST /ai-bot/{bot_type}
-2. We immediately store task with finish=False & return "µÇ¥ΦÇâΣ╕¡..."
+2. We immediately store task with finish=False & return "思考中..."
 3. LLM is called asynchronously, result stored when complete
 4. WeCom polls with msgtype=stream, we return current progress
 5. When LLM completes, we return finish=True with full response
@@ -62,6 +62,10 @@ from src.crewai_enterprise.server.handlers.aibot import (
     _sanitize_text,
     _stream_tasks,
     _user_project_context,
+    _detect_daily_report_intent,
+    _format_chat_history,
+    _handle_prompt_command,
+    _upload_image_to_ucs,
 )
 
 # Configure logging
@@ -69,358 +73,6 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
 )
 logger = logging.getLogger(__name__)
-
-
-def _detect_daily_report_intent(text: str) -> bool:
-    """Detect if the user is requesting a daily/group summary."""
-    keywords = [
-        r"daily", r"today", r"summary", r"report", r"group chat", 
-        r"µèÑσæè", r"µÇ╗τ╗ô", r"Σ╗èσñ⌐", r"τ╛ñΦüè", r"σåàσ«╣", r"σ╣▓Σ║åΣ╗ÇΣ╣ê", r"τ║¬Φªü"
-    ]
-    # Check for direct file-html context or keywords
-    for kw in keywords:
-        if re.search(kw, text, re.IGNORECASE):
-            return True
-    return False
-
-
-def _format_chat_history(history: list[dict]) -> str:
-    """Formats merged chat history for LLM prompt."""
-    lines = []
-    for msg in history:
-        time_str = msg.get("timestamp", "")
-        if " " in time_str:
-            time_str = time_str.split(" ")[1][:5]
-        else:
-            time_str = time_str[:5]
-        
-        sender = msg.get("sender", "µ£¬τƒÑ")
-        content = msg.get("content", "")
-        role_label = ""
-        if msg.get("role") == "assistant":
-            role_label = "[Bot]"
-        
-        lines.append(f"[{time_str}] {role_label}{sender}: {content}")
-    
-    return "\n".join(lines)
-
-
-
-def _handle_prompt_command(
-    command: str,
-    args: str,
-    bot_type: str,
-    chat_id: str,
-    user_id: str,
-) -> dict | None:
-    """Handle prompt management and bot commands.
-    
-    Args:
-        command: Command name (show_prompt, set_prompt, reset_prompt, new, codebase, help)
-        args: Command arguments (for set_prompt, codebase)
-        bot_type: Bot identifier
-        chat_id: Chat ID
-        user_id: User ID
-    
-    Returns:
-        dict with 'content' key containing response message, or None if command not recognized
-    """
-    context_manager = get_context_manager()
-    
-    if command == "help":
-        # Show help message with all available commands
-        help_text = """≡ƒñû **AI Bot Σ╜┐τö¿µîçσìù**
-
-**≡ƒÆ¼ Prompt τ«íτÉåσæ╜Σ╗ñ∩╝Ü**
-ΓÇó `/show_prompt` - µƒÑτ£ïσ╜ôσëìτ│╗τ╗ƒµÅÉτñ║Φ»ì
-ΓÇó `/set_prompt <σåàσ«╣>` - Φç¬σ«ÜΣ╣ëτ│╗τ╗ƒµÅÉτñ║Φ»ì
-ΓÇó `/reset_prompt` - µüóσñìΘ╗ÿΦ«ñτ│╗τ╗ƒµÅÉτñ║Φ»ì
-
-**≡ƒôä µûçΣ╗╢τöƒµêÉσæ╜Σ╗ñ∩╝êµö»µîüΦîâσ¢┤∩╝Ü1d/1w/3hτ¡ë∩╝ë∩╝Ü**
-ΓÇó `/file-html [µù╢Θù┤] <µÅÅΦ┐░>` - Φç¬τö▒τöƒµêÉHTMLµûçΣ╗╢
-ΓÇó `/file-html-daily [µù╢Θù┤]` - τöƒµêÉτ╛ñΦüèµæÿΦªüµèÑσæè
-ΓÇó `/file-html-meeting [µù╢Θù┤]` - τöƒµêÉΣ╝ÜΦ««τ║¬Φªü
-  τñ║Σ╛ï: `/file-html-daily 1w` (µ£ÇΦ┐æ1σæ¿Φ«░σ╜ò)
-        `/file-html 3h µ»ÆΦêîµÇ╗τ╗ôΦ┐ÖΣ╕ëσ░Åµù╢µ╢êµü»`
-  ≡ƒÆí *τöƒµêÉτÜäHTMLσ║òΘâ¿σîàσÉ½ΓÇ£σÄƒσºïΣ╕èΣ╕ïµûçΓÇ¥τö¿Σ║Äµò░µì«µá╕σ»╣*
-
-**≡ƒôü Σ╕èΣ╕ïµûçτ«íτÉå∩╝Ü**
-ΓÇó `/reset` - σ╜╗σ║òΘçìτ╜«µëÇµ£ëσ»╣Φ»¥σÄåσÅ▓σÆîΣ╕èΣ╕ïµûç
-ΓÇó `/new` - µ╕àΘÖñΣ╕┤µù╢µûçΣ╗╢Σ╕èΣ╕ïµûç∩╝îσ╝Çσºïµû░Φ»¥Θóÿ
-ΓÇó QuoteµûçΣ╗╢µ╢êµü» - µÿÄτí«σ╝òτö¿τë╣σ«ÜµûçΣ╗╢
-ΓÇó Φç¬σè¿µ│¿σàÑ∩╝ÜµûçΣ╗╢τöƒµêÉσæ╜Σ╗ñΣ╝ÜΦç¬σè¿µ│¿σàÑτ╛ñΦüèσ╜ÆµíúΦ«░σ╜ò
-
-**≡ƒÆ╗ Σ╗úτáüσ║ôσêåµ₧É∩╝Ü**
-ΓÇó `/codebase <gitlab_url>` - Φ«╛τ╜«Σ╗úτáüσ║ôΣ╕èΣ╕ïµûç
-ΓÇó Σ╣ïσÉÄσÅ»τ¢┤µÄÑµÅÉΘù«Σ╗úτáüτ¢╕σà│Θù«Θóÿ∩╝îµêûσÅæΘÇüµê¬σ¢╛σêåµ₧É
-
-**≡ƒô¥ µûçΣ╗╢σêåµ₧ÉΦâ╜σè¢∩╝Ü**
-ΓÇó Gemini∩╝ÜΓ£à µö»µîüσñºµûçΣ╗╢σÄƒτöƒσêåµ₧É∩╝êPDF/DOCτ¡ë∩╝ë
-ΓÇó ChatGPT/Grok∩╝ÜΓ¥î Σ╗àµö»µîüσ¢╛τëçσÆîµûçµ£¼σ»╣Φ»¥
-
-**≡ƒÆí Σ╜┐τö¿µèÇσ╖º∩╝Ü**
-1. σÅæΘÇüµûçΣ╗╢σÉÄ10σêåΘÆƒσåàµùáΘ£ÇΘçìσñìσ╝òτö¿
-2. Σ╜┐τö¿ /new σêçµìóΦ»¥Θóÿ∩╝îΘü┐σàìµùºµûçΣ╗╢σ╣▓µë░
-3. σ«íµƒÑΣ╗úτáüσÅ»Σ╗ÑΣ╜┐τö¿ /codebase µêûσÅæΘÇü Commit URL
-4. Φç¬σ«ÜΣ╣ë Prompt σÅ»Φ«⌐AIµë«µ╝öτë╣σ«ÜΦºÆΦë▓∩╝êσªéµ»ÆΦêîπÇüΣ╕ôσ«╢τ¡ë∩╝ë
-
-µ£ëΘù«ΘóÿΘÜÅµù╢Σ╜┐τö¿ /help µƒÑτ£ïµ£¼σ╕«σè⌐∩╝ü"""
-        return {"content": help_text}
-    
-    elif command == "show_prompt":
-        # Show current prompt
-        custom_prompt = context_manager.get_custom_prompt(chat_id, bot_type)
-        if custom_prompt:
-            response = f"≡ƒô¥ σ╜ôσëìΣ╜┐τö¿τÜäΦç¬σ«ÜΣ╣ë Prompt:\n\n{custom_prompt}\n\n≡ƒÆí Σ╜┐τö¿ /reset_prompt σÅ»Σ╗ÑµüóσñìΘ╗ÿΦ«ñΦ«╛τ╜«"
-        else:
-            default_prompt = BOT_CONFIGS[bot_type]["system_prompt"]
-            response = f"≡ƒô¥ σ╜ôσëìΣ╜┐τö¿Θ╗ÿΦ«ñ Prompt:\n\n{default_prompt}\n\n≡ƒÆí Σ╜┐τö¿ /set_prompt <σåàσ«╣> σÅ»Σ╗ÑΦç¬σ«ÜΣ╣ë\n≡ƒÆí Σ╜┐τö¿ /reset_prompt σÅ»Σ╗ÑµüóσñìΘ╗ÿΦ«ñ∩╝êσªéµ₧£σ╖▓Φç¬σ«ÜΣ╣ë∩╝ë"
-        return {"content": response}
-    
-    elif command == "set_prompt":
-        # Set custom prompt
-        if not args or len(args.strip()) < 10:
-            return {"content": "Γ¥î Φ»╖µÅÉΣ╛¢µ£ëµòêτÜä prompt σåàσ«╣\n\nτö¿µ│ò∩╝Ü/set_prompt Σ╜áµÿ»Σ╕ÇΣ╕¬Σ╕ôΣ╕ÜτÜäPythonσ╝ÇσÅæΣ╕ôσ«╢..."}
-        
-        if len(args) > 2000:
-            return {"content": "Γ¥î Prompt σåàσ«╣Φ┐çΘò┐∩╝îΦ»╖ΘÖÉσê╢σ£¿ 2000 σ¡ùτ¼ªΣ╗Ñσåà"}
-        
-        success = context_manager.set_custom_prompt(chat_id, user_id, bot_type, args.strip())
-        if success:
-            response = f"Γ£à σ╖▓Φ«╛τ╜«Φç¬σ«ÜΣ╣ë Prompt\n\nΘóäΦºê:\n{args.strip()[:200]}{'...' if len(args) > 200 else ''}\n\n≡ƒÆí Σ╜┐τö¿ /show_prompt µƒÑτ£ïσ«îµò┤σåàσ«╣"
-        else:
-            response = "Γ¥î Φ«╛τ╜«σñ▒Φ┤Ñ∩╝îΦ»╖τ¿ìσÉÄΘçìΦ»ò"
-        return {"content": response}
-    
-    elif command == "reset_prompt":
-        # Reset to default prompt
-        success = context_manager.delete_custom_prompt(chat_id, bot_type)
-        default_prompt = BOT_CONFIGS[bot_type]["system_prompt"]
-        if success:
-            response = f"Γ£à σ╖▓µüóσñìΘ╗ÿΦ«ñ Prompt\n\n{default_prompt[:200]}{'...' if len(default_prompt) > 200 else ''}"
-        else:
-            response = "Γ¥î Θçìτ╜«σñ▒Φ┤Ñ∩╝îµêûσ╜ôσëìσ╖▓σ£¿Σ╜┐τö¿Θ╗ÿΦ«ñ Prompt"
-        return {"content": response}
-    
-    elif command == "new":
-        # Clear file context and start new conversation
-        try:
-            # Clear file contexts for this chat
-            success = context_manager.clear_file_context(chat_id)
-            if success:
-                response = "Γ£à σ╖▓µ╕àΘÖñµûçΣ╗╢Σ╕èΣ╕ïµûç∩╝îσ╝Çσºïµû░σ»╣Φ»¥\n\n≡ƒÆí Σ╣ïσëìτÜäµûçΣ╗╢σ░åΣ╕ìσåìΦç¬σè¿Σ╜┐τö¿∩╝îσªéΘ£Çσ╝òτö¿Φ»╖Θçìµû░σÅæΘÇüµêû Quote"
-            else:
-                response = "Γ£à σ╖▓µ╕àΘÖñΣ╕èΣ╕ïµûç\n\n≡ƒÆí σ╜ôσëìµ▓íµ£ëµ┤╗Φ╖âτÜäµûçΣ╗╢Σ╕èΣ╕ïµûç"
-        except Exception as e:
-            logger.error(f"[PROMPT_CMD] Failed to clear context: {e}")
-            response = "Γ¥î µ╕àΘÖñσñ▒Φ┤Ñ∩╝îΦ»╖τ¿ìσÉÄΘçìΦ»ò"
-        return {"content": response}
-    
-    elif command == "reset":
-        # Completely clear all chat metrics and history via timestamp reset
-        try:
-            now_iso = datetime.now().isoformat()
-            
-            # 1. Set context start timestamp in DB (Per Session isolation)
-            success = context_manager.set_context_start(
-                chat_id=chat_id,
-                bot_type=bot_type,
-                user_id=user_id,
-                timestamp=now_iso
-            )
-            # 2. Note: Disabling destructive clear_file_context(chat_id) 
-            # to preserve history and maintain per-bot isolation as per audit.
-            # File context is now filtered by bot_type and timestamp in lookup.
-            pass
-            
-            # 3. Clear project context if any
-            # Note: We keep this per-chat for now as project context is shared in group
-            if chat_id in _user_project_context:
-                del _user_project_context[chat_id]
-            
-            if success:
-                response = (
-                    f"Γ£à σ╖▓Θçìτ╜« {bot_type} τÜäσ»╣Φ»¥Σ╕èΣ╕ïµûç\n\n"
-                    f"≡ƒÆí σÄåσÅ▓Φ«░σ╜òσ╖▓Σ┐¥τòÖΣ╜åΣ╕ìσåìΦó½σ╝òτö¿πÇé\n"
-                    f"≡ƒôî τÄ░σ£¿µÿ»Σ╕ÇΣ╕¬σà¿µû░τÜäσ╝Çσºï∩╝ü"
-                )
-                if args.strip():
-                    # Combined command: reset + question
-                    return {
-                        "content": response + "\n\n---\n\n",
-                        "continue_with_question": args.strip()
-                    }
-            else:
-                response = "Γ¥î Θçìτ╜«σñ▒Φ┤Ñ∩╝îΦ»╖τ¿ìσÉÄΘçìΦ»ò"
-        except Exception as e:
-            logger.error(f"[PROMPT_CMD] Failed to reset context: {e}")
-            response = "Γ¥î Θçìτ╜«σñ▒Φ┤Ñ∩╝îΦ»╖τ¿ìσÉÄΘçìΦ»ò"
-        return {"content": response}
-    
-    elif command == "codebase":
-        # Set GitLab project context for Codebase QA
-        # Supports: /codebase <url> [optional question]
-        if not args.strip():
-            response = (
-                "Γ¥î τö¿µ│ò: `/codebase <gitlab_url> [Θù«Θóÿ]`\n\n"
-                "τñ║Σ╛ï:\n"
-                "- `/codebase https://gitlab.example.com/team/myproject`\n"
-                "- `/codebase https://gitlab.example.com/team/myproject τÖ╗σ╜òσèƒΦâ╜σ£¿σô¬Θçî∩╝ƒ`"
-            )
-            return {"content": response}
-        
-        # Parse args: first part is URL/path or NICKNAME, rest is optional question
-        args_parts = args.strip().split(maxsplit=1)
-        project_input = args_parts[0]
-        inline_question = args_parts[1] if len(args_parts) > 1 else None
-        
-        project_path = project_input
-        branch = "main"
-        gitlab_base_url = os.getenv("GITLAB_URL", "http://gitlab.goldenstand.com")
-
-        # Check for nickname first
-        if project_input.lower() in PROJECT_NICKNAMES:
-            config = PROJECT_NICKNAMES[project_input.lower()]
-            project_path = config["project_path"]
-            gitlab_base_url = config["gitlab_url"]
-            branch = config["branch"]
-            print(f"[CODEBASE_CMD] Using nickname {project_input} -> {project_path} ({branch})", flush=True)
-            logger.info(f"[CODEBASE_CMD] Using nickname {project_input} -> {project_path} ({branch})")
-        else:
-            print(f"[CODEBASE_CMD] Parsing as URL: {project_input}", flush=True)
-            # Check if it's a URL and extract project path + branch
-            # Pattern for tree view: /-/tree/branch_name
-            # Pattern for blob view: /-/blob/branch_name/file_path
-            url_match = re.match(r"https?://[^\s/]+/(.+?)(?:/-/.*)?$", project_input)
-            if url_match:
-                project_path = url_match.group(1)
-                
-                # Handle branch extraction from /-/tree/ or /-/blob/
-                if "/-/tree/" in project_input:
-                    # Format: domain/project/-/tree/branch
-                    parts = project_input.split("/-/tree/")
-                    project_path = url_match.group(1).split("/-/tree/")[0]
-                    branch = parts[1].split("/")[0] if len(parts) > 1 else "main"
-                elif "/-/blob/" in project_input:
-                    # Format: domain/project/-/blob/branch/file
-                    parts = project_input.split("/-/blob/")
-                    project_path = url_match.group(1).split("/-/blob/")[0]
-                    branch = parts[1].split("/")[0] if len(parts) > 1 else "main"
-                elif "/-/" in project_path:
-                    project_path = project_path.split("/-/")[0]
-
-            # Extract GitLab base URL from input
-            gitlab_url_match = re.match(r"(https?://[^/]+)", project_input)
-            gitlab_base_url = gitlab_url_match.group(1) if gitlab_url_match else os.getenv("GITLAB_URL", "https://gitlab.goldenstand.com")
-
-        
-        # Save project context with URL and branch
-        _user_project_context[chat_id] = {
-            "project_path": project_path,
-            "gitlab_url": gitlab_base_url,
-            "branch": branch
-        }
-        
-        logger.info(f"[CODEBASE_CMD] Set project context for {chat_id}: {project_path} (branch: {branch}) @ {gitlab_base_url}")
-        
-        # If there's an inline question, return it for further processing
-        if inline_question:
-            return {
-                "content": f"≡ƒöì µ¡úσ£¿σêåµ₧É `{project_path}` Σ╗úτáüσ║ô (σêåµö»: `{branch}`)...",
-                "continue_with_question": inline_question,
-                "project_path": project_path,
-                "branch": branch
-            }
-        
-        # No question, just confirm context set
-        response = (
-            f"Γ£à σ╖▓Φ«╛τ╜«Σ╗úτáüσ║ôΣ╕èΣ╕ïµûç: `{project_path}`\n"
-            f"≡ƒôî σ╜ôσëìσêåµö»: `{branch}`\n\n"
-            f"τÄ░σ£¿Σ╜áσÅ»Σ╗Ñτ¢┤µÄÑµÅÉΘù«∩╝îΣ╛ïσªé:\n"
-            f"- \"Φ┐ÖΣ║¢Φí¿σÉìσ£¿σô¬Σ║¢µûçΣ╗╢Σ╕¡σç║τÄ░Φ┐ç∩╝ƒ\"\n"
-            f"- \"creditor_code σ¡ùµ«╡µÿ»σ£¿σô¬ΘçîσñäτÉåτÜä∩╝ƒ\"\n"
-            f"- \"Θí╣τ¢«τÜäσÄƒσºïµ¥âτ¢èΣ║║σêñµû¡ΘÇ╗Φ╛æσ£¿σô¬Θçî∩╝ƒ\"\n\n"
-            f"_µÅÉτñ║: σÅæΘÇüµê¬σ¢╛Σ╣ƒσÅ»Σ╗Ñσêåµ₧ÉΣ╗úτáüΘù«Θóÿ_"
-        )
-        return {"content": response}
-    
-    elif command == "file-html":
-        # File generation mode - NOT a terminal command
-        # Pass through to normal LLM flow with file output flag
-        # Supports time range: /file-html [1d|2d|1w] <description>
-        import re
-        time_range = "last_24h"  # Default
-        user_request = args.strip() if args else ""
-        
-        # Check if first arg is a time range pattern
-        if args:
-            parts = args.strip().split(maxsplit=1)
-            if parts and re.match(r"^\d+[dwh]$", parts[0].lower()):
-                time_range = parts[0].lower()
-                user_request = parts[1] if len(parts) > 1 else ""
-                logger.info(f"[FILE_CMD] /file-html detected time range: {time_range}")
-        
-        if not user_request or len(user_request.strip()) < 2:
-            return {"content": "Γ¥î Φ»╖µÅÉΣ╛¢τöƒµêÉΘ£Çµ▒é\n\nτö¿µ│ò∩╝Ü/file-html σê╢Σ╜£Σ╕ÇΣ╕¬τÖ╗σ╜òΘí╡Θ¥ó\n      /file-html 1w µÇ╗τ╗ôµ£¼σæ¿τÜäσ»╣Φ»¥"}
-        
-        return {
-            "file_output_mode": True,
-            "user_request": user_request.strip(),
-            "continue_with_llm": True,
-            "template_name": None,  # Free-form HTML
-            "date_range": time_range,
-        }
-    
-    elif command == "file-html-daily":
-        # Daily summary report template
-        # LLM outputs structured JSON, rendered via daily_report.html template
-        # Supports time range: /file-html-daily [2d|3d|1w] [custom prompt]
-        import re
-        time_range = "last_24h"  # Default
-        user_prompt = args.strip() if args and args.strip() else "Φ»╖µá╣µì«τ╛ñΦüèΦ«░σ╜òτöƒµêÉΣ╕ÇΣ╗╜µæÿΦªüµèÑσæè"
-        
-        # Check if first arg is a time range pattern (e.g., 2d, 1w, 3d)
-        if args:
-            parts = args.strip().split(maxsplit=1)
-            if parts and re.match(r"^\d+[dwh]$", parts[0].lower()):
-                time_range = parts[0].lower()
-                user_prompt = parts[1] if len(parts) > 1 else "Φ»╖µá╣µì«τ╛ñΦüèΦ«░σ╜òτöƒµêÉΣ╕ÇΣ╗╜µæÿΦªüµèÑσæè"
-                logger.info(f"[FILE_CMD] Detected time range: {time_range}")
-        
-        return {
-            "file_output_mode": True,
-            "user_request": user_prompt,
-            "continue_with_llm": True,
-            "template_name": "daily",  # Use daily_report.html template
-            "date_range": time_range,  # Pass time range to archive query
-        }
-    
-    elif command == "file-html-meeting":
-        # Meeting notes template
-        # LLM outputs structured JSON, rendered via meeting_notes.html template
-        # Supports time range: /file-html-meeting [1d|2d|1w] [custom prompt]
-        import re
-        time_range = "last_24h"  # Default
-        user_prompt = args.strip() if args and args.strip() else "Φ»╖µá╣µì«τ╛ñΦüèσåàσ«╣µò┤τÉåΣ╕ÇΣ╗╜Σ╝ÜΦ««τ║¬Φªü"
-        
-        # Check if first arg is a time range pattern
-        if args:
-            parts = args.strip().split(maxsplit=1)
-            if parts and re.match(r"^\d+[dwh]$", parts[0].lower()):
-                time_range = parts[0].lower()
-                user_prompt = parts[1] if len(parts) > 1 else "Φ»╖µá╣µì«τ╛ñΦüèσåàσ«╣µò┤τÉåΣ╕ÇΣ╗╜Σ╝ÜΦ««τ║¬Φªü"
-                logger.info(f"[FILE_CMD] /file-html-meeting detected time range: {time_range}")
-        
-        return {
-            "file_output_mode": True,
-            "user_request": user_prompt,
-            "continue_with_llm": True,
-            "template_name": "meeting",  # Use meeting_notes.html template
-            "date_range": time_range,
-        }
-    
-    return None
-
 
 
 def _extract_urls(text: str) -> list[str]:
@@ -616,13 +268,13 @@ async def _call_llm_async(
                         except Exception as e:
                             logger.error(f"[CODEBASE_CMD] Inline QA failed: {e}")
                             if stream_id in _stream_tasks:
-                                _stream_tasks[stream_id]["content"] = f"Γ¥î Σ╗úτáüσêåµ₧Éσñ▒Φ┤Ñ: {e}"
+                                _stream_tasks[stream_id]["content"] = f"❌ 代码分析失败: {e}"
                                 _stream_tasks[stream_id]["finished"] = True
                                 _stream_tasks[stream_id]["completed_at"] = time.time()
                             return
                     else:
                         if stream_id in _stream_tasks:
-                            _stream_tasks[stream_id]["content"] = "Γ¥î GITLAB_TOKEN µ£¬Θàìτ╜«"
+                            _stream_tasks[stream_id]["content"] = "❌ GITLAB_TOKEN 未配置"
                             _stream_tasks[stream_id]["finished"] = True
                             _stream_tasks[stream_id]["completed_at"] = time.time()
                         return
@@ -662,7 +314,7 @@ async def _call_llm_async(
                     # Generic command response (e.g., /help, /show_prompt)
                     # Update status and finish
                     if stream_id in _stream_tasks:
-                        _stream_tasks[stream_id]["content"] = cmd_result.get("content", "µîçΣ╗ñσ╖▓µëºΦíî")
+                        _stream_tasks[stream_id]["content"] = cmd_result.get("content", "命令已执行")
                         _stream_tasks[stream_id]["finished"] = True
                         _stream_tasks[stream_id]["completed_at"] = time.time()
                     
@@ -671,7 +323,7 @@ async def _call_llm_async(
         except Exception as e:
             logger.exception(f"[AIBOT_CMD_ERR] Failed to process command: {e}")
             if stream_id in _stream_tasks:
-                _stream_tasks[stream_id]["content"] = f"Γ¥î µîçΣ╗ñµëºΦíîσ╝éσ╕╕: {e}"
+                _stream_tasks[stream_id]["content"] = f"❌ 命令执行异常: {e}"
                 _stream_tasks[stream_id]["finished"] = True
                 _stream_tasks[stream_id]["completed_at"] = time.time()
             return
@@ -699,20 +351,20 @@ async def _call_llm_async(
     gitlab_pattern = r"(https?://)([^\s/]+)/([^\s]+)/-/commit/([a-fA-F0-9]{7,40})"
     gitlab_match = re.search(gitlab_pattern, content_stripped, re.IGNORECASE)
     
-    # Trigger if URL found and content contains "review" or "σ«íµƒÑ", or if it's JUST the URL
+    # Trigger if URL found and content contains "review" or "审查", or if it's JUST the URL
     # But NOT if negative keywords are present
     has_positive_keyword = (
         "review" in content_stripped.lower() 
-        or "σ«íµƒÑ" in content_stripped
-        or "σ«íµá╕" in content_stripped
-        or "µúÇµƒÑ" in content_stripped
-        or "τ£ïτ£ï" in content_stripped
-        or "σ╕«µêæτ£ï" in content_stripped
+        or "审查" in content_stripped
+        or "审查" in content_stripped
+        or "横竖" in content_stripped
+        or "看看" in content_stripped
+        or "帮我看" in content_stripped
     )
     has_negative_keyword = (
-        "Σ╕ìΦªüσ«íµƒÑ" in content_stripped
-        or "σê½σ«íµƒÑ" in content_stripped
-        or "Σ╕ìτö¿σ«íµƒÑ" in content_stripped
+        "不要审查" in content_stripped
+        or "别审查" in content_stripped
+        or "不用审查" in content_stripped
         or "don't review" in content_stripped.lower()
         or "no review" in content_stripped.lower()
     )
@@ -741,7 +393,7 @@ async def _call_llm_async(
             
             # Update status to "Reviewing"
             if stream_id in _stream_tasks:
-                _stream_tasks[stream_id]["content"] = "≡ƒöì µ¡úσ£¿Φ┐¢ΦíîσñÜAgentΣ╗úτáüσ«íµƒÑ∩╝îΦ»╖τ¿ìσÇÖ...\n(µ₧╢µ₧ä/µÇºΦâ╜/µ╡ïΦ»òΣ╕ôσ«╢µ¡úσ£¿σêåµ₧É)"
+                _stream_tasks[stream_id]["content"] = "🔄 正在运行中：Agent代码审查，请稍候...\n(架构/总能力/测试专家正在分析)"
             
             # Get token from env
             gitlab_token = os.getenv("GITLAB_TOKEN")
@@ -760,7 +412,7 @@ async def _call_llm_async(
             loop = asyncio.get_running_loop()
             result = await loop.run_in_executor(None, flow.kickoff)
             
-            final_response = f"Γ£à Σ╗úτáüσ«íµƒÑσ«îµêÉ\n\n{result}"
+            final_response = f"✅ 代码审查完成\n\n{result}"
             
             # Update task
             if stream_id in _stream_tasks:
@@ -772,7 +424,7 @@ async def _call_llm_async(
             
         except Exception as e:
             logger.error(f"[GITLAB_REVIEW] Error during review: {e}")
-            error_msg = f"Γ¥î Σ╗úτáüσ«íµƒÑσñ▒Φ┤Ñ: {str(e)}"
+            error_msg = f"❌ 代码审查失败: {str(e)}"
             if stream_id in _stream_tasks:
                 _stream_tasks[stream_id]["content"] = error_msg
                 _stream_tasks[stream_id]["finished"] = True
@@ -801,42 +453,42 @@ async def _call_llm_async(
             if template_name == "daily":
                 # Daily summary template - LLM outputs structured JSON
                 file_instruction = (
-                    "\n\n[ΘçìΦªü∩╝ÜJSONτ╗ôµ₧äσîûΦ╛ôσç║µ¿íσ╝Å - µ»ÅµùÑµæÿΦªüµèÑσæè]\n"
-                    "Φ»╖σêåµ₧Éτ╛ñΦüèσåàσ«╣σ╣╢Φ╛ôσç║Σ╗ÑΣ╕ïJSONµá╝σ╝Å∩╝êΣ╕ìΦªüσîàσÉ½σà╢Σ╗ûσåàσ«╣∩╝ë∩╝Ü\n"
+                    "\n\n[重要：JSON结构包含输出模式 - 每需要摘要报告]\n"
+                    "请分析群聊内容并输出以下JSON格式（不要包含其他内容）：\n"
                     "```json\n"
                     "{\n"
                     '  "topics": [\n'
-                    '    {"title": "Φ«¿Φ«║Σ╕╗Θóÿ", "summary": "Φ»ªτ╗åµæÿΦªü", "sentiment": "positive/neutral/negative"}\n'
+                    '    {"title": "讨论主题", "summary": "详细摘要", "sentiment": "positive/neutral/negative"}\n'
                     "  ],\n"
                     '  "todos": [\n'
-                    '    {"task": "σ╛àσè₧Σ║ïΘí╣", "assignee": "@Φ┤ƒΦ┤úΣ║║"}\n'
+                    '    {"task": "获取待办项", "assignee": "@责任人"}\n'
                     "  ],\n"
-                    '  "insights": ["σà│Θö«ΦºüΦºú1", "σà│Θö«ΦºüΦºú2"],\n'
+                    '  "insights": ["相关洞察点1", "相关洞察点2"],\n'
                     '  "participant_count": 5\n'
                     "}\n"
                     "```\n"
-                    "σ┐àΘí╗Φ╛ôσç║µ£ëµòêτÜäJSON∩╝îΣ╕ìΦªüµ╖╗σèáΣ╗╗Σ╜òΦºúΘçèµêûmarkdownΣ╗úτáüσ¥ùΣ╣ïσñûτÜäσåàσ«╣πÇé"
+                    "必须输出有效的JSON，不要添加任何点缀或markdown代码块之外的内容。"
                 )
                 logger.info(f"[FILE_OUTPUT] Added daily template JSON schema to system prompt")
             elif template_name == "meeting":
                 # Meeting notes template - LLM outputs structured JSON
                 file_instruction = (
-                    "\n\n[ΘçìΦªü∩╝ÜJSONτ╗ôµ₧äσîûΦ╛ôσç║µ¿íσ╝Å - Σ╝ÜΦ««τ║¬Φªü]\n"
-                    "Φ»╖σêåµ₧Éτ╛ñΦüèσåàσ«╣σ╣╢Φ╛ôσç║Σ╗ÑΣ╕ïJSONµá╝σ╝Å∩╝êΣ╕ìΦªüσîàσÉ½σà╢Σ╗ûσåàσ«╣∩╝ë∩╝Ü\n"
+                    "\n\n[重要：JSON结构包含输出模式 - 会议纪要]\n"
+                    "请分析群聊内容并输出以下JSON格式（不要包含其他内容）：\n"
                     "```json\n"
                     "{\n"
-                    '  "title": "Σ╝ÜΦ««Σ╕╗Θóÿ",\n'
-                    '  "attendees": ["σ╝áΣ╕ë", "µ¥Äσ¢¢", "τÄïΣ║ö"],\n'
+                    '  "title": "会议主题",\n'
+                    '  "attendees": ["张三", "李四", "王五"],\n'
                     '  "agenda": [\n'
-                    '    {"item": "Φ««τ¿ïΘí╣τ¢«", "discussion": "Φ«¿Φ«║σåàσ«╣", "decisions": ["σå│σ«Ü1"]}\n'
+                    '    {"item": "议程项目", "discussion": "讨论内容", "decisions": ["决定1"]}\n'
                     "  ],\n"
                     '  "action_items": [\n'
-                    '    {"task": "Φíîσè¿Θí╣", "owner": "Φ┤ƒΦ┤úΣ║║", "due": "µê¬µ¡óµùÑµ£ƒ"}\n'
+                    '    {"task": "行动项", "owner": "责任人", "due": "待定期限"}\n'
                     "  ],\n"
-                    '  "next_meeting": "Σ╕ïµ¼íΣ╝ÜΦ««µù╢Θù┤"\n'
+                    '  "next_meeting": "下次会议时间"\n'
                     "}\n"
                     "```\n"
-                    "σ┐àΘí╗Φ╛ôσç║µ£ëµòêτÜäJSON∩╝îΣ╕ìΦªüµ╖╗σèáΣ╗╗Σ╜òΦºúΘçèµêûmarkdownΣ╗úτáüσ¥ùΣ╣ïσñûτÜäσåàσ«╣πÇé"
+                    "必须输出有效的JSON，不要添加任何点缀或markdown代码块之外的内容。"
                 )
                 logger.info(f"[FILE_OUTPUT] Added meeting template JSON schema to system prompt")
             else:
@@ -849,7 +501,7 @@ async def _call_llm_async(
                     "3. STYLING: Use Tailwind CSS CDN for all styling.\n"
                     "Failure to use the <FILE> tags will break the system integration. This is a mandatory technical requirement.\n\n"
                     "Example Output:\n"
-                    "τöƒµêÉΣ║åΣ╕ÇΣ╗╜ΘúÄµá╝σëìσì½τÜäσêåµ₧ÉµèÑσæèπÇé\n"
+                    "生成了一份风格简洁的分析报告。\n"
                     "<FILE name=\"report.html\"><html>...</html></FILE>"
                 )
                 logger.info(f"[FILE_OUTPUT] Added highly authoritative free-form HTML instruction to system prompt")
@@ -907,19 +559,19 @@ async def _call_llm_async(
         # If URLs were fetched, prepend their content to the user's message context
         if url_contents:
             url_context = "\n\n---\n\n".join([
-                f"**τ╜æΘí╡σåàσ«╣µ¥ÑΦç¬ {uc['url']}:**\n\n{uc['content']}" 
+                f"**网页内容摘要自 {uc['url']}:**\n\n{uc['content']}" 
                 for uc in url_contents
             ])
             # Prepend URL content to the latest user message
             if messages and messages[-1]["role"] == "user":
-                messages[-1]["content"] = f"{url_context}\n\n---\n\nτö¿µê╖Θù«Θóÿ∩╝Ü{messages[-1]['content']}"
+                messages[-1]["content"] = f"{url_context}\n\n---\n\n用户问题：{messages[-1]['content']}"
                 logger.info(f"[URL_CTX] Added {len(url_contents)} URL(s) content to context")
 
         # Inject Archive Context if available
         if archive_context and messages and messages[-1]["role"] == "user":
             messages[-1]["content"] = (
-                f"### Σ╗èµùÑτ╛ñΦüèΦ«░σ╜òµæÿΦªü (Σ╗àΣ╛¢σÅéΦÇâ):\n\n{archive_context}\n\n"
-                f"---\n\nσƒ║Σ║ÄΣ╗ÑΣ╕èσ»╣Φ»¥ΦâîµÖ»∩╝îΦ»╖µîëτàºΦªüµ▒éµëºΦíî∩╝Ü{messages[-1]['content']}"
+                f"### 今日群聊记录摘要 (仅供参考):\n\n{archive_context}\n\n"
+                f"---\n\n基于以上对话内容，请根据要求执行：{messages[-1]['content']}"
             )
 
         # 1. Quoted File (Specific)
@@ -979,7 +631,7 @@ async def _call_llm_async(
             try:
                 # Format history for file chat (since chat_with_file takes text prompt)
                 history_text = "\n\n".join(
-                    [f"{'τö¿µê╖' if m['role']=='user' else 'µ¿íσ₧ï'}: {m['content']}" for m in messages]
+                    [f"{'用户' if m['role']=='user' else '模块'}: {m['content']}" for m in messages]
                 )
                 
                 # Check if file context is inline text or cloud URI
@@ -990,9 +642,9 @@ async def _call_llm_async(
                     # Inline Text Context
                     raw_content = file_uri[8:]
                     full_prompt = (
-                        f"σ»╣Φ»¥σÄåσÅ▓:\n{history_text}\n\n"
-                        f"(µ│¿µäÅ∩╝Üτö¿µê╖Σ╣ïσëìΣ╕èΣ╝áΣ║åµûçΣ╗╢ {filename}∩╝îσåàσ«╣σªéΣ╕ï∩╝îΦ»╖σƒ║Σ║Äµ¡ñσ¢₧τ¡ö):\n"
-                        f"```\n{raw_content}\n```\n\nτö¿µê╖µû░Θù«Θóÿ: {messages[-1]['content']}" # Last msg is current query
+                        f"对话历史:\n{history_text}\n\n"
+                        f"（提示：用户之前上传了文件 {filename}，内容如下，请基于文件内容回答）：\n"
+                        f"```\n{raw_content}\n```\n\n用户新问题: {messages[-1]['content']}" # Last msg is current query
                         # Note: messages[-1] is already in history_text, but emphasizing it here helps
                     )
                     
@@ -1007,7 +659,7 @@ async def _call_llm_async(
                     # Inline Base64 Context (PDF/Images)
                     raw_b64 = file_uri[7:]
                     file_bytes = base64.b64decode(raw_b64)
-                    full_prompt = f"σ»╣Φ»¥σÄåσÅ▓:\n{history_text}\n\n(µ│¿µäÅ∩╝Üτö¿µê╖Σ╣ïσëìΣ╕èΣ╝áΣ║åµûçΣ╗╢ {filename}∩╝îΦ»╖σƒ║Σ║ÄΦ»ÑµûçΣ╗╢σ¢₧τ¡ö)"
+                    full_prompt = f"对话历史:\n{history_text}\n\n（提示：用户之前上传了文件 {filename}，请基于文件内容回答）"
                     
                     # Fetch limited history for file analysis to avoid hallucinating old results
                     context = context_manager.get_context(chat_id, bot_type=bot_type)
@@ -1038,7 +690,7 @@ async def _call_llm_async(
                     # For Qiniu/S3, we might need to download it first if the LLM doesn't support direct URLs
                     # Or for Gemini, if it's already a Gemini File API URI, use it directly.
                     
-                    full_prompt = f"σ»╣Φ»¥σÄåσÅ▓:\n{history_text}\n\n(µ│¿µäÅ∩╝Üτö¿µê╖Σ╣ïσëìΣ╕èΣ╝áΣ║åµûçΣ╗╢ {filename}∩╝îΦ»╖σƒ║Σ║ÄΦ»ÑµûçΣ╗╢σ¢₧τ¡ö)"
+                    full_prompt = f"对话历史:\n{history_text}\n\n（提示：用户之前上传了文件 {filename}，请基于文件内容回答）"
                     
                     is_gemini_uri = file_uri.startswith("https://generativelanguage.googleapis.com")
                     
@@ -1120,7 +772,7 @@ async def _call_llm_async(
                 logger.warning(f"[AIBOT_CTX] Failed to use file context (fallback to text): {e}")
                 use_file_context = False
                 # Auditor Suggestion: If file context was expected but failed, notify the user.
-                context_error_hint = f"\n\n(µ│¿∩╝Üµùáµ│òσèáΦ╜╜σÄåσÅ▓σ¢╛τëç/µûçΣ╗╢∩╝îµ£¼µ¼íσ¢₧τ¡öΣ╗àσƒ║Σ║Äµûçσ¡ùΦ«░σ╜òπÇéΘöÖΦ»»∩╝Ü{str(e)[:50]}...)"
+                context_error_hint = f"\n\n（提示：需补充历史图片/文件，本次回答仅基于纯文本记录。错误：{str(e)[:50]}...）"
 
         if not use_file_context:
             # Run standard LLM call
@@ -1173,14 +825,14 @@ async def _call_llm_async(
         logger.error(f"[AIBOT_LLM_ERR] bot={bot_type} error={e}")
         if stream_id in _stream_tasks:
             _stream_tasks[stream_id]["content"] = (
-                f"µè▒µ¡ë,AIµ£ìσèíµÜéµù╢Σ╕ìσÅ»τö¿: {str(e)[:50]}"
+                f"抱歉,AI服务暂时不可用: {str(e)[:50]}"
             )
             _stream_tasks[stream_id]["finished"] = True
             _stream_tasks[stream_id]["error"] = True
     except Exception as e:
         logger.exception(f"[AIBOT_ERR] bot={bot_type} error={e}")
         if stream_id in _stream_tasks:
-            _stream_tasks[stream_id]["content"] = "µè▒µ¡ë,σÅæτöƒΣ║åµäÅσñûΘöÖΦ»»,Φ»╖τ¿ìσÉÄΘçìΦ»òπÇé"
+            _stream_tasks[stream_id]["content"] = "抱歉,发生了意外错误,请稍后重试。"
             _stream_tasks[stream_id]["finished"] = True
             _stream_tasks[stream_id]["error"] = True
 
@@ -1327,7 +979,7 @@ async def _handle_text_message(
             clean_name = clean_name.split(":")[-1].strip()
             
         # Remove common marks
-        for mark in ["[µûçΣ╗╢]", "[σ¢╛τëç]", "≡ƒôï", "≡ƒôä"]:
+        for mark in ["[文件]", "[图片]", "附件", "📄"]:
             clean_name = clean_name.replace(mark, "")
         clean_name = clean_name.strip()
             
@@ -1339,12 +991,12 @@ async def _handle_text_message(
         if original_content:
             # User has both quote and their own message
             content = (
-                f"[τö¿µê╖σ╝òτö¿µ╢êµü»: {quoted_content}]\n\nτö¿µê╖µÅÉΘù«: {original_content}"
+                f"[用户引用消息: {quoted_content}]\n\n用户提问: {original_content}"
             )
         else:
             # Quote-only: user just referenced something without adding text
             content = (
-                f"τö¿µê╖σ╝òτö¿Σ║åΣ╗ÑΣ╕ïµ╢êµü»σ╣╢@Σ╜á∩╝îΦ»╖ΘÆêσ»╣σ╝òτö¿σåàσ«╣σ¢₧σñì:\n\n{quoted_content}"
+                f"用户引用了以下消息并@你，请针对引用内容回复:\n\n{quoted_content}"
             )
         logger.info(f"[AIBOT_QUOTE] bot={bot_type} quoted={quoted_content[:50]!r}...")
 
@@ -1356,7 +1008,7 @@ async def _handle_text_message(
         )
         stream_id = _generate_stream_id()
         stream_json = _make_text_stream(
-            stream_id, "Σ╜áσÑ╜!Φ»╖Θù«µ£ëΣ╗ÇΣ╣êσÅ»Σ╗Ñσ╕«σè⌐Σ╜áτÜä?", finish=True
+            stream_id, "你好!请问有什么可以帮助你的?", finish=True
         )
         encrypted = _encrypt_response(bot_type, stream_json, nonce, timestamp)
         return Response(content=encrypted, media_type="text/plain")
@@ -1392,7 +1044,7 @@ async def _handle_text_message(
 
     # Store task with initial "thinking" state
     _stream_tasks[stream_id] = {
-        "content": "µÇ¥ΦÇâΣ╕¡...",
+        "content": "思考中...",
         "finished": False,
         "created_at": time.time(),
         "bot_type": bot_type,
@@ -1421,7 +1073,7 @@ async def _handle_text_message(
     )
 
     # Return immediate response with "thinking" status
-    stream_json = _make_text_stream(stream_id, "µÇ¥ΦÇâΣ╕¡...", finish=False)
+    stream_json = _make_text_stream(stream_id, "思考中...", finish=False)
     encrypted = _encrypt_response(bot_type, stream_json, nonce, timestamp)
 
     logger.info(
@@ -1444,7 +1096,7 @@ async def _handle_stream_refresh(
     if not task:
         # Task not found - may be expired or on different worker
         logger.warning(f"[AIBOT_STREAM] bot={bot_type} stream_id={stream_id} not found")
-        stream_json = _make_text_stream(stream_id, "Σ╗╗σèíσ╖▓Φ┐çµ£ƒ,Φ»╖Θçìµû░µÅÉΘù«", finish=True)
+        stream_json = _make_text_stream(stream_id, "任务已过期，请重新提问", finish=True)
         encrypted = _encrypt_response(bot_type, stream_json, nonce, timestamp)
         return Response(content=encrypted, media_type="text/plain")
 
@@ -1487,43 +1139,6 @@ def _cleanup_old_tasks() -> None:
 
     if expired_task_ids:
         logger.debug(f"Cleaned up {len(expired_task_ids)} expired tasks")
-
-
-def _upload_image_to_ucs(image_bytes: bytes) -> tuple[str | None, str | None, str, str]:
-    """Upload image to cloud storage and detect correct MIME type/extension.
-    
-    Returns: (cloud_url, storage_key, mime_type, filename)
-    """
-    mime_type = "image/jpeg"
-    ext = ".jpg"
-    
-    if image_bytes.startswith(b'\x89PNG\r\n\x1a\n'):
-        mime_type = "image/png"
-        ext = ".png"
-    elif image_bytes.startswith(b'GIF8'):
-        mime_type = "image/gif"
-        ext = ".gif"
-    elif image_bytes.startswith(b'\x42\x4d'):
-        mime_type = "image/bmp"
-        ext = ".bmp"
-    elif image_bytes.startswith(b'\xff\xd8\xff'):
-        mime_type = "image/jpeg"
-        ext = ".jpg"
-        
-    filename = f"upload_{int(time.time())}{ext}"
-    cloud_url = None
-    storage_key = None
-    
-    try:
-        storage = get_storage_manager()
-        upload_res = storage.upload_file(image_bytes, filename, content_type=mime_type)
-        cloud_url = upload_res.url
-        storage_key = upload_res.key
-        logger.info(f"[AIBOT_UCS] Uploaded image to cloud: {cloud_url} ({mime_type}, key={storage_key})")
-    except Exception as e:
-        logger.error(f"[AIBOT_UCS] Cloud upload failed: {e}")
-        
-    return cloud_url, storage_key, mime_type, filename
 
 
 async def _handle_mixed_message(
@@ -1604,11 +1219,11 @@ async def _handle_mixed_message(
     if text_content:
         prompt = text_content
     else:
-        prompt = "Φ»╖µÅÅΦ┐░Φ┐Öσ╝áσ¢╛τëçτÜäσåàσ«╣"
+        prompt = "请描述这张图片的内容"
 
     # If image decryption failed, fall back to text-only
     if not image_base64:
-        error_note = f"\n\n(µ│¿: σ¢╛τëçσñäτÉåσñ▒Φ┤Ñ: {image_error})" if image_error else ""
+        error_note = f"\n\n（提示：图片处理失败：{image_error}）" if image_error else ""
         modified_data = data.copy()
         modified_data["text"] = {"content": prompt + error_note}
         modified_data["msgtype"] = "text"
@@ -1655,7 +1270,7 @@ async def _handle_image_message(
     if not image_urls:
         logger.warning(f"[AIBOT_IMAGE] bot={bot_type} no image URL found")
         stream_id = _generate_stream_id()
-        response_text = "µö╢σê░µé¿τÜäµ╢êµü»∩╝îΣ╜åµ£¬µë╛σê░σ¢╛τëçσåàσ«╣πÇéΦ»╖Θçìµû░σÅæΘÇüσ¢╛τëçπÇé"
+        response_text = "收到你的消息，但未找到图片内容。请重新发送图片。"
         _stream_tasks[stream_id] = {
             "content": response_text,
             "finished": True,
@@ -1677,7 +1292,7 @@ async def _handle_image_message(
     if not success:
         logger.error(f"[AIBOT_IMAGE] bot={bot_type} decrypt failed: {result}")
         stream_id = _generate_stream_id()
-        response_text = f"µö╢σê░µé¿τÜäσ¢╛τëç∩╝îΣ╜åσñäτÉåµù╢σç║τÄ░Θù«Θóÿ∩╝Ü{result}\n\nΦ»╖τ¿ìσÉÄΘçìΦ»ò∩╝îµêûµ╖╗σèáµûçσ¡ùΦ»┤µÿÄπÇé"
+        response_text = f"收到你的图片，但处理时出现问题：{result}\n\n请稍后重试，或添加文字说明。"
         _stream_tasks[stream_id] = {
             "content": response_text,
             "finished": True,
@@ -1694,7 +1309,7 @@ async def _handle_image_message(
 
     # Image decrypted successfully
     image_base64 = base64.b64encode(result).decode("utf-8")
-    prompt = "Φ»╖µÅÅΦ┐░σ╣╢σêåµ₧ÉΦ┐Öσ╝áσ¢╛τëçτÜäσåàσ«╣"
+    prompt = "请描述并分析这张图片的内容"
     # Use same stream_id logic to avoid duplicate uploads
     stream_id = _generate_stream_id()
     if wecom_msg_id:
@@ -1751,7 +1366,7 @@ async def _handle_vision_message(
     # Create stream task for tracking
     stream_id = existing_stream_id or _generate_stream_id()
     _stream_tasks[stream_id] = {
-        "content": "µ¡úσ£¿σêåµ₧Éσ¢╛τëç...",
+        "content": "正在分析图片...",
         "finished": False,
         "created_at": time.time(),
         "bot_type": bot_type,
@@ -1821,7 +1436,7 @@ async def _handle_vision_message(
     )
 
     # Return immediate "analyzing" response
-    stream_json = _make_text_stream(stream_id, "µ¡úσ£¿σêåµ₧Éσ¢╛τëç...", finish=False)
+    stream_json = _make_text_stream(stream_id, "正在分析图片...", finish=False)
     encrypted = _encrypt_response(bot_type, stream_json, nonce, timestamp)
 
     logger.info(f"[AIBOT_VISION] bot={bot_type} stream_id={stream_id} analyzing image")
@@ -1921,7 +1536,7 @@ async def _call_vision_llm_async(
         logger.error(f"[AIBOT_VISION_ERR] bot={bot_type} error={e}")
         if stream_id in _stream_tasks:
             _stream_tasks[stream_id]["content"] = (
-                f"µè▒µ¡ë∩╝îσ¢╛τëçσêåµ₧Éµ£ìσèíµÜéµù╢Σ╕ìσÅ»τö¿: {str(e)[:100]}"
+                f"抱歉，图片分析服务暂时不可用: {str(e)[:100]}"
             )
             _stream_tasks[stream_id]["finished"] = True
             _stream_tasks[stream_id]["completed_at"] = time.time()
@@ -1929,7 +1544,7 @@ async def _call_vision_llm_async(
     except Exception as e:
         logger.exception(f"[AIBOT_VISION_ERR] bot={bot_type} unexpected error: {e}")
         if stream_id in _stream_tasks:
-            _stream_tasks[stream_id]["content"] = "σ¢╛τëçσêåµ₧Éµù╢σÅæτöƒΘöÖΦ»»∩╝îΦ»╖τ¿ìσÉÄΘçìΦ»òπÇé"
+            _stream_tasks[stream_id]["content"] = "图片分析时发生错误，请稍后重试。"
             _stream_tasks[stream_id]["finished"] = True
             _stream_tasks[stream_id]["completed_at"] = time.time()
 
