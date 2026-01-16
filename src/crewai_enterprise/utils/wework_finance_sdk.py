@@ -102,8 +102,8 @@ class WeWorkFinanceSDK:
         self.lib.GetOutIndexBuf.restype = ctypes.c_char_p
         self.lib.GetOutIndexBuf.argtypes = [ctypes.c_void_p]
 
-        # char* GetData(MediaData_t* media_data)
-        self.lib.GetData.restype = ctypes.c_char_p
+        # char* GetData(MediaData_t* media_data) - MUST use c_void_p to avoid null truncation
+        self.lib.GetData.restype = ctypes.c_void_p
         self.lib.GetData.argtypes = [ctypes.c_void_p]
 
         # int GetIndexLen(MediaData_t* media_data)
@@ -214,7 +214,8 @@ class WeWorkFinanceSDK:
                 data_ptr = self.lib.GetData(media_out)
                 data_len = self.lib.GetDataLen(media_out)
                 if data_ptr and data_len > 0:
-                    full_data += data_ptr[:data_len]
+                    # Use string_at to get binary data without null truncation
+                    full_data += ctypes.string_at(data_ptr, data_len)
                 
                 next_index_ptr = self.lib.GetOutIndexBuf(media_out)
                 next_index_len = self.lib.GetIndexLen(media_out)
