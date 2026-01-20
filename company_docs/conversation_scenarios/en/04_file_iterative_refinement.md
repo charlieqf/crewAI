@@ -8,9 +8,10 @@ After generating a file, the user wants to refine it based on previous results, 
 
 1. **Support Iterative Refinement**: Users can modify based on previous files.
 2. **Retain Full Context**: AI knows what was generated before.
-3. **Understand Refinement Instructions**: e.g., "redo", "improve", "change style".
+3. **File Expiration**: Auto-sticky context expires after 10 minutes.
+4. **Quote Support**: Users can quote specific files for precision.
 
-## Conversation Example
+## Conversation Examples
 
 ### Iterative Refinement Flow
 ```
@@ -26,84 +27,7 @@ Gemini: Cloud Link: http://wecomfile.medmeeting.com/wecom/v3.html
 # AI changes buttons to gradient based on the fintech style
 ```
 
-### Mixing Conversation and File Generation
-```
-User: @gemini What are the typical characteristics of fintech style?
-Gemini: Fintech style usually has following features:
-        1. Dark background with bright accents
-        2. Tech-feel gradients...
-        (Plain text reply)
-
-User: @gemini /file-html Redesign the login page according to this style
-Gemini: Cloud Link: http://wecomfile.medmeeting.com/wecom/v4.html
-# AI generates combining previous fintech style discussion
-```
-
-## File Information in Context
-
-### Saving File Context
-```python
-# Save to context when generating a file
-context_manager.save_file(
-    chat_id=chat_id,
-    sender_id=f"bot_{bot_type}",
-    sender_name=bot_type,
-    file_uri=cloud_url,       # Cloud link
-    filename=filename,         # output.html
-    mime_type="text/html",
-)
-
-# Also save as a message
-context_manager.add_message(
-    chat_id=chat_id,
-    content=f"Cloud Link: {cloud_url}",  # Reply content
-    role="assistant",
-)
-```
-
-### Context Seen by LLM
-```python
-messages = [
-    {"role": "system", "content": "..."},
-    {"role": "user", "content": "Make a login page"},
-    {"role": "assistant", "content": "Cloud Link: http://.../v1.html"},
-    {"role": "user", "content": "Redo a version, change style to fintech"},  # Current
-]
-```
-
-## Key Issues
-
-### Issue 1: How does the AI "remember" previous file content?
-
-**Current Solution**:
-- AI only sees the text reply "Cloud Link: xxx".
-- AI cannot access the actual HTML content of the file.
-- However, AI has the full conversation history and knows what the user previously requested.
-
-**Potential Problem**:
-```
-User: @gemini /file-html Change title from "Welcome" to "Login System"
-# AI doesn't know the current title is "Welcome", might not modify accurately
-```
-
-**Improvement Option A - Save HTML Summary**:
-```python
-# Save a summary when generating the file
-context_manager.add_message(
-    content=f"[Generated HTML file]\nSummary: Login page, blue theme, contains title 'Welcome', forms...",
-    role="assistant",
-)
-```
-
-**Improvement Option B - Reference File Content**:
-```python
-# User can Quote the file to let AI read content
-User: [Quotes previous cloud link message]
-User: @gemini /file-html Based on this file, change title to "Login System"
-```
-
-### Issue 2: How to distinguish between multiple files?
-
+### Quote-Based Refinement
 ```
 User: @gemini /file-html Login page
 Gemini: Cloud Link: http://.../login.html
@@ -111,24 +35,138 @@ Gemini: Cloud Link: http://.../login.html
 User: @gemini /file-html Registration page
 Gemini: Cloud Link: http://.../register.html
 
-User: @gemini /file-html Improve login page
-# How does the AI know which one to improve?
+User: [Quotes the login.html message]
+User: @gemini /file-html Improve this page, add dark mode
+Gemini: Cloud Link: http://.../login_v2.html
+# AI precisely identifies which file to improve via quoted message
 ```
 
-**Solution**:
-1. Explicitly specify: "Improve the previous login page"
-2. Quote message: Quote the cloud link for the login page
+## File Context Retrieval
+
+### Priority Order
+The system retrieves file context in this order:
+
+1. **Quoted Message ID** - Highest priority, user explicitly quotes a file
+2. **Quoted Filename** - User mentions a specific filename
+3. **Latest File (Sticky)** - Most recent file within 10-minute window
+
+### Code Implementation
+```python
+# 1. Quoted File (Specific) - by MsgId
+file_ctx = None
+if quoted_msg_id:
+    file_ctx = context_manager.get_active_file(chat_id, wecom_msg_id=quoted_msg_id, bot_type=bot_type)
+
+# 2. Quoted File (Specific) - by Filename
+if not file_ctx and quoted_filename:
+    file_ctx = context_manager.get_active_file(chat_id, filename=quoted_filename, bot_type=bot_type)
+
+# 3. Latest File (Sticky) - with 10-minute time window
+if not file_ctx:
+    file_ctx = context_manager.get_active_file(chat_id, limit=50, bot_type=bot_type)
+    
+    # Check if file is within 10-minute window
+    if file_ctx:
+        file_timestamp = file_ctx.get("timestamp", 0)
+        elapsed_minutes = (time.time() - file_timestamp) / 60
+        
+        if elapsed_minutes > 10:
+            logger.info(f"File expired (age: {elapsed_minutes:.1f}min > 10min)")
+            file_ctx = None  # Expired, don't use
+```
+
+## File Storage Format
+
+### Saving File Context
+```python
+# When generating a file
+context_manager.save_file(
+    chat_id=chat_id,
+    sender_id=f"bot_{bot_type}",
+    sender_name=bot_type,
+    file_uri=cloud_url,       # Cloud link
+    filename=filename,         # output.html
+    mime_type="text/html",
+    wecom_msg_id=wecom_msg_id,
+    bot_type=bot_type,
+    storage_key=storage_key,   # Links file to message
+)
+```
+
+### File Context Data Structure
+```python
+file_ctx = {
+    "uri": "http://wecomfile.medmeeting.com/wecom/xxx.html",
+    "filename": "output.html",
+    "mime": "text/html",
+    "timestamp": 1705551234.567,
+    "storage_key": "abc123"  # Links to original message
+}
+```
+
+## 10-Minute Sticky Window
+
+| Scenario | Behavior |
+|----------|----------|
+| User sends `/file-html` within 10 min of last file | Previous file context is available |
+| User sends `/file-html` after 10+ min | No automatic file context (starts fresh) |
+| User quotes a specific file | Quoted file used regardless of age |
+
+> [!NOTE]
+> The 10-minute window only applies to **automatic (sticky) context**. Explicitly quoted files are always retrieved regardless of age.
+
+## Message Flow Diagram
+
+```
+User: "@gemini /file-html Improve the design"
+           │
+           ▼
+┌─────────────────────────┐
+│ Check for Quoted Msg ID │
+│ → If found, use it      │
+└───────────┬─────────────┘
+           │ (not found)
+           ▼
+┌─────────────────────────┐
+│ Check for Quoted Filename│
+│ → If found, use it       │
+└───────────┬─────────────┘
+           │ (not found)
+           ▼
+┌─────────────────────────┐
+│ Get Latest File (Sticky)│
+│ → Check 10-min window   │
+└───────────┬─────────────┘
+           │
+           ▼
+┌─────────────────────────┐
+│ If valid file_ctx:      │
+│ Inject file into prompt │
+└───────────┬─────────────┘
+           │
+           ▼
+        Call LLM
+```
+
+## Expected Behavior Table
+
+| User Action | System Behavior |
+|-------------|-----------------|
+| `/file-html improve it` (within 10min) | Uses last generated file as context |
+| `/file-html improve it` (after 10min) | Starts fresh, no file context |
+| Quote + `/file-html improve this` | Uses quoted file regardless of age |
+| Mention filename "improve login.html" | Searches for file by name |
 
 ## Design Decisions
 
-| Decision Point | Current Solution | Alternatives |
-|-------|---------|---------|
-| Retain file content | Link only | Save HTML summary |
-| Refinement recognition | Rely on conversation history | Explicit file versioning |
-| Distinguish multiple files | User explicitly specifies | File tagging system |
+| Decision Point | Current Solution | Rationale |
+|----------------|------------------|-----------|
+| Sticky window duration | 10 minutes | Balance between convenience and context pollution |
+| File content in context | Link + metadata only | Full HTML would consume too many tokens |
+| Quote priority | Highest | User intent is explicit |
 
-## To Be Implemented
+## Related Features
 
-1. **File Content Summary**: Automatically generate summaries to save in context when creating files.
-2. **Version Association**: Link multiple versions of the same file.
-3. **Diff Preview**: Show change points during refinement.
+- **storage_key**: Links generated files back to original messages
+- **bot_type isolation**: Each bot maintains separate file context
+- **Filename matching**: Supports substring matching for flexibility

@@ -17,12 +17,24 @@ max_chars = 8000    # Maximum number of characters
 2. Remove starting from the earliest messages.
 3. System Prompt is always retained.
 
-## Memory Model: Hot vs. Cold Storage
+## Memory Model: Two Independent Storage Systems
 
-| Memory Type | Storage | Capacity | Access Rule (Decision Logic) |
+> [!IMPORTANT]
+> The AI Bot system uses **two completely separate databases** for different purposes.
+
+| System | Database | Purpose | Access Method |
 | :--- | :--- | :--- | :--- |
-| **Short-term (Context)** | Hot (chat_storage.db) | Recent 20 turns | Used for **immediate flow**. Automatically injected into LLM prompt. |
-| **Long-term (Archive)** | Cold (chat_history.db) | Years / Unlimited | Used for **historical recall**. Must be retrieved via `ArchiveSearchTool`. |
+| **LLM Context** | `chat_storage.db` | Store conversation history for AI bots | `ChatContextManager` / `ChatStorageTool` |
+| **WeCom Archive** | `chat_history.db` | Compliance archiving of all WeCom messages | `ArchiveSearchTool` / `archive_sync_worker.py` |
+
+### Key Differences
+
+| Aspect | LLM Context (chat_storage.db) | WeCom Archive (chat_history.db) |
+| :--- | :--- | :--- |
+| **Data Source** | AI bot conversations only | ALL WeCom messages (including non-bot) |
+| **Retention** | Rolling window (20 msgs / 8000 chars) | Permanent (years) |
+| **Isolation** | Per bot_type | Global (all users, all chats) |
+| **Location** | Application directory | `/var/lib/wecom-callback/` |
 
 ### Decision Rule: When to Use Archive vs. Context
 
@@ -37,9 +49,9 @@ max_chars = 8000    # Maximum number of characters
 
 ---
 
-## Context Contamination & Persistence Policy
+## Context Control Commands
 
-### 1. The /reset vs. /new Policy
+### Context Reset (`/reset`, `/new`)
 
 | Command | Status | Clears Chat History? | Clears File Context? | Clears Codebase Context? |
 | :--- | :--- | :--- | :--- | :--- |
@@ -49,10 +61,64 @@ max_chars = 8000    # Maximum number of characters
 > [!NOTE]
 > **Codebase context (`/codebase`) persists across `/new`** because it is often considered an "environment setting" for the current project session, whereas files are often "focal points" for a specific sub-topic.
 
-### 2. Multi-Bot Context Sharing
-- **Policy**: All bots in the same group chat **share the same short-term context**.
-- **User Intent**: If you talk to `@gemini` and then `@chatgpt`, ChatGPT will see Gemini's previous responses. 
-- **Contamination Risk**: If you want a bot to start fresh without seeing what another bot said, use `/reset` or `/new` (depending on whether you want to clear text history or just files).
+### Custom System Prompts (`/prompt`)
+
+Users can set per-bot custom system prompts that persist across conversations:
+
+```python
+# Set custom prompt for a specific bot in a chat
+context_manager.set_custom_prompt(
+    chat_id="group123",
+    user_id="user456",
+    bot_type="gemini",
+    custom_prompt="You are a Python expert. Always provide code examples."
+)
+
+# Retrieve custom prompt
+prompt = context_manager.get_custom_prompt(chat_id="group123", bot_type="gemini")
+```
+
+| Feature | Behavior |
+|---------|----------|
+| Scope | Per chat + per bot |
+| Persistence | Stored in `custom_prompts` table |
+| Priority | Custom prompt overrides default system prompt |
+
+---
+
+## Multi-Bot Context Isolation
+
+### Current Implementation (Updated)
+- **Policy**: Each bot (gemini/chatgpt/grok) maintains **isolated context** within the same chat.
+- **Implementation**: `bot_type` parameter filters messages in `get_context()`.
+- **User Intent**: If you talk to `@gemini` and then `@chatgpt`, ChatGPT will NOT see Gemini's responses.
+
+```python
+def get_context(self, chat_id: str, bot_type: str | None = None) -> ChatContext:
+    # Get messages filtered by bot_type
+    result = self.storage._run(
+        action="get_recent_json",
+        chat_id=chat_id,
+        bot_type=bot_type,  # Filters to this bot's messages only
+        since_ts=context_start,
+        limit=self.max_messages * 2,
+    )
+    # Apply sliding window limits...
+```
+
+### Context Start Timestamp
+
+Each bot can have an independent "context start" timestamp, allowing selective resets:
+
+```python
+# Reset context for only gemini in this chat
+context_manager.set_context_start(
+    chat_id="group123",
+    bot_type="gemini",
+    user_id="user456",
+    timestamp=None  # Defaults to now
+)
+```
 
 ---
 
@@ -80,11 +146,13 @@ Gemini: (Triggers search_archive) 🔍 Found "Spec.pdf".
 |-----|---------|---------|
 | When to truncate? | Exceeds 20 messages or 8000 characters | Configurable |
 | What to truncate? | Earliest messages | Based on importance |
-| Share between Bots? | Yes (same chat_id) | Isolate by bot_type |
+| Share between Bots? | No (isolated by bot_type) | Share all |
 | Codebase Persistence | Persists across /new | Reset on /new |
+| Custom Prompts | Per bot, persisted | Per chat only |
 
 ## For Consideration
 
 1. **Summary Chain**: Use small-scale summaries of truncated turns to extend "perceived" context.
 2. **Pinned Context**: Allow users to explicitly "pin" a file or message so it never truncates.
 3. **Cross-Group Search**: Should a user be able to search archives of Group A while in Group B? (Current: Prohibited for security).
+4. **Prompt Templates**: Pre-defined prompt templates users can select from.

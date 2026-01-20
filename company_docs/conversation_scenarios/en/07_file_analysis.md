@@ -8,15 +8,14 @@ The user sends a file (PDF, image, etc.), and the AI analyzes the file content t
 
 | Type | Gemini | ChatGPT | Grok | Fallback Behavior |
 |-----|--------|---------|------|-------------------|
-| **Images** | ✅ Native | ✅ Vision | ✅ Vision | None regular. |
-| **PDF** | ✅ Native | ⚠️ Fallback | ❌ Unsupported | Non-Gemini bots use tools to extract text/links. |
-| **Docs** | ✅ Native | ❌ Unsupported | ❌ Unsupported | Bot prompts: "Please send as PDF or text." |
+| **Images** | Vision | Vision | Vision attempt | If image decrypt fails, fall back to text-only. |
+| **PDF** | File analysis enabled | File analysis enabled | Not supported | If analysis fails, fall back to text-only with a hint. |
+| **Docs** | File analysis enabled | File analysis enabled | Not supported | If analysis fails, fall back to text-only with a hint. |
 
 ### Policy: Bot Capability Fallback
 If a user sends a file type not natively supported by the targeted bot:
-1. **Tool-based Extraction**: If the bot has access to a `FileOCR` or `PDFParser` tool, it will attempt to use it first.
-2. **User Prompt**: If no tool is available, the bot **must** reply with:
-   > "I've received your file: {filename}, but as {bot_type}, I cannot analyze {mime_type} files directly. Please try @gemini or send the content as plain text."
+1. **File Context Skipped**: The bot does not load file content for analysis.
+2. **Text-only Response**: The bot continues with normal text processing and may append a hint that file context was unavailable.
 
 ---
 
@@ -25,9 +24,8 @@ If a user sends a file type not natively supported by the targeted bot:
 When a chat contains multiple files, the system uses the following **Selection Rule Priority**:
 
 1. **Explicit Quote (Highest)**: If the user message quotes a specific file message, use that file.
-2. **Most Recent (Default)**: If no quote, use the file sent within the last 10 minutes that is closest to the `@mention` message.
-3. **Ambiguity Resolution**: If two different files were sent simultaneously or the context is unclear:
-   - The bot should **ask the user** to clarify or quote the specific file.
+2. **Most Recent (Default)**: If no quote, use the latest file within the last 10 minutes.
+3. **No Auto-Disambiguation**: If multiple files exist, the system still picks the most recent file. Users must quote a specific file to override.
 
 ### Example: Multi-file Comparison
 ```
@@ -35,22 +33,21 @@ User: [Sends Image: Layout_V1.png]
 User: [Sends Image: Layout_V2.png]
 User: @gemini Compare these two images.
 
-# Selection Logic: The bot sees two active files in the 10-minute window.
-Gemini: I see two images: "Layout_V1.png" and "Layout_V2.png". I will analyze both to provide a comparison.
+# Selection Logic: The bot uses the most recent file unless a quote is provided.
+Gemini: I will analyze "Layout_V2.png". If you want a comparison, please quote "Layout_V1.png".
 ```
 
 ---
 
 ## Conversation Example
 
-### PDF Analysis (Non-Gemini Fallback)
+### PDF Analysis (Fallback to Text)
 ```
 User: [Sends PDF file: Financial Report.pdf]
 User: @chatgpt What is the main content?
 
-# Logic: ChatGPT doesn't support PDF Native. It triggers a PDF tool if available.
-ChatGPT: 🔍 Parsing PDF "Financial Report.pdf"...
-         Based on the extracted text, this report covers...
+# Logic: File analysis is attempted; if it fails, fall back to text-only response.
+ChatGPT: I cannot load the PDF content in this session. Please try @gemini or paste the key sections as text.
 ```
 
 ### Image Analysis
@@ -66,12 +63,12 @@ User: [Sends Image 1: UI Design-Homepage.png]
 User: [Sends Image 2: UI Design-Details.png]
 User: @gemini Is the design style consistent across these two pages?
 
-Gemini: Analyzing these two design drafts:
+Gemini: Analyzing the most recent design draft:
         
         **Consistency Analysis**
-        - Color System: Both pages use a blue primary color ✅
-        - Fonts: Titles use Source Han Sans ✅
-        - Spacing: Detail page spacing is slightly larger, recommend unifying ⚠️
+        - Color System: Both pages use a blue primary color (OK)
+        - Fonts: Titles use Source Han Sans (OK)
+        - Spacing: Detail page spacing is slightly larger, recommend unifying (Note)
         ...
 ```
 
@@ -99,7 +96,8 @@ def get_target_file(chat_data):
     if not recent_files:
         return None
     
-    return recent_files[0] # Return the most recent
+    # Return the most recent file only
+    return recent_files[0]
 ```
 
 ## Multi-turn File Conversation
@@ -158,17 +156,15 @@ response = router.chat_with_file(
 )
 ```
 
-### OpenAI - Image Vision
+### Vision - Image Support
 ```python
-# Only supports images, not PDF
-response = router.chat(
-    provider="openai",
-    messages=[
-        {"role": "user", "content": [
-            {"type": "text", "text": "Describe this image"},
-            {"type": "image_url", "image_url": {"url": image_url}}
-        ]}
-    ]
+response = router.chat_with_image(
+    provider=provider,
+    text="Describe this image",
+    image_base64=image_base64,
+    system_prompt=system_prompt,
+    history=history_messages,
+    max_tokens=4096,
 )
 ```
 
@@ -177,10 +173,10 @@ response = router.chat(
 | Decision Point | Current Solution | Alternatives |
 |-------|---------|---------|
 | Selection Logic | Quote > Most Recent | Always ask |
-| Unsupported Formats | Prompt the user with fallback advice | Silent ignore |
-| Multi-file Support | Up to 10 files in context | Limit to 1 |
+| Unsupported Formats | Text-only fallback (hint on failure) | Prompt user explicitly |
+| Multi-file Support | Single active file in context | Multi-file selection |
 
 ## For Consideration
 
-1. **OCR for non-Gemini**: Should we build a heavy OCR service for non-native bots?
+1. **OCR for non-Gemini**: Should we build OCR or PDF parsing to avoid text-only fallback?
 2. **Permanent Files**: Allowing `/pin_file` to keep a document in context indefinitely.

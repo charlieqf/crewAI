@@ -310,7 +310,7 @@ def sync(start_seq: int):
             return {"status": "error", "message": "Failed to initialize SDK"}
 
         # Pull messages
-        chat_data = sdk.get_chat_data(start_seq, limit=500)
+        chat_data = sdk.get_chat_data(start_seq, limit=100)
         if not chat_data:
             return {"status": "ok", "new_max_seq": start_seq, "processed": 0, "files": 0}
 
@@ -332,9 +332,9 @@ def sync(start_seq: int):
         for msg in chat_data:
             msg_seq = msg.get("seq", 0)
             try:
-                # Update sequence immediately to ensure we advance even on failure
-                # (Cursor is committed at the end of the batch)
-                new_max_seq = max(new_max_seq, msg_seq)
+                # Update sequence to the current message's seq.
+                # Since SDK returns them in order, the last one will be the new cursor.
+                new_max_seq = msg_seq
 
                 # RSA Decrypt
                 encrypted_key = base64.b64decode(msg.get("encrypt_random_key", ""))
@@ -395,6 +395,35 @@ def sync(start_seq: int):
                 elif msg_type == "image":
                     if process_image_message(sdk, decrypted_msg, cursor):
                         files_processed += 1
+                elif msg_type == "mixed":
+                    logger.info(f"Processing mixed message seq={msg_seq}")
+                    items = decrypted_msg.get("mixed", {}).get("item", [])
+                    logger.info(f"Mixed message has {len(items)} items")
+                    for idx, item in enumerate(items):
+                        it_type = item.get("type")
+                        it_content = item.get("content", "")
+                        if not it_content:
+                            continue
+                        try:
+                            it_data = json.loads(it_content)
+                            logger.info(f"Processing mixed item {idx} type {it_type}")
+                            # Wrap item data in a fake message structure for existing handlers
+                            fake_msg = {
+                                "msgid": f"{decrypted_msg.get('msgid', '')}_mixed_{idx}",
+                                "roomid": decrypted_msg.get("roomid", ""),
+                                "from": decrypted_msg.get("from", ""),
+                                it_type: it_data,
+                            }
+                            if it_type == "image":
+                                if process_image_message(sdk, fake_msg, cursor):
+                                    files_processed += 1
+                                    logger.info(f"Successfully processed mixed image {idx}")
+                            elif it_type == "file":
+                                if process_file_message(sdk, fake_msg, cursor):
+                                    files_processed += 1
+                                    logger.info(f"Successfully processed mixed file {idx}")
+                        except Exception as it_e:
+                            logger.error(f"Failed to process mixed item {idx} for seq {msg_seq}: {it_e}")
 
                 logger.info(f"Processed msg seq={msg_seq} type={msg_type}")
                 processed += 1
@@ -404,8 +433,8 @@ def sync(start_seq: int):
 
         conn.commit()
 
-        # Update cursor
-        if new_max_seq > start_seq:
+        # Update cursor always if we got results (even if smaller due to wrap-around)
+        if processed > 0:
             cursor.execute(
                 "UPDATE archive_cursor SET seq = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1",
                 (new_max_seq,),
