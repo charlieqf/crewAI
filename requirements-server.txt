@@ -40,6 +40,7 @@ boto3>=1.28.0
 pypdf>=3.15.0
 
 # OCR (CPU-only)
+paddlepaddle==2.6.2
 paddleocr>=3.3.0
 pdf2image>=1.17.0
 pillow>=10.0.0
