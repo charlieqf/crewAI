@@ -292,6 +292,7 @@ class ChatContextManager:
         file_uri: str,
         filename: str,
         mime_type: str,
+        file_hash: str | None = None,
         wecom_msg_id: str | None = None,
         bot_type: str | None = None,
         storage_key: str | None = None,
@@ -303,7 +304,8 @@ class ChatContextManager:
             "uri": file_uri,
             "filename": filename,
             "mime": mime_type,
-            "timestamp": time.time()
+            "timestamp": time.time(),
+            "hash": file_hash,
         }
         
         self.storage._run(
@@ -356,6 +358,16 @@ class ChatContextManager:
             bot_type=bot_type,
             since_ts=since_ts,
         )
+
+        if bot_type and (not result or result == "[]"):
+            # Fallback: allow shared file contexts that were stored without bot_type
+            result = self.storage._run(
+                action="get_recent_json",
+                chat_id=chat_id,
+                limit=limit,
+                bot_type=None,
+                since_ts=since_ts,
+            )
         
         if not result or result == "[]":
             return None
@@ -378,6 +390,8 @@ class ChatContextManager:
                         # Filter logic
                         if wecom_msg_id:
                             if msg.get("wecom_msg_id") == wecom_msg_id:
+                                if "hash" not in data:
+                                    logger.info(f"[FILE_CTX] Missing hash for file: {data.get('filename')}")
                                 return data
                         elif filename:
                             # Robust filename match:
@@ -385,6 +399,8 @@ class ChatContextManager:
                             sought_name = filename.lower()
                             
                             if stored_name == sought_name or sought_name in stored_name or stored_name in sought_name:
+                                if "hash" not in data:
+                                    logger.info(f"[FILE_CTX] Missing hash for file: {data.get('filename')}")
                                 return data
                             
                             # Fallback: if stored name is "unknown_file", we might still want it 
@@ -392,6 +408,8 @@ class ChatContextManager:
                             # Let's stick to name matching for now but allow substring.
                         elif not wecom_msg_id and not filename:
                             # Default: just get the latest one
+                            if "hash" not in data:
+                                logger.info(f"[FILE_CTX] Missing hash for file: {data.get('filename')}")
                             return data
                     except:
                         continue

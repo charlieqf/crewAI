@@ -24,15 +24,21 @@ import asyncio
 import base64
 import json
 import logging
+import mimetypes
 import os
 import re
 import time
+from urllib.parse import urlparse
 from typing import Any
+
+import requests
 
 from fastapi import APIRouter, BackgroundTasks, FastAPI, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse, Response
 
 from src.crewai_enterprise.utils.chat_context import get_context_manager
+from src.crewai_enterprise.utils.file_extraction_queue import schedule_file_extraction
+from src.crewai_enterprise.utils.storage_manager import get_storage_manager
 from src.crewai_enterprise.server.handlers.aibot import (
     BOT_CONFIGS,
     PROJECT_NICKNAMES,
@@ -50,6 +56,7 @@ from src.crewai_enterprise.server.handlers.aibot import (
     _has_image_in_mixed,
     _make_text_stream,
     _processed_messages,
+    _sanitize_filename,
     _sanitize_text,
     _stream_tasks,
     _user_project_context,
@@ -187,6 +194,7 @@ async def _handle_text_message(
     from_data = data.get("from", {})
     user_id = from_data.get("user_id", from_data.get("userid", "unknown"))
     user_name = from_data.get("name", from_data.get("alias", user_id))
+    chat_id = _extract_chat_id(data, user_id)
 
     # Extract quoted message content if present
     quoted_content, quoted_msg_id = _extract_quote_content(data)
@@ -425,6 +433,7 @@ async def _handle_mixed_message(
     image_error = None
     file_url = None
     storage_key = None
+    file_hash = None
 
     # Try the first image
     if image_urls:
@@ -439,7 +448,15 @@ async def _handle_mixed_message(
                 _processed_messages[wecom_msg_id] = stream_id
             
             # Upload to cloud storage (UCS Phase 1) - Fix: Persistence for mixed messages
-            file_url, storage_key, _, _ = _upload_image_to_ucs(result)
+            file_url, storage_key, mime_type, filename = _upload_image_to_ucs(result)
+            file_hash = schedule_file_extraction(
+                chat_id=chat_id,
+                wecom_msg_id=wecom_msg_id,
+                storage_key=storage_key,
+                filename=filename,
+                mime_type=mime_type,
+                file_bytes=result,
+            )
         else:
             image_error = result
             logger.warning(f"[AIBOT_MIXED] bot={bot_type} image decrypt failed: {result}")
@@ -460,8 +477,185 @@ async def _handle_mixed_message(
 
     # Process with image using vision API
     return await _handle_vision_message(
-        bot_type, data, nonce, timestamp, prompt, image_base64, user_id, user_name, file_url, storage_key, stream_id, response_url=response_url
+        bot_type,
+        data,
+        nonce,
+        timestamp,
+        prompt,
+        image_base64,
+        user_id,
+        user_name,
+        file_url,
+        storage_key,
+        stream_id,
+        file_hash=file_hash,
+        response_url=response_url,
     )
+
+
+async def _handle_file_message(
+    bot_type: str,
+    data: dict,
+    nonce: str,
+    timestamp: str,
+    response_url: str | None = None,
+) -> Response:
+    """Handle file-only messages (PDF, docs, spreadsheets)."""
+    wecom_msg_id = _extract_msg_id(data)
+    if wecom_msg_id and wecom_msg_id in _processed_messages:
+        existing_stream_id = _processed_messages[wecom_msg_id]
+        task = _stream_tasks.get(existing_stream_id)
+        if task:
+            logger.info(f"[AIBOT_DEDUP] bot={bot_type} file msg_id={wecom_msg_id} returning cached response")
+            stream_json = _make_text_stream(existing_stream_id, task["content"], task["finished"])
+            encrypted = _encrypt_response(bot_type, stream_json, nonce, timestamp)
+            return Response(content=encrypted, media_type="text/plain")
+
+    _cleanup_old_tasks()
+
+    from_data = data.get("from", {})
+    user_id = from_data.get("user_id", from_data.get("userid", "unknown"))
+    user_name = from_data.get("name", from_data.get("alias", user_id))
+    chat_id = _extract_chat_id(data, user_id)
+
+    file_url, file_name, mime_type = _extract_file_info(data)
+    logger.info(
+        f"[AIBOT_FILE] bot={bot_type} user={user_name} file={file_name} mime={mime_type} "
+        f"url={(file_url[:60] + '...') if file_url else 'None'}"
+    )
+
+    if not file_url:
+        return _file_error_response(
+            bot_type, nonce, timestamp, user_id, user_name, chat_id,
+            "未获取到文件链接，请重试。"
+        )
+
+    try:
+        resp = requests.get(file_url, timeout=60)
+        resp.raise_for_status()
+        file_bytes = resp.content
+    except Exception as e:
+        logger.error(f"[AIBOT_FILE] Failed to download file: {e}")
+        return _file_error_response(
+            bot_type, nonce, timestamp, user_id, user_name, chat_id,
+            f"文件下载失败：{str(e)[:50]}"
+        )
+
+    header_name = None
+    content_disp = resp.headers.get("Content-Disposition", "")
+    if "filename=" in content_disp:
+        header_name = content_disp.split("filename=")[-1].strip('"')
+
+    if not file_name or file_name in ("unnamed", "unknown"):
+        file_name = header_name
+    if not file_name:
+        url_path = urlparse(file_url).path
+        name_from_url = os.path.basename(url_path)
+        file_name = name_from_url or f"file_{wecom_msg_id or int(time.time())}"
+
+    file_name = _sanitize_filename(file_name)
+
+    if not mime_type or mime_type == "application/octet-stream":
+        header_ct = resp.headers.get("Content-Type", "")
+        if header_ct:
+            mime_type = header_ct.split(";")[0].strip()
+    if not mime_type or mime_type == "application/octet-stream":
+        guessed = mimetypes.guess_type(file_name)[0]
+        if guessed:
+            mime_type = guessed
+
+    storage = get_storage_manager()
+    upload_res = storage.upload_file(file_bytes, file_name, content_type=mime_type)
+
+    file_hash = schedule_file_extraction(
+        chat_id=chat_id,
+        wecom_msg_id=wecom_msg_id,
+        storage_key=upload_res.key,
+        filename=file_name,
+        mime_type=mime_type,
+        file_bytes=file_bytes,
+    )
+
+    context_manager = get_context_manager()
+    context_manager.save_file(
+        chat_id=chat_id,
+        sender_id=user_id,
+        sender_name=user_name,
+        file_uri=upload_res.url,
+        filename=file_name,
+        mime_type=mime_type,
+        file_hash=file_hash,
+        wecom_msg_id=wecom_msg_id,
+        bot_type=bot_type,
+        storage_key=upload_res.key,
+    )
+    context_manager.add_message(
+        chat_id=chat_id,
+        sender_id=user_id,
+        sender_name=user_name,
+        content=f"[文件: {file_name}] 已保存并上传",
+        role="user",
+        wecom_msg_id=wecom_msg_id,
+        bot_type=bot_type,
+    )
+
+    stream_id = _generate_stream_id()
+    if wecom_msg_id:
+        _processed_messages[wecom_msg_id] = stream_id
+
+    response_text = "正在分析文件..."
+    _stream_tasks[stream_id] = {
+        "content": response_text,
+        "finished": False,
+        "created_at": time.time(),
+        "bot_type": bot_type,
+        "chat_id": chat_id,
+        "user_id": user_id,
+        "user_name": user_name,
+    }
+
+    prompt = f"用户上传了文件 {file_name}，请总结文件主要内容并回答问题。"
+    asyncio.create_task(
+        _call_llm_async(
+            stream_id=stream_id,
+            bot_type=bot_type,
+            content=prompt,
+            chat_id=chat_id,
+            user_id=user_id,
+            user_name=user_name,
+            wecom_msg_id=wecom_msg_id,
+            response_url=response_url,
+        )
+    )
+
+    stream_json = _make_text_stream(stream_id, response_text, finish=False)
+    encrypted = _encrypt_response(bot_type, stream_json, nonce, timestamp)
+    return Response(content=encrypted, media_type="text/plain")
+
+
+def _file_error_response(
+    bot_type: str,
+    nonce: str,
+    timestamp: str,
+    user_id: str,
+    user_name: str,
+    chat_id: str,
+    message: str,
+) -> Response:
+    stream_id = _generate_stream_id()
+    _stream_tasks[stream_id] = {
+        "content": message,
+        "finished": True,
+        "created_at": time.time(),
+        "completed_at": time.time(),
+        "bot_type": bot_type,
+        "chat_id": chat_id,
+        "user_id": user_id,
+        "user_name": user_name,
+    }
+    stream_json = _make_text_stream(stream_id, message, finish=True)
+    encrypted = _encrypt_response(bot_type, stream_json, nonce, timestamp)
+    return Response(content=encrypted, media_type="text/plain")
 
 
 async def _handle_image_message(
@@ -545,12 +739,32 @@ async def _handle_image_message(
         _processed_messages[wecom_msg_id] = stream_id
 
     # Upload to cloud storage (UCS Phase 1)
-    file_url, storage_key, _, _ = _upload_image_to_ucs(result)
+    file_url, storage_key, mime_type, filename = _upload_image_to_ucs(result)
+    file_hash = schedule_file_extraction(
+        chat_id=_extract_chat_id(data, user_id),
+        wecom_msg_id=wecom_msg_id,
+        storage_key=storage_key,
+        filename=filename,
+        mime_type=mime_type,
+        file_bytes=result,
+    )
 
     logger.info(f"[AIBOT_IMAGE] bot={bot_type} image ready, sending to vision API")
 
     return await _handle_vision_message(
-        bot_type, data, nonce, timestamp, prompt, image_base64, user_id, user_name, file_url, storage_key, stream_id, response_url=response_url
+        bot_type,
+        data,
+        nonce,
+        timestamp,
+        prompt,
+        image_base64,
+        user_id,
+        user_name,
+        file_url,
+        storage_key,
+        stream_id,
+        file_hash=file_hash,
+        response_url=response_url,
     )
 
 
@@ -566,6 +780,7 @@ async def _handle_vision_message(
     file_url: str | None = None,
     storage_key: str | None = None,
     existing_stream_id: str | None = None,
+    file_hash: str | None = None,
     response_url: str | None = None,
 ) -> Response:
     """Handle vision (image+text) message with multimodal LLM.
@@ -637,6 +852,7 @@ async def _handle_vision_message(
                 file_uri=file_url,
                 filename=filename,
                 mime_type=mime_type,
+                file_hash=file_hash,
                 wecom_msg_id=file_msg_id,
                 bot_type=bot_type,
                 storage_key=storage_key,

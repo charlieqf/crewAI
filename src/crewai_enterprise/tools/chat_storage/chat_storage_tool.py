@@ -19,6 +19,7 @@ from typing import Literal
 from crewai.tools import BaseTool
 from pydantic import BaseModel, Field
 
+from src.crewai_enterprise.utils.file_content_store import ensure_file_content_schema
 # Default DB path from environment - same as ChatContextManager
 DEFAULT_CHAT_DB_PATH = os.getenv("CHAT_DB_PATH", "chat_storage.db")
 
@@ -226,6 +227,9 @@ class ChatStorageTool(BaseTool):
             CREATE INDEX IF NOT EXISTS idx_context_session 
             ON chat_context_settings(session_id)
         """)
+
+        # File extraction cache table (shared with /file-html and quoted file analysis)
+        ensure_file_content_schema(self._sqlite_conn)
 
         # [MIGRATION] Backfill NULL bot_type values (Mandatory for isolation)
         cursor.execute("""

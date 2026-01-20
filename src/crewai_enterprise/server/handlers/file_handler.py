@@ -7,7 +7,9 @@ Handles processing of file/media messages (images, documents, etc.)
 from __future__ import annotations
 
 import logging
+import mimetypes
 import os
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from src.crewai_enterprise.utils.file_storage import (
@@ -19,6 +21,8 @@ from src.crewai_enterprise.utils.chat_context import (
     ChatContextManager,
     get_context_manager,
 )
+from src.crewai_enterprise.utils.file_extraction_queue import schedule_file_extraction
+from src.crewai_enterprise.utils.storage_manager import get_storage_manager
 from src.crewai_enterprise.tools.wecom.wecom_webhook_tool import (
     send_webhook_message,
     WeComWebhookError,
@@ -74,8 +78,42 @@ async def process_file_message(
             f"Saved file from {user_name}: {file_info.filename} ({file_info.size_bytes} bytes)"
         )
 
-        # Record file reference in context
-        file_reference = f"[文件: {file_info.filename}] 已保存到 {file_info.file_path}"
+        # Load file bytes for upload and extraction
+        file_bytes = Path(file_info.file_path).read_bytes()
+        mime_type = mimetypes.guess_type(file_info.filename)[0] or "application/octet-stream"
+
+        storage = get_storage_manager()
+        upload_res = storage.upload_file(
+            file_bytes,
+            file_info.filename,
+            content_type=mime_type,
+        )
+
+        file_hash = schedule_file_extraction(
+            chat_id=chat_id,
+            wecom_msg_id=message.msg_id,
+            storage_key=upload_res.key,
+            filename=file_info.filename,
+            mime_type=mime_type,
+            file_bytes=file_bytes,
+        )
+
+        # Persist file context for later quoting/reporting
+        context_manager.save_file(
+            chat_id=chat_id,
+            sender_id=message.from_user_name or "unknown",
+            sender_name=user_name,
+            file_uri=upload_res.url,
+            filename=file_info.filename,
+            mime_type=mime_type,
+            file_hash=file_hash,
+            wecom_msg_id=message.msg_id,
+            bot_type=bot_type,
+            storage_key=upload_res.key,
+        )
+
+        # Record a human-readable reference in context
+        file_reference = f"[文件: {file_info.filename}] 已保存并上传"
         context_manager.add_message(
             chat_id=chat_id,
             sender_id=message.from_user_name or "unknown",

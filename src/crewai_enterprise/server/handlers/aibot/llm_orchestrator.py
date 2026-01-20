@@ -22,6 +22,7 @@ from src.crewai_enterprise.server.handlers.aibot.commands import (
     _handle_prompt_command,
 )
 from src.crewai_enterprise.server.handlers.aibot.file_output import _format_chat_history
+from src.crewai_enterprise.utils.file_content_store import FileContentStore
 from src.crewai_enterprise.utils.llm_router import LLMError, get_router
 from src.crewai_enterprise.utils.chat_context import get_context_manager
 from src.crewai_enterprise.utils.storage_manager import get_storage_manager
@@ -976,6 +977,31 @@ async def _call_llm_async(
                 if elapsed_minutes > 10:
                     logger.info(f"[AIBOT_CTX] File expired (age: {elapsed_minutes:.1f}min > 10min), ignoring sticky context")
                     file_ctx = None  # Expired, don't use
+
+        extracted_record = None
+        if file_ctx or quoted_msg_id:
+            store = FileContentStore()
+            if file_ctx:
+                file_hash = file_ctx.get("hash")
+                if file_hash:
+                    extracted_record = store.get_by_hash(file_hash)
+                if not extracted_record:
+                    storage_key = file_ctx.get("storage_key")
+                    if storage_key:
+                        extracted_record = store.get_by_storage_key(storage_key)
+
+            if not extracted_record and quoted_msg_id:
+                extracted_record = store.get_by_msg_id(quoted_msg_id)
+                if not extracted_record and quoted_msg_id.startswith("file_"):
+                    extracted_record = store.get_by_msg_id(quoted_msg_id[5:])
+
+            if extracted_record and extracted_record.extracted_text:
+                label = extracted_record.filename or (file_ctx.get("filename") if file_ctx else "file")
+                snippet = extracted_record.extracted_text[:5000]
+                extracted_block = f"[Extracted Content: {label}]\n{snippet}"
+                if messages and messages[-1]["role"] == "user":
+                    messages[-1]["content"] = f"{extracted_block}\n\n{messages[-1]['content']}"
+                logger.info(f"[AIBOT_CTX] Injected extracted text for {label} ({len(snippet)} chars)")
 
         use_file_context = False
         if file_ctx:

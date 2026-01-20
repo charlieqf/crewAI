@@ -14,6 +14,7 @@ import os
 import sys
 import json
 import logging
+import mimetypes
 import sqlite3
 import hashlib
 import time
@@ -41,6 +42,8 @@ def load_env(path):
 load_env("/etc/wecom-callback/env")
 
 from src.crewai_enterprise.utils.wework_finance_sdk import WeWorkFinanceSDK
+from src.crewai_enterprise.utils.file_content_store import FileContentStore
+from src.crewai_enterprise.utils.file_extractor import compute_file_hash, extract_text_from_file
 from Crypto.PublicKey import RSA
 from Crypto.Cipher import PKCS1_v1_5
 import base64
@@ -156,6 +159,43 @@ def upload_to_qiniu(file_bytes: bytes, filename: str, content_type: str = None) 
         return None
 
 
+def _extract_and_store(
+    *,
+    file_bytes: bytes,
+    mime_type: str,
+    filename: str,
+    storage_key: str | None,
+    chat_id: str,
+    msgid: str,
+) -> None:
+    store = FileContentStore(db_path=os.getenv("CHAT_DB_PATH", "chat_storage.db"))
+    file_hash = compute_file_hash(file_bytes)
+    store.upsert_pending(
+        file_hash=file_hash,
+        chat_id=chat_id,
+        wecom_msg_id=msgid,
+        storage_key=storage_key,
+        filename=filename,
+        mime_type=mime_type,
+        size_bytes=len(file_bytes),
+    )
+
+    result = extract_text_from_file(file_bytes, mime_type)
+    if result.status in ("extracted", "partial"):
+        store.mark_extracted(
+            file_hash=file_hash,
+            extracted_text=result.text,
+            extracted_summary=None,
+            page_count=result.page_count,
+            status=result.status,
+        )
+    else:
+        store.mark_failed(
+            file_hash=file_hash,
+            error_message=result.error or "Extraction failed",
+        )
+
+
 def process_file_message(sdk, msg: dict, cursor) -> bool:
     """Download file from WeCom and upload to Qiniu."""
     try:
@@ -184,8 +224,10 @@ def process_file_message(sdk, msg: dict, cursor) -> bool:
         
         logger.info(f"Downloaded {len(file_bytes)} bytes")
         
+        mime_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+
         # Upload to Qiniu
-        file_uri = upload_to_qiniu(file_bytes, filename)
+        file_uri = upload_to_qiniu(file_bytes, filename, content_type=mime_type)
         if not file_uri:
             return False
         
@@ -203,6 +245,15 @@ def process_file_message(sdk, msg: dict, cursor) -> bool:
             file_uri
         ))
         
+        _extract_and_store(
+            file_bytes=file_bytes,
+            mime_type=mime_type,
+            filename=filename,
+            storage_key=None,
+            chat_id=msg.get("roomid", ""),
+            msgid=msg.get("msgid"),
+        )
+
         logger.info(f"Saved file record: {filename} -> {file_uri}")
         return True
         
@@ -265,6 +316,15 @@ def process_image_message(sdk, msg: dict, cursor) -> bool:
             file_uri
         ))
         
+        _extract_and_store(
+            file_bytes=image_bytes,
+            mime_type=content_type,
+            filename=filename,
+            storage_key=None,
+            chat_id=msg.get("roomid", ""),
+            msgid=msgid,
+        )
+
         logger.info(f"Saved image record: {filename} -> {file_uri}")
         return True
         

@@ -172,16 +172,22 @@ def _fetch_audit_messages(room_id: str, ts_filter: str, limit: int, is_range: bo
                     text_content = ""
                     if content_dict.get("msgtype") == "text":
                         text_content = content_dict.get("text", {}).get("content", "")
+                        message_type = "text"
                     elif content_dict.get("msgtype") == "file":
                         text_content = f"[File: {content_dict.get('file', {}).get('filename', 'unnamed')}]"
+                        message_type = "file"
+                    else:
+                        message_type = content_dict.get("msgtype") or "unknown"
                     
                     msgs.append({
                         "source": "audit",
                         "seq": seq,
                         "msgid": msgid,
+                        "wecom_msg_id": msgid,
                         "sender": sender_id,
                         "content": text_content,
                         "timestamp": created_at,
+                        "message_type": message_type,
                         "role": "user"
                     })
                 except Exception as e:
@@ -208,6 +214,8 @@ def _fetch_hot_messages(chat_id: str, ts_filter: str, limit: int, is_range: bool
             select_cols = ["sender_name", "content", "timestamp", "role", "wecom_msg_id"]
             if "bot_type" in columns:
                 select_cols.append("bot_type")
+            if "message_type" in columns:
+                select_cols.append("message_type")
 
             col_string = ", ".join(select_cols)
             ts_expr = SQL_TS_NORM.format(col="timestamp")
@@ -238,7 +246,8 @@ def _fetch_hot_messages(chat_id: str, ts_filter: str, limit: int, is_range: bool
                     "timestamp": str(msg_data["timestamp"]),
                     "role": msg_data["role"],
                     "bot_type": msg_data.get("bot_type"),
-                    "wecom_msg_id": msg_data["wecom_msg_id"]
+                    "wecom_msg_id": msg_data["wecom_msg_id"],
+                    "message_type": msg_data.get("message_type"),
                 })
     except Exception as e:
         logger.error(f"Error fetching hot messages: {e}")

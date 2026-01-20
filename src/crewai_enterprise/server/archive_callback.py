@@ -8,6 +8,7 @@ collect files from group chats.
 import hashlib
 import json
 import logging
+import mimetypes
 import os
 import sqlite3
 import json
@@ -19,6 +20,7 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request
 from fastapi.responses import Response
 
 from src.crewai_enterprise.utils.chat_context import get_context_manager
+from src.crewai_enterprise.utils.file_extraction_queue import schedule_file_extraction
 from src.crewai_enterprise.utils.storage_manager import get_storage_manager
 
 logger = logging.getLogger(__name__)
@@ -262,19 +264,32 @@ async def process_archive_message(message: dict, sdk):
 
         # 2. Upload to Qiniu
         storage = get_storage_manager()
-        upload_res = storage.upload_file(file_content, filename)
+        mime_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        upload_res = storage.upload_file(file_content, filename, content_type=mime_type)
         file_uri = upload_res.url
         logger.info(f"[ARCHIVE_UPLOAD] Uploaded to Qiniu: {file_uri}")
         
         # 3. Save to database
+        file_hash = schedule_file_extraction(
+            chat_id=chat_id,
+            wecom_msg_id=msg_id,
+            storage_key=upload_res.key,
+            filename=filename,
+            mime_type=mime_type,
+            file_bytes=file_content,
+        )
+
         context_manager = get_context_manager()
         context_manager.save_file(
             chat_id=chat_id,
             sender_id=sender_id,
+            sender_name=sender_id,
             wecom_msg_id=msg_id,
             filename=filename,
             file_uri=file_uri,
-            storage_key=upload_res.key
+            mime_type=mime_type,
+            file_hash=file_hash,
+            storage_key=upload_res.key,
         )
         logger.info(f"[ARCHIVE_DB] File context saved for {filename} in chat {chat_id}")
         
