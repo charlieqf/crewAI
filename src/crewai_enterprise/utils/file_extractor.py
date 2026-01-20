@@ -182,6 +182,12 @@ def _get_ocr():
     global _OCR_INSTANCE
     if _OCR_INSTANCE is None:
         from paddleocr import PaddleOCR
-
-        _OCR_INSTANCE = PaddleOCR(use_angle_cls=True, lang="ch", use_gpu=False)
+        try:
+            _OCR_INSTANCE = PaddleOCR(use_angle_cls=True, lang="ch", use_gpu=False)
+        except Exception as e:
+            logger.warning(f"PaddleOCR init fallback (use_gpu not supported): {e}")
+            try:
+                _OCR_INSTANCE = PaddleOCR(use_angle_cls=True, lang="ch", device="cpu")
+            except Exception:
+                _OCR_INSTANCE = PaddleOCR(use_angle_cls=True, lang="ch")
     return _OCR_INSTANCE
