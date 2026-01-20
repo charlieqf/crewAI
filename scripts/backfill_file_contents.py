@@ -23,6 +23,11 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Backfill file_contents from stored file contexts.")
     parser.add_argument("--db-path", default=None, help="Path to chat_storage.db (defaults to CHAT_DB_PATH)")
     parser.add_argument("--limit", type=int, default=1000, help="Max rows to process")
+    parser.add_argument(
+        "--since-date",
+        default=None,
+        help="Only process messages on/after this date (YYYY-MM-DD)",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Do not write extraction results")
     return parser.parse_args()
 
@@ -83,16 +88,18 @@ def main() -> int:
 
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
-    cursor.execute(
-        """
+    query = """
         SELECT chat_id, wecom_msg_id, content, storage_key
         FROM chat_messages
         WHERE message_type = 'file'
-        ORDER BY id DESC
-        LIMIT ?
-        """,
-        (args.limit,),
-    )
+    """
+    params: list[Any] = []
+    if args.since_date:
+        query += " AND DATE(timestamp) >= DATE(?)"
+        params.append(args.since_date)
+    query += " ORDER BY id DESC LIMIT ?"
+    params.append(args.limit)
+    cursor.execute(query, tuple(params))
 
     processed = 0
     for row in cursor.fetchall():
