@@ -45,13 +45,21 @@ def _download_file(uri: str | None, storage_key: str | None) -> bytes | None:
 
     if uri.startswith("file://"):
         path = uri[7:]
-        with open(path, "rb") as f:
-            return f.read()
+        try:
+            with open(path, "rb") as f:
+                return f.read()
+        except Exception as e:
+            logger.warning("Failed to read local file %s: %s", path, e)
+            return None
 
     if uri.startswith("http://") or uri.startswith("https://"):
-        resp = requests.get(uri, timeout=60)
-        resp.raise_for_status()
-        return resp.content
+        try:
+            resp = requests.get(uri, timeout=60)
+            resp.raise_for_status()
+            return resp.content
+        except Exception as e:
+            logger.warning("Download failed for %s: %s", uri, e)
+            return None
 
     return None
 
