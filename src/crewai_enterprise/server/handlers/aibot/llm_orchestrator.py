@@ -914,15 +914,33 @@ async def _call_llm_async(
         is_report_request = file_output_mode  # Only mark as report for file output
         
         # Determine effective archive range
+        ctx_start = None
         if archive_context_range:
             effective_range = archive_context_range
+            # Explicit /Nd commands bypass /reset
+            ctx_start = None
         elif file_output_mode:
             effective_range = date_range
+            # File generation commands also usually want the full range
+            ctx_start = None
         else:
             effective_range = "3h"  # Default for all normal conversations
+            # Default 3h injection respects /reset
+            ctx_start = context_manager.storage._run(
+                action="get_context_start",
+                chat_id=chat_id,
+                bot_type=bot_type
+            )
+            if ctx_start == "None":
+                ctx_start = None
         
-        logger.info(f"[ARCHIVE_CTX] Injecting archive context, chat={chat_id}, range={effective_range}")
-        history = get_merged_chat_history(chat_id, date=effective_range, limit=500)
+        logger.info(f"[ARCHIVE_CTX] Injecting archive context, chat={chat_id}, range={effective_range}, respect_reset={ctx_start is not None}")
+        history = get_merged_chat_history(
+            chat_id, 
+            date=effective_range, 
+            limit=500,
+            context_start_ts=ctx_start
+        )
         if history:
             archive_context = _format_chat_history(history)
             logger.info(f"[ARCHIVE_CTX] Injected {len(history)} messages from archive ({effective_range})")

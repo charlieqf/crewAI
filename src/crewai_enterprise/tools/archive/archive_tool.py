@@ -61,7 +61,8 @@ def _parse_time_range(pattern: str) -> Optional[timedelta]:
 def get_merged_chat_history(
     room_id: str, 
     date: str = "today", 
-    limit: int = 500
+    limit: int = 500,
+    context_start_ts: str | None = None,
 ) -> List[Dict[str, Any]]:
     """
     Retrieves and merges chat history from two sources:
@@ -70,7 +71,9 @@ def get_merged_chat_history(
     
     Args:
         date: "today", "yesterday", "last_24h", "2d", "3d", "1w", or "YYYY-MM-DD"
-              Supports patterns: Nd (last N days), Nw (last N weeks)
+              Supports patterns: Nd (last N days), Nw (last N weeks), Nh (last N hours)
+        context_start_ts: Optional ISO timestamp from /reset command. If provided,
+                          messages before this timestamp are excluded from results.
     """
     # Use Beijing time for relative date keywords (server may be in different timezone)
     now_bj = datetime.now(BEIJING_TZ)
@@ -114,6 +117,12 @@ def get_merged_chat_history(
         return _normalize_ts_to_iso(m.get("timestamp", ""))
 
     merged.sort(key=get_sort_key)
+
+    # Apply context_start_ts filter if provided (respecting /reset)
+    if context_start_ts:
+        context_start_iso = _normalize_ts_to_iso(context_start_ts)
+        merged = [m for m in merged if get_sort_key(m) >= context_start_iso]
+        logger.info(f"[ARCHIVE] Applied context_start_ts filter: {len(merged)} messages remaining after {context_start_iso}")
     
     return merged[-limit:]
 
