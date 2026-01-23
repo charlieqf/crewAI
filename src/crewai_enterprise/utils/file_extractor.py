@@ -132,33 +132,42 @@ def _ocr_pdf(file_bytes: bytes) -> tuple[str, int | None, str | None]:
 
 
 def _ocr_image(file_bytes: bytes) -> ExtractionResult:
-    try:
-        from PIL import Image
-    except ImportError:
+    use_google = os.getenv("GOOGLE_VISION_ENABLED", "").strip().lower() in {"1", "true", "yes"}
+    if not (use_google or os.getenv("GOOGLE_APPLICATION_CREDENTIALS")):
         return ExtractionResult(
             text="",
             page_count=1,
             status="failed",
-            error="Pillow not installed for OCR",
+            error="Google Vision not configured",
         )
 
-    try:
-        import io
-
-        image = Image.open(io.BytesIO(file_bytes)).convert("RGB")
-    except Exception as e:
-        return ExtractionResult(
-            text="",
-            page_count=1,
-            status="failed",
-            error=f"Failed to load image: {e}",
-        )
-
-    text, err = _ocr_image_pil(image)
+    text, err = _google_ocr_bytes(file_bytes)
     if err:
         return ExtractionResult(text="", page_count=1, status="failed", error=err)
-    return ExtractionResult(text=text, page_count=1, status="extracted")
+    status = "extracted" if text else "partial"
+    return ExtractionResult(text=text, page_count=1, status=status)
 
+
+def _google_ocr_bytes(file_bytes: bytes) -> tuple[str, str | None]:
+    try:
+        from google.cloud import vision
+    except ImportError:
+        return "", "google-cloud-vision not installed"
+
+    try:
+        client = vision.ImageAnnotatorClient()
+        image = vision.Image(content=file_bytes)
+        response = client.text_detection(image=image)
+    except Exception as e:
+        return "", f"Google OCR request failed: {e}"
+
+    if response.error.message:
+        return "", f"Google OCR error: {response.error.message}"
+
+    text = ""
+    if response.full_text_annotation and response.full_text_annotation.text:
+        text = response.full_text_annotation.text
+    return text.strip(), None
 
 def _ocr_image_pil(image) -> tuple[str, str | None]:
     try:
@@ -171,7 +180,6 @@ def _ocr_image_pil(image) -> tuple[str, str | None]:
     img_array = np.array(image)
     try:
         if ocr:
-            # use_textline_orientation is set in constructor, don't pass cls=True here
             result = ocr.ocr(img_array)
     except Exception as e:
         return "", f"OCR failed: {e}"
@@ -198,13 +206,19 @@ def _get_ocr():
     if _OCR_INSTANCE is None:
         from paddleocr import PaddleOCR
         try:
-            # use_angle_cls is deprecated in v3+, use use_textline_orientation
-            # use_gpu is deprecated in v3+, use device='cpu' or 'gpu'
-            _OCR_INSTANCE = PaddleOCR(use_textline_orientation=True, lang="ch", device="cpu")
+            simple = os.getenv("OCR_SIMPLE", "").strip().lower() in {"1", "true", "yes"}
+            _OCR_INSTANCE = PaddleOCR(
+                use_textline_orientation=not simple,
+                lang="ch",
+                device="cpu",
+            )
         except Exception as e:
             logger.warning(f"PaddleOCR init fallback: {e}")
             try:
-                _OCR_INSTANCE = PaddleOCR(use_textline_orientation=True, lang="ch")
+                _OCR_INSTANCE = PaddleOCR(
+                    use_textline_orientation=not simple,
+                    lang="ch",
+                )
             except Exception:
                 _OCR_INSTANCE = PaddleOCR(lang="ch")
     return _OCR_INSTANCE

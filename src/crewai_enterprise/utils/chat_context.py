@@ -197,6 +197,8 @@ class ChatContextManager:
         system_prompt: str | None = None,
         current_message: str | None = None,
         bot_type: str | None = None,
+        *,
+        current_sender_name: str | None = None,
     ) -> list[dict]:
         """
         Get messages formatted for LLM API.
@@ -205,6 +207,7 @@ class ChatContextManager:
             chat_id: Group chat ID
             system_prompt: Optional system prompt to prepend
             current_message: Current user message to append
+            current_sender_name: Optional display name for the current user message
             bot_type: Bot identifier (gemini, chatgpt, grok)
 
         Returns:
@@ -219,16 +222,27 @@ class ChatContextManager:
 
         # Add historical messages
         for msg in context.messages:
+            content = msg.get("content", "")
+            sender = (msg.get("sender_name") or "").strip()
+            if sender:
+                prefix = f"{sender}: "
+                if not content.startswith(prefix):
+                    content = f"{sender}: {content}"
             messages.append(
                 {
                     "role": msg.get("role", "user"),
-                    "content": msg.get("content", ""),
+                    "content": content,
                 }
             )
 
         # Add current message
         if current_message:
-            messages.append({"role": "user", "content": current_message})
+            current_content = current_message
+            if current_sender_name:
+                prefix = f"{current_sender_name}: "
+                if not current_content.startswith(prefix):
+                    current_content = f"{prefix}{current_content}"
+            messages.append({"role": "user", "content": current_content})
 
         return messages
 
@@ -273,7 +287,13 @@ class ChatContextManager:
                     else:
                         role = "user"
 
-                formatted.append({"role": role, "content": content})
+                formatted.append(
+                    {
+                        "role": role,
+                        "content": content,
+                        "sender_name": msg.get("sender_name", ""),
+                    }
+                )
 
             return formatted
 

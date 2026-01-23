@@ -28,15 +28,41 @@ os.environ['DISABLE_MODEL_SOURCE_CHECK'] = 'True'
 os.environ['FLAGS_allocator_strategy'] = 'naive_best_fit'
 os.environ['FLAGS_use_mkldnn'] = '0'
 os.environ['FLAGS_use_gpu'] = '0'
+os.environ['OCR_SIMPLE'] = 'true'
+os.environ.setdefault('GOOGLE_VISION_ENABLED', 'true')
+os.environ.setdefault('GOOGLE_APPLICATION_CREDENTIALS', '/opt/wecom-callback/keys/google_vision.json')
 
 try:
     from src.crewai_enterprise.utils.file_extractor import extract_text_from_file
+    from src.crewai_enterprise.utils.file_extractor import compute_file_hash
+    from src.crewai_enterprise.utils.file_content_store import FileContentStore
 except ImportError as e:
     logger.error(f"Failed to import extractor: {e}")
     sys.exit(1)
 
 DB_PATH = "/var/lib/wecom-callback/chat_storage.db"
 OCR_TIMEOUT_SECS = int(os.getenv("OCR_TIMEOUT_SECS", "60"))
+MAX_IMAGE_BYTES = int(os.getenv("OCR_MAX_IMAGE_BYTES", "262144"))
+MAX_PDF_BYTES = int(os.getenv("OCR_MAX_PDF_BYTES", "5242880"))
+ALLOWED_MIME_PREFIXES = ("image/",)
+ALLOWED_MIME_TYPES = ("application/pdf",)
+
+
+def _get_mime_type(filename: str) -> str:
+    name = (filename or "").lower()
+    if name.endswith(".pdf"):
+        return "application/pdf"
+    if name.endswith((".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp")):
+        return "image/jpeg"
+    return "application/octet-stream"
+
+
+def _is_allowed_mime(mime_type: str) -> bool:
+    if not mime_type:
+        return False
+    if mime_type in ALLOWED_MIME_TYPES:
+        return True
+    return any(mime_type.startswith(prefix) for prefix in ALLOWED_MIME_PREFIXES)
 
 
 def _extract_worker(file_bytes: bytes, mime_type: str, queue) -> None:
@@ -71,18 +97,48 @@ def backfill(limit=1000, cooldown=10, since_date=None):
     
     # Enable WAL for concurrency
     cursor.execute("PRAGMA journal_mode=WAL;")
+    cursor.execute("ATTACH DATABASE '/var/lib/wecom-callback/chat_history.db' AS history_db")
     
     query = """
-        SELECT file_hash, storage_key, mime_type 
-        FROM file_contents 
-        WHERE (status = 'failed' OR status = 'pending')
-        AND storage_key IS NOT NULL
-        AND (mime_type LIKE 'image/%' OR mime_type = 'application/pdf')
+        SELECT
+            f.msgid,
+            f.room_id,
+            f.sender_id,
+            f.filename,
+            f.file_size,
+            f.file_uri,
+            COALESCE(s.file_hash, '') AS file_hash,
+            COALESCE(s.status, 'pending') AS status,
+            COALESCE(s.mime_type, '') AS mime_type,
+            COALESCE(s.storage_key, '') AS storage_key
+        FROM history_db.chat_files f
+        LEFT JOIN file_contents s
+            ON f.msgid = s.wecom_msg_id
+        WHERE f.file_uri IS NOT NULL
+          AND (s.status IS NULL OR s.status IN ('failed', 'pending'))
+          AND (
+                s.mime_type LIKE 'image/%'
+             OR s.mime_type = 'application/pdf'
+             OR s.mime_type = 'application/octet-stream'
+             OR (
+                    (s.mime_type IS NULL OR s.mime_type = '')
+                AND (
+                       lower(f.filename) LIKE '%.pdf'
+                    OR lower(f.filename) LIKE '%.png'
+                    OR lower(f.filename) LIKE '%.jpg'
+                    OR lower(f.filename) LIKE '%.jpeg'
+                    OR lower(f.filename) LIKE '%.gif'
+                    OR lower(f.filename) LIKE '%.bmp'
+                    OR lower(f.filename) LIKE '%.webp'
+                )
+             )
+          )
     """
     params = []
     if since_date:
-        query += " AND created_at >= ?"
+        query += " AND f.created_at >= ?"
         params.append(since_date)
+    query += " ORDER BY f.created_at ASC"
     
     query += " LIMIT ?"
     params.append(limit)
@@ -93,8 +149,23 @@ def backfill(limit=1000, cooldown=10, since_date=None):
     logger.info(f"Found {len(rows)} files to process since {since_date}")
     
     total_processed = 0
-    for file_hash, storage_key, mime_type in rows:
-        logger.info(f"[{total_processed+1}/{len(rows)}] Processing {file_hash} ({mime_type})")
+    for msgid, room_id, sender_id, filename, file_size, file_uri, file_hash, status, mime_type, storage_key in rows:
+        storage_key = storage_key or file_uri
+        if not mime_type:
+            mime_type = _get_mime_type(filename or "")
+        if mime_type == "application/octet-stream":
+            mime_type = _get_mime_type(filename or "")
+        if not _is_allowed_mime(mime_type):
+            logger.info(f"Skipping non-image/pdf file {msgid} (mime={mime_type})")
+            continue
+        if file_size:
+            max_bytes = MAX_PDF_BYTES if mime_type == "application/pdf" else MAX_IMAGE_BYTES
+            if file_size > max_bytes:
+                logger.info(
+                    f"Skipping {msgid}: {file_size} bytes > {max_bytes} (mime={mime_type})"
+                )
+                continue
+        logger.info(f"[{total_processed+1}/{len(rows)}] Processing {msgid} ({mime_type})")
         
         try:
             # Download from Qiniu
@@ -109,10 +180,29 @@ def backfill(limit=1000, cooldown=10, since_date=None):
                 continue
             
             content = resp.content
+            max_bytes = MAX_PDF_BYTES if mime_type == "application/pdf" else MAX_IMAGE_BYTES
+            if content and len(content) > max_bytes:
+                logger.info(
+                    f"Skipping {msgid}: {len(content)} bytes > {max_bytes} (mime={mime_type})"
+                )
+                continue
             
             # Extract
             text, status, error = _extract_with_timeout(content, mime_type, OCR_TIMEOUT_SECS)
             
+            if not file_hash:
+                file_hash = compute_file_hash(content)
+            store = FileContentStore(db_path=DB_PATH)
+            store.upsert_pending(
+                file_hash=file_hash,
+                chat_id=room_id,
+                wecom_msg_id=msgid,
+                storage_key=storage_key,
+                filename=filename,
+                mime_type=mime_type,
+                size_bytes=len(content),
+            )
+
             # Update DB
             cursor.execute("""
                 UPDATE file_contents 
