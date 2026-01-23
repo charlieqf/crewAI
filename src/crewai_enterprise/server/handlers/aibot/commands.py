@@ -275,7 +275,6 @@ def _handle_prompt_command(
         # File generation mode - NOT a terminal command
         # Pass through to normal LLM flow with file output flag
         # Supports time range: /file-html [1d|2d|1w] <description>
-        import re
         time_range = "last_24h"  # Default
         user_request = args.strip() if args else ""
         
@@ -302,7 +301,6 @@ def _handle_prompt_command(
         # Daily summary report template
         # LLM outputs structured JSON, rendered via daily_report.html template
         # Supports time range: /file-html-daily [2d|3d|1w] [custom prompt]
-        import re
         time_range = "last_24h"  # Default
         user_prompt = args.strip() if args and args.strip() else "请根据群聊记录生成一份摘要报告"
         
@@ -326,7 +324,6 @@ def _handle_prompt_command(
         # Meeting notes template
         # LLM outputs structured JSON, rendered via meeting_notes.html template
         # Supports time range: /file-html-meeting [1d|2d|1w] [custom prompt]
-        import re
         time_range = "last_24h"  # Default
         user_prompt = args.strip() if args and args.strip() else "请根据群聊内容整理一份会议纪要"
         

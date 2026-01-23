@@ -335,30 +335,8 @@ async def _process_llm_file_output(
                 # PRE-INJECTION: Append raw_context BEFORE any saving (Fix Storage Inconsistency)
                 final_content = file_content
                 if raw_context:
-                    import re as re_mod
-                    escaped_context = html_module.escape(raw_context)
-                    context_section = f'''
-<hr style="margin-top: 40px; border: 1px dashed #ccc;">
-<details style="margin-top: 20px; padding: 15px; background: #1a1a2e; border-radius: 8px; color: #a0a0b0;">
-<summary style="cursor: pointer; color: #8b8b9e; font-size: 14px; font-weight: bold; margin-bottom: 10px;">
-  📋 原始上下文数据（用于生成本报告的聊天记录）
-</summary>
-<pre style="white-space: pre-wrap; word-wrap: break-word; font-size: 12px; color: #888; background: #0c0c16; padding: 10px; border-radius: 4px; border: 1px solid #2d2d3a; margin-top: 10px; max-height: 500px; overflow-y: auto; font-family: monospace;">
-{escaped_context}
-</pre>
-</details>
-'''
-                    body_matches = list(re_mod.finditer(r'</body>', final_content, re_mod.IGNORECASE))
-                    if body_matches:
-                        last_body = body_matches[-1]
-                        final_content = final_content[:last_body.start()] + context_section + final_content[last_body.start():]
-                    elif '</html>' in final_content.lower():
-                        html_matches = list(re_mod.finditer(r'</html>', final_content, re_mod.IGNORECASE))
-                        if html_matches:
-                            last_html = html_matches[-1]
-                            final_content = final_content[:last_html.start()] + context_section + final_content[last_html.start():]
-                    else:
-                        final_content += context_section
+                    from src.crewai_enterprise.utils.html_context import append_context_section
+                    final_content = append_context_section(final_content, raw_context, max_len=100_000)
 
                 # 1. Save locally (now contains context)
                 file_info = file_manager.save_file_from_bytes(
@@ -883,6 +861,7 @@ async def _call_llm_async(
                     "1. SUMMARY: A single sentence (max 50 chars) describing your generation.\n"
                     "2. CONTENT: The complete HTML content wrapped inside <FILE name=\"output.html\">...</FILE> tags.\n"
                     "3. STYLING: Use Tailwind CSS CDN for all styling.\n"
+                    "Do NOT include raw conversation logs or context in your HTML. The system will append it.\n"
                     "Failure to use the <FILE> tags will break the system integration. This is a mandatory technical requirement.\n\n"
                     "Example Output:\n"
                     "生成了一份风格简洁的分析报告。\n"
