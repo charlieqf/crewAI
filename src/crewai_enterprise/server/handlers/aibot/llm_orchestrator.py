@@ -659,6 +659,11 @@ async def _call_llm_async(
                     file_output_mode = cmd_result.get("file_output_mode", False)
                     template_name = cmd_result.get("template_name")  # None for free-form, "daily" or "meeting" for templates
                     date_range = cmd_result.get("date_range", "last_24h")  # Time range for archive query
+                    
+                    # Archive context range from /Nd commands (e.g., /1d, /1w)
+                    archive_context_range = cmd_result.get("archive_context_range")
+                    if archive_context_range:
+                        logger.info(f"[ARCHIVE_CTX] Explicit archive range: {archive_context_range}")
                     # Replace content with user's actual request (remove /file-html prefix)
                     content = cmd_result.get("user_request", content)
                     logger.info(f"[FILE_OUTPUT] Continuing to LLM with file_output_mode={file_output_mode}, template={template_name}, date_range={date_range}")
@@ -717,6 +722,11 @@ async def _call_llm_async(
         date_range
     except NameError:
         date_range = "last_24h"
+
+    try:
+        archive_context_range
+    except NameError:
+        archive_context_range = None
 
     # Check for GitLab Code Review Request
     # Pattern: https://<any-domain>/<path>/-/commit/<sha>
@@ -898,19 +908,26 @@ async def _call_llm_async(
         # Detect and fetch URL content if present
         urls = _extract_urls(content)
 
-        # Phase 2: Archive Context Injection for ALL file commands
+        # Phase 2: Archive Context Injection - ALWAYS ON (default 3h)
+        # Priority: explicit /Nd command > file_output_mode date_range > default 3h
         archive_context = ""
-        is_report_request = False
-        if file_output_mode:
-            logger.info(f"[AIBOT_FILE] Injecting archive context for file command, date_range={date_range}")
-            is_report_request = True  # Mark as report to enable template auto-conversion
-            # Fetch archived messages for the specified time range
-            history = get_merged_chat_history(chat_id, date=date_range, limit=500)
-            if history:
-                archive_context = _format_chat_history(history)
-                logger.info(f"[AIBOT_CTX] Injected {len(history)} messages from archive ({date_range} window)")
-            else:
-                logger.warning(f"[AIBOT_CTX] No history found for {date_range} in chat={chat_id}")
+        is_report_request = file_output_mode  # Only mark as report for file output
+        
+        # Determine effective archive range
+        if archive_context_range:
+            effective_range = archive_context_range
+        elif file_output_mode:
+            effective_range = date_range
+        else:
+            effective_range = "3h"  # Default for all normal conversations
+        
+        logger.info(f"[ARCHIVE_CTX] Injecting archive context, chat={chat_id}, range={effective_range}")
+        history = get_merged_chat_history(chat_id, date=effective_range, limit=500)
+        if history:
+            archive_context = _format_chat_history(history)
+            logger.info(f"[ARCHIVE_CTX] Injected {len(history)} messages from archive ({effective_range})")
+        else:
+            logger.info(f"[ARCHIVE_CTX] No history found for {effective_range} in chat={chat_id}")
 
         url_contents = []
         if urls:

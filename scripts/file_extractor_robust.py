@@ -1,19 +1,10 @@
 from __future__ import annotations
+
 import hashlib
 import logging
 import os
 from dataclasses import dataclass
 
-# Limit threading to prevent segregation faults in restricted environments
-os.environ['MKL_NUM_THREADS'] = '1'
-os.environ['OMP_NUM_THREADS'] = '1'
-os.environ['OPENBLAS_NUM_THREADS'] = '1'
-os.environ['FLAGS_allocator_strategy'] = 'naive_best_fit'
-os.environ['DISABLE_MODEL_SOURCE_CHECK'] = 'True'
-
-# Disable some heavy optimizations that might cause segfaults on CPUs
-os.environ['FLAGS_use_mkldnn'] = '0'
-os.environ['FLAGS_use_gpu'] = '0'
 
 logger = logging.getLogger(__name__)
 
@@ -161,32 +152,31 @@ def _ocr_image(file_bytes: bytes) -> ExtractionResult:
 
 
 def _ocr_image_pil(image) -> tuple[str, str | None]:
+    if os.getenv("DISABLE_OCR") == "true":
+        return "", "OCR disabled via DISABLE_OCR env var"
+    
     try:
         import numpy as np
-        from paddleocr import PaddleOCR
     except ImportError:
-        return "", "paddleocr or numpy not installed for OCR"
+        return "", "numpy not installed for OCR"
 
     ocr = _get_ocr()
+    if ocr is None:
+        return "", "OCR initialization failed"
     img_array = np.array(image)
     try:
-        if ocr:
-            # use_textline_orientation is set in constructor, don't pass cls=True here
-            result = ocr.ocr(img_array)
+        result = ocr.ocr(img_array, cls=True)
     except Exception as e:
         return "", f"OCR failed: {e}"
 
     text_parts = []
-    for line in result:
-        if not line:
-            continue
-        if isinstance(line, dict):
-            rec_texts = line.get("rec_texts") or []
-            text_parts.extend([str(t) for t in rec_texts if t])
-            continue
-        for item in line:
-            if len(item) >= 2:
-                text_parts.append(str(item[1][0]))
+    if result:
+        for line in result:
+            if not line:
+                continue
+            for item in line:
+                if len(item) >= 2:
+                    text_parts.append(str(item[1][0]))
     return "\n".join(text_parts).strip(), None
 
 
@@ -196,15 +186,28 @@ _OCR_INSTANCE = None
 def _get_ocr():
     global _OCR_INSTANCE
     if _OCR_INSTANCE is None:
+        if os.getenv("DISABLE_OCR") == "true":
+            return None
+            
         from paddleocr import PaddleOCR
-        try:
-            # use_angle_cls is deprecated in v3+, use use_textline_orientation
-            # use_gpu is deprecated in v3+, use device='cpu' or 'gpu'
-            _OCR_INSTANCE = PaddleOCR(use_textline_orientation=True, lang="ch", device="cpu")
-        except Exception as e:
-            logger.warning(f"PaddleOCR init fallback: {e}")
+        # Try multiple initialization strategies to handle different versions/environments
+        opts = [
+            {"use_angle_cls": True, "lang": "ch", "device": "cpu"},
+            {"use_angle_cls": True, "lang": "ch", "use_gpu": False},
+            {"use_angle_cls": True, "lang": "ch"},
+        ]
+        
+        for opt in opts:
             try:
-                _OCR_INSTANCE = PaddleOCR(use_textline_orientation=True, lang="ch")
-            except Exception:
-                _OCR_INSTANCE = PaddleOCR(lang="ch")
+                logger.info(f"Attempting PaddleOCR init with: {opt}")
+                _OCR_INSTANCE = PaddleOCR(**opt)
+                if _OCR_INSTANCE:
+                    logger.info("PaddleOCR initialized successfully")
+                    break
+            except Exception as e:
+                logger.warning(f"PaddleOCR init failed with {opt}: {e}")
+                
+        if _OCR_INSTANCE is None:
+            logger.error("All PaddleOCR initialization attempts failed")
+            
     return _OCR_INSTANCE

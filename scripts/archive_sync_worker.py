@@ -249,7 +249,7 @@ def process_file_message(sdk, msg: dict, cursor) -> bool:
             file_bytes=file_bytes,
             mime_type=mime_type,
             filename=filename,
-            storage_key=None,
+            storage_key=file_uri,
             chat_id=msg.get("roomid", ""),
             msgid=msg.get("msgid"),
         )
@@ -320,7 +320,7 @@ def process_image_message(sdk, msg: dict, cursor) -> bool:
             file_bytes=image_bytes,
             mime_type=content_type,
             filename=filename,
-            storage_key=None,
+            storage_key=file_uri,
             chat_id=msg.get("roomid", ""),
             msgid=msgid,
         )
@@ -364,15 +364,33 @@ def sync(start_seq: int):
         # Initialize database
         init_db(db_path)
 
+        # Connect to DB to read/update cursor
+        conn = sqlite3.connect(db_path, timeout=30)
+        cursor = conn.cursor()
+
+        # If start_seq is 0, try to get from database
+        if start_seq == 0:
+            cursor.execute("SELECT seq FROM archive_cursor WHERE id = 1")
+            row = cursor.fetchone()
+            if row:
+                start_seq = row[0]
+                logger.info(f"Loaded starting sequence from database: {start_seq}")
+
         # Initialize SDK
         sdk = WeWorkFinanceSDK()
         if not sdk.init(corp_id, secret):
+            conn.close()
             return {"status": "error", "message": "Failed to initialize SDK"}
 
         # Pull messages
         chat_data = sdk.get_chat_data(start_seq, limit=100)
         if not chat_data:
             return {"status": "ok", "new_max_seq": start_seq, "processed": 0, "files": 0}
+
+        logger.info(
+            f"[SYNC] Received {len(chat_data)} messages. "
+            f"first_seq={chat_data[0].get('seq')}, last_seq={chat_data[-1].get('seq')}"
+        )
 
         # Load private key
         try:
@@ -385,9 +403,6 @@ def sync(start_seq: int):
         new_max_seq = start_seq
         processed = 0
         files_processed = 0
-
-        conn = sqlite3.connect(db_path, timeout=30)
-        cursor = conn.cursor()
 
         for msg in chat_data:
             msg_seq = msg.get("seq", 0)
@@ -521,6 +536,10 @@ def sync(start_seq: int):
                 pass
 
 if __name__ == "__main__":
-    start_seq = int(sys.argv[1]) if len(sys.argv) > 1 else 0
-    result = sync(start_seq)
-    print(json.dumps(result))
+    try:
+        start_seq = int(sys.argv[1]) if len(sys.argv) > 1 else 0
+        result = sync(start_seq)
+        print(json.dumps(result))
+    except Exception as e:
+        logger.error(f"Fatal error in main: {e}")
+        print(json.dumps({"status": "error", "message": str(e), "processed": 0, "files": 0}))

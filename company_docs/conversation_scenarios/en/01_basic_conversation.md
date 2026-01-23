@@ -43,6 +43,31 @@ messages = [
 - When limits are exceeded, removal starts from the earliest messages.
 - Limits are applied via sliding window in `get_context()`.
 
+### Archive Context Injection (NEW)
+
+> [!IMPORTANT]
+> All normal conversations now **automatically inject 3 hours of archive context** from the group chat.
+
+This allows the bot to access recent group discussions even if those messages weren't directly sent to the bot.
+
+| Scenario | Archive Range | Includes |
+|----------|---------------|----------|
+| Normal conversation | **3h** (default) | Text messages + extracted file/image content |
+| `/1d Question` | **1 day** | Same as above |
+| `/1w Summary` | **1 week** | Same as above |
+
+> [!NOTE]
+> Default 3h injection respects `/reset` timestamp. Explicit `/Nd` commands bypass it. See [Context Management](02_context_management.md).
+
+**Example:**
+```
+[10:00-12:00] Users A, B, C discuss a project (bot not mentioned)
+
+[12:05] User A: @gemini Summarize what we just discussed
+Gemini: Based on the recent discussion, you discussed... 
+# Bot can access the 3h of archive context automatically
+```
+
 ## Key Code
 
 ```python
@@ -97,4 +122,4 @@ class ChatContextManager:
 1. **Responses should not contain files**: Normal conversations do not generate `<FILE>` tags.
 2. **Bot-specific context**: Different bots (gemini/chatgpt/grok) have isolated contexts even in the same chat.
 3. **Context isolation by group chat**: Different `chat_id`s are completely independent.
-4. **Custom prompts**: Users can set custom system prompts per chat+bot via `/prompt` command.
+4. **Custom prompts**: Users can set custom system prompts per chat+bot via `/set_prompt`, `/show_prompt`, `/reset_prompt` commands.

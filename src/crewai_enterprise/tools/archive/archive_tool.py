@@ -136,37 +136,63 @@ def _normalize_ts_to_iso(ts: Any) -> str:
 
 
 def _fetch_audit_messages(room_id: str, ts_filter: str, limit: int, is_range: bool) -> List[Dict[str, Any]]:
-    """Fetch audit messages by date or range from chat_history.db."""
+    """Fetch audit messages by date or range from chat_history.db, including extracted file content."""
     msgs: List[Dict[str, Any]] = []
     if not os.path.exists(ARCHIVE_DB_PATH):
         logger.warning(f"Archive DB not found: {ARCHIVE_DB_PATH}")
         return msgs
 
-    ts_expr = SQL_TS_NORM.format(col="created_at")
-    if is_range:
-        # For range queries, compare the full timestamp expression
-        filter_expr = ts_expr
-        comparator = ">="
+    # Join with file_contents if storage DB exists
+    has_storage_db = os.path.exists(HOT_DB_PATH)
+    
+    if has_storage_db:
+        # Use m. prefix for aliased table
+        ts_expr = SQL_TS_NORM.format(col="m.created_at")
+        if is_range:
+            filter_expr = ts_expr
+        else:
+            filter_expr = f"strftime('%Y-%m-%d', {ts_expr})"
+        
+        # Note: Join includes both msgid AND room_id to prevent cross-chat data leakage
+        query = f"""
+            SELECT m.seq, m.msgid, m.sender_id, m.content, m.created_at,
+                   f.extracted_text, f.filename as extracted_filename
+            FROM archived_messages m
+            LEFT JOIN storage_db.file_contents f 
+                ON m.msgid = f.wecom_msg_id AND f.chat_id = m.room_id
+            WHERE m.room_id = ? AND {filter_expr} {">=" if is_range else "="} ?
+            ORDER BY m.seq DESC
+            LIMIT ?
+        """
     else:
-        # For date queries, extract only the date part
-        filter_expr = f"strftime('%Y-%m-%d', {ts_expr})"
-        comparator = "="
-
-    query = f"""
-        SELECT seq, msgid, sender_id, content, created_at 
-        FROM archived_messages 
-        WHERE room_id = ? AND 
-        {filter_expr} {comparator} ?
-        ORDER BY seq DESC
-        LIMIT ?
-    """
+        # No alias, use column names directly
+        ts_expr = SQL_TS_NORM.format(col="created_at")
+        if is_range:
+            filter_expr = ts_expr
+        else:
+            filter_expr = f"strftime('%Y-%m-%d', {ts_expr})"
+        
+        query = f"""
+            SELECT seq, msgid, sender_id, content, created_at, NULL, NULL
+            FROM archived_messages
+            WHERE room_id = ? AND {filter_expr} {">=" if is_range else "="} ?
+            ORDER BY seq DESC
+            LIMIT ?
+        """
 
     try:
         with sqlite3.connect(ARCHIVE_DB_PATH) as conn:
+            # Attach storage DB for file_contents join
+            # Note: ATTACH DATABASE doesn't support parameter binding, must use literal
+            if has_storage_db:
+                # Escape single quotes in path for SQLite safety
+                escaped_path = HOT_DB_PATH.replace("'", "''")
+                conn.execute(f"ATTACH DATABASE '{escaped_path}' AS storage_db")
+            
             cursor = conn.cursor()
             cursor.execute(query, (room_id, ts_filter, limit))
             for row in cursor.fetchall():
-                seq, msgid, sender_id, raw_content, created_at = row
+                seq, msgid, sender_id, raw_content, created_at, extracted_text, extracted_filename = row
                 try:
                     content_dict = json.loads(raw_content)
                     text_content = ""
@@ -174,8 +200,22 @@ def _fetch_audit_messages(room_id: str, ts_filter: str, limit: int, is_range: bo
                         text_content = content_dict.get("text", {}).get("content", "")
                         message_type = "text"
                     elif content_dict.get("msgtype") == "file":
-                        text_content = f"[File: {content_dict.get('file', {}).get('filename', 'unnamed')}]"
+                        filename = content_dict.get('file', {}).get('filename', 'unnamed')
+                        text_content = f"[File: {filename}]"
                         message_type = "file"
+                        # Append extracted text if available
+                        if extracted_text:
+                            snippet = extracted_text[:2000]
+                            suffix = "..." if len(extracted_text) > 2000 else ""
+                            text_content += f"\n{snippet}{suffix}"
+                    elif content_dict.get("msgtype") == "image":
+                        text_content = "[Image]"
+                        message_type = "image"
+                        # Append OCR text if available
+                        if extracted_text:
+                            snippet = extracted_text[:1000]
+                            suffix = "..." if len(extracted_text) > 1000 else ""
+                            text_content += f"\n{snippet}{suffix}"
                     else:
                         message_type = content_dict.get("msgtype") or "unknown"
                     

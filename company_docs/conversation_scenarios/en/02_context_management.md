@@ -38,14 +38,19 @@ max_chars = 8000    # Maximum number of characters
 
 ### Decision Rule: When to Use Archive vs. Context
 
-- **Scenario: Recall**
-  - "What did we say just now?" -> **Context** (within the 20-turn window).
-  - "What was the API key mentioned last week?" -> **Archive** (triggers tool).
-- **Scenario: Summary**
-  - "Summarize our conversation so far" -> **Context** (summarizes the hot window).
-  - "Generate a weekly report for this group" -> **Archive** (requires scanning all messages).
-- **Scenario: Continuity**
-  - "Keep going" -> **Context** (relies on previous turn).
+> [!IMPORTANT]
+> **Archive is now automatically injected (default 3h)** for all normal conversations. Users can override with `/Nd` commands.
+
+| User Input | Archive Range | Source |
+|------------|---------------|--------|
+| Normal conversation | **3h** (auto) | Archive + Hot Context |
+| `/1d Question` | 1 day | Archive + Hot Context |
+| `/1w Summary` | 1 week | Archive + Hot Context |
+| `/file-html 1w Report` | 1 week | Archive + Hot Context |
+
+**Legacy Scenarios (still valid):**
+- "What did we say just now?" → **Hot Context** (20-turn window)
+- "Keep going" → **Context** (relies on previous turn)
 
 ---
 
@@ -53,15 +58,20 @@ max_chars = 8000    # Maximum number of characters
 
 ### Context Reset (`/reset`, `/new`)
 
-| Command | Status | Clears Chat History? | Clears File Context? | Clears Codebase Context? |
+| Command | Effect | Chat History | File Context | Codebase Context |
 | :--- | :--- | :--- | :--- | :--- |
-| `/reset` | Global Reset | ✅ Yes | ✅ Yes | ✅ Yes |
-| `/new` | Logical Break | ❌ No | ✅ Yes | ❌ No |
+| `/reset` | Sets context start timestamp | Messages before timestamp ignored | ❌ Unchanged | ❌ Unchanged |
+| `/new` | Logical Break | ❌ Unchanged | ✅ Clears | ❌ Unchanged |
 
 > [!NOTE]
-> **Codebase context (`/codebase`) persists across `/new`** because it is often considered an "environment setting" for the current project session, whereas files are often "focal points" for a specific sub-topic.
+> `/reset` does **not delete data** — it sets a "context start" timestamp. Messages before that timestamp are excluded from the sliding window but remain in the database. Codebase context persists across `/new` as an "environment setting."
 
-### Custom System Prompts (`/prompt`)
+> [!IMPORTANT]
+> **`/reset` and Archive Injection:**
+> - **Default 3h injection** respects `/reset` timestamp (only injects messages after reset)
+> - **Explicit `/Nd` commands** bypass `/reset` (user explicitly wants historical data)
+
+### Custom System Prompts (`/set_prompt`, `/show_prompt`, `/reset_prompt`)
 
 Users can set per-bot custom system prompts that persist across conversations:
 

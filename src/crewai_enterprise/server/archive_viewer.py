@@ -13,6 +13,7 @@ from fastapi.responses import HTMLResponse
 router = APIRouter()
 
 DB_PATH = os.getenv("ARCHIVE_DB_PATH", os.getenv("CHAT_DB_PATH", "/var/lib/wecom-callback/chat_history.db"))
+STORAGE_DB_PATH = "/var/lib/wecom-callback/chat_storage.db"
 
 
 def get_db():
@@ -62,8 +63,9 @@ async def list_messages(room_id: Optional[str] = None, limit: int = 100, offset:
             LIMIT ? OFFSET ?
         """, (limit, offset))
     
+    rows = cursor.fetchall()
     messages = []
-    for row in cursor.fetchall():
+    for row in rows:
         content = row[6]
         try:
             content_parsed = json.loads(content) if content else {}
@@ -82,8 +84,15 @@ async def list_messages(room_id: Optional[str] = None, limit: int = 100, offset:
             "file_uri": row[8]  # Joined from chat_files
         })
     
+    # Get total count
+    if room_id:
+        cursor.execute("SELECT COUNT(*) FROM archived_messages WHERE room_id = ?", (room_id,))
+    else:
+        cursor.execute("SELECT COUNT(*) FROM archived_messages")
+    total = cursor.fetchone()[0]
+    
     conn.close()
-    return {"messages": messages, "limit": limit, "offset": offset}
+    return {"messages": messages, "limit": limit, "offset": offset, "total": total}
 
 
 @router.get("/archive/api/files")
@@ -93,23 +102,28 @@ async def list_files(room_id: Optional[str] = None, limit: int = 100, offset: in
     cursor = conn.cursor()
     
     if room_id:
+        cursor.execute(f"ATTACH DATABASE '{STORAGE_DB_PATH}' AS storage_db")
         cursor.execute("""
-            SELECT id, msgid, room_id, sender_id, filename, file_size, file_uri, created_at
-            FROM chat_files
-            WHERE room_id = ?
-            ORDER BY created_at DESC
+            SELECT f.id, f.msgid, f.room_id, f.sender_id, f.filename, f.file_size, f.file_uri, f.created_at, s.extracted_text
+            FROM chat_files f
+            LEFT JOIN storage_db.file_contents s ON f.msgid = s.wecom_msg_id
+            WHERE f.room_id = ?
+            ORDER BY f.created_at DESC
             LIMIT ? OFFSET ?
         """, (room_id, limit, offset))
     else:
+        cursor.execute(f"ATTACH DATABASE '{STORAGE_DB_PATH}' AS storage_db")
         cursor.execute("""
-            SELECT id, msgid, room_id, sender_id, filename, file_size, file_uri, created_at
-            FROM chat_files
-            ORDER BY created_at DESC
+            SELECT f.id, f.msgid, f.room_id, f.sender_id, f.filename, f.file_size, f.file_uri, f.created_at, s.extracted_text
+            FROM chat_files f
+            LEFT JOIN storage_db.file_contents s ON f.msgid = s.wecom_msg_id
+            ORDER BY f.created_at DESC
             LIMIT ? OFFSET ?
         """, (limit, offset))
     
+    rows = cursor.fetchall()
     files = []
-    for row in cursor.fetchall():
+    for row in rows:
         files.append({
             "id": row[0],
             "msgid": row[1],
@@ -118,11 +132,19 @@ async def list_files(room_id: Optional[str] = None, limit: int = 100, offset: in
             "filename": row[4],
             "file_size": row[5],
             "file_uri": row[6],
-            "created_at": row[7]
+            "created_at": row[7],
+            "extracted_text": row[8]
         })
     
+    # Get total count
+    if room_id:
+        cursor.execute("SELECT COUNT(*) FROM chat_files WHERE room_id = ?", (room_id,))
+    else:
+        cursor.execute("SELECT COUNT(*) FROM chat_files")
+    total = cursor.fetchone()[0]
+    
     conn.close()
-    return {"files": files, "limit": limit, "offset": offset}
+    return {"files": files, "limit": limit, "offset": offset, "total": total}
 
 
 @router.get("/archive/api/stats")
@@ -384,6 +406,38 @@ async def archive_viewer(request: Request):
             transition: transform 0.2s;
         }
         .img-preview:hover { transform: scale(1.02); }
+        /* Pagination */
+        .pagination {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 16px;
+            padding: 24px;
+            background: #f8fafc;
+            border-top: 1px solid #e2e8f0;
+        }
+        .page-btn {
+            padding: 8px 16px;
+            background: white;
+            border: 1px solid #e2e8f0;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+            transition: all 0.2s;
+        }
+        .page-btn:hover:not(:disabled) {
+            background: #f1f5f9;
+            border-color: #cbd5e1;
+        }
+        .page-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        .page-info {
+            font-size: 14px;
+            color: #64748b;
+        }
     </style>
 </head>
 <body>
@@ -421,12 +475,20 @@ async def archive_viewer(request: Request):
                 <div id="content">
                     <div class="loading">选择左侧群聊或点击"查看所有消息"开始浏览</div>
                 </div>
+                <div id="pagination" class="pagination" style="display: none;">
+                    <button id="prev-btn" class="page-btn" onclick="changePage(-1)">◀️ 上一页</button>
+                    <span id="page-info" class="page-info">第 1 页</span>
+                    <button id="next-btn" class="page-btn" onclick="changePage(1)">下一页 ▶️</button>
+                </div>
             </div>
         </div>
     </div>
     <script>
         let currentRoom = null;
         let currentTab = 'messages';
+        let currentOffset = 0;
+        const pageSize = 100;
+        let totalCount = 0;
         const roomNames = {};  // Cache for room display names
         
         function escapeHtml(str) {
@@ -474,6 +536,7 @@ async def archive_viewer(request: Request):
         
         function selectRoom(roomId, el) {
             currentRoom = roomId;
+            currentOffset = 0;
             document.querySelectorAll('.room-item').forEach(e => e.classList.remove('active'));
             if (el) el.classList.add('active');
             document.getElementById('page-title').textContent = roomId ? getRoomDisplayName(roomId) : '所有消息';
@@ -482,11 +545,31 @@ async def archive_viewer(request: Request):
         
         function showTab(tab) {
             currentTab = tab;
+            currentOffset = 0;
             document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
             event.target.classList.add('active');
             loadContent();
         }
         
+        function changePage(delta) {
+            currentOffset += delta * pageSize;
+            if (currentOffset < 0) currentOffset = 0;
+            loadContent();
+        }
+
+        function updatePaginationUI(total) {
+            totalCount = total;
+            const hasPrev = currentOffset > 0;
+            const hasNext = currentOffset + pageSize < total;
+            const pageNum = Math.floor(currentOffset / pageSize) + 1;
+            const totalPages = Math.ceil(total / pageSize);
+            
+            document.getElementById('pagination').style.display = total > 0 ? 'flex' : 'none';
+            document.getElementById('prev-btn').disabled = !hasPrev;
+            document.getElementById('next-btn').disabled = !hasNext;
+            document.getElementById('page-info').textContent = `第 ${pageNum} / ${totalPages || 1} 页 (共 ${total} 条)`;
+        }
+
         function getMsgTypeBadge(type) {
             const badges = {
                 text: 'msgtype-text',
@@ -503,15 +586,23 @@ async def archive_viewer(request: Request):
             return `<div class="sender-name">${name}</div>`;
         }
         
+        function formatExtractedPreview(text) {
+            if (!text || text === '-') return '-';
+            if (text.length <= 100) return escapeHtml(text);
+            return escapeHtml(text.substring(0, 50)) + ' <span style="color:#94a3b8">...</span> ' + escapeHtml(text.substring(text.length - 30));
+        }
+        
         async function loadContent() {
             const content = document.getElementById('content');
             content.innerHTML = '<div class="loading">加载中...</div>';
             
             const roomParam = currentRoom ? `room_id=${currentRoom}&` : '';
+            const offsetParam = `offset=${currentOffset}&`;
             
             if (currentTab === 'messages') {
-                const res = await fetch(`/archive/api/messages?${roomParam}limit=200`);
+                const res = await fetch(`/archive/api/messages?${roomParam}${offsetParam}limit=${pageSize}`);
                 const data = await res.json();
+                updatePaginationUI(data.total);
                 
                 if (data.messages.length === 0) {
                     content.innerHTML = '<div class="empty"><div class="empty-icon">📭</div>暂无消息记录</div>';
@@ -543,8 +634,9 @@ async def archive_viewer(request: Request):
                     </table>
                 `;
             } else {
-                const res = await fetch(`/archive/api/files?${roomParam}limit=200`);
+                const res = await fetch(`/archive/api/files?${roomParam}${offsetParam}limit=${pageSize}`);
                 const data = await res.json();
+                updatePaginationUI(data.total);
                 
                 if (data.files.length === 0) {
                     content.innerHTML = '<div class="empty"><div class="empty-icon">📁</div>暂无文件记录</div>';
@@ -558,6 +650,7 @@ async def archive_viewer(request: Request):
                                 <th>文件名</th>
                                 <th style="width:100px">大小</th>
                                 <th style="width:150px">发送者</th>
+                                <th>提取内容</th>
                                 <th style="width:100px">操作</th>
                                 <th style="width:160px">时间</th>
                             </tr>
@@ -568,6 +661,7 @@ async def archive_viewer(request: Request):
                                     <td>📄 ${f.filename}</td>
                                     <td>${formatSize(f.file_size)}</td>
                                     <td>${f.sender_id || '-'}</td>
+                                    <td class="content-cell" title="${escapeHtml(f.extracted_text)}">${formatExtractedPreview(f.extracted_text)}</td>
                                     <td><a class="file-link" href="${escapeHtml(f.file_uri)}" target="_blank">⬇️ 下载</a></td>
                                     <td class="time-cell">${formatTime(f.created_at)}</td>
                                 </tr>

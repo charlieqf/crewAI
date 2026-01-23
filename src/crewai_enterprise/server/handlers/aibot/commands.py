@@ -71,7 +71,11 @@ def _handle_prompt_command(
 • `/reset` - 彻底重置所有对话历史和上下文
 • `/new` - 清除临时文件上下文，开始新话题
 • Quote文件消息 - 明确引用特定文件
-• 自动注入：文件生成命令会自动注入群聊归档记录
+
+**📂 归档上下文（自动注入最近3小时群聊记录）：**
+• `/1h`, `/3h`, `/1d`, `/1w` - 指定归档范围后提问
+  示例: `/1d 昨天讨论了什么`
+💡 *自动包含群聊消息和文件/图片提取的文字*
 
 **💻 代码库分析：**
 • `/codebase <gitlab_url>` - 设置代码库上下文
@@ -340,6 +344,22 @@ def _handle_prompt_command(
             "continue_with_llm": True,
             "template_name": "meeting",  # Use meeting_notes.html template
             "date_range": time_range,
+        }
+    
+    # /1d, /1w, /3h etc. - Explicit archive time range for normal conversation
+    elif re.match(r'^\d+[hdw]$', command):
+        time_range = command.lower()
+        user_request = args.strip() if args else ""
+        
+        # Require a question/topic when using time range commands
+        if not user_request:
+            return {"content": f"❌ 请在 /{time_range} 后输入问题\n\n示例: `/{time_range} 昨天讨论了什么`"}
+        
+        logger.info(f"[ARCHIVE_CMD] Explicit time range command: /{time_range}")
+        return {
+            "archive_context_range": time_range,
+            "user_request": user_request,
+            "continue_with_llm": True,
         }
     
     return None

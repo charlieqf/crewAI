@@ -11,6 +11,7 @@ Users request the AI to generate HTML files via file commands. The system suppor
 | `/file-html [time] <description>` | Free-form HTML generation | `/file-html Make a login page` |
 | `/file-html-daily [time]` | Group chat summary report | `/file-html-daily 1w` |
 | `/file-html-meeting [time]` | Meeting minutes | `/file-html-meeting 3h` |
+| `/1d`, `/1w`, `/3h` **[NEW]** | Normal conversation with explicit archive range | `/1d What did we discuss yesterday?` |
 
 ### Time Range Parameters
 - `1h`, `2h`, `3h` - Hours
@@ -19,8 +20,8 @@ Users request the AI to generate HTML files via file commands. The system suppor
 
 ## Core Requirements
 
-1. **Use Full Context**: File commands should leverage conversation history and archive.
-2. **Archive Integration**: For time-ranged requests, historical messages are injected from the archive.
+1. **Archive Always Injected**: All conversations now include archive context (default 3h).
+2. **Extracted File Content**: Archive includes extracted text from files and OCR from images.
 3. **Auto-Fallback**: If LLM fails to generate `<FILE>` tags, system auto-wraps the content.
 
 ## Conversation Examples
@@ -91,9 +92,12 @@ if file_output_mode:
 
 ### Archive Context Injection
 ```python
-if date_range and file_output_mode:
-    logger.info(f"[AIBOT_FILE] Injecting archive context for file command, date_range={date_range}")
-    # Fetches historical messages from chat_history.db and injects into prompt
+# Archive is ALWAYS injected. Precedence:
+# 1. /Nd commands (explicit archive range) - for normal conversations
+# 2. date_range from /file-html commands - for file generation
+# 3. Default "3h" - for all other normal conversations
+effective_range = archive_context_range or date_range or "3h"
+logger.info(f"[AIBOT] Injecting archive context, range={effective_range}")
 ```
 
 ### Auto-Wrap Fallback
