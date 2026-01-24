@@ -356,6 +356,8 @@ async def archive_viewer(request: Request):
         tr:last-child td { border-bottom: none; }
         
         .content-cell { max-width: 400px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .filename-cell { white-space: nowrap; width: 1%; }
+        .extracted-cell { width: 100%; }
         .msgtype-badge {
             display: inline-block;
             padding: 4px 10px;
@@ -647,7 +649,7 @@ async def archive_viewer(request: Request):
                     <table>
                         <thead>
                             <tr>
-                                <th>文件名</th>
+                                <th class="filename-cell">文件名</th>
                                 <th style="width:100px">大小</th>
                                 <th style="width:150px">发送者</th>
                                 <th>提取内容</th>
@@ -658,10 +660,10 @@ async def archive_viewer(request: Request):
                         <tbody>
                             ${data.files.map(f => `
                                 <tr>
-                                    <td>📄 ${f.filename}</td>
+                                    <td class="filename-cell">📄 ${f.filename}</td>
                                     <td>${formatSize(f.file_size)}</td>
                                     <td>${f.sender_id || '-'}</td>
-                                    <td class="content-cell" title="${escapeHtml(f.extracted_text)}">${formatExtractedPreview(f.extracted_text)}</td>
+                                    <td class="extracted-cell" title="${escapeHtml(f.extracted_text)}">${formatExtractedPreview(f.extracted_text)}</td>
                                     <td><a class="file-link" href="${escapeHtml(f.file_uri)}" target="_blank">⬇️ 下载</a></td>
                                     <td class="time-cell">${formatTime(f.created_at)}</td>
                                 </tr>

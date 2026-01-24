@@ -411,32 +411,8 @@ async def _process_llm_file_output(
             final_content = file_content
             
             if raw_context and mime_type == "text/html":
-                import html as html_module
-                import re as re_mod
-                escaped_context = html_module.escape(raw_context)
-                context_section = f'''
-<hr style="margin-top: 40px; border: 1px dashed #ccc;">
-<details style="margin-top: 20px; padding: 15px; background: #1a1a2e; border-radius: 8px;">
-<summary style="cursor: pointer; color: #8b8b9e; font-size: 14px;">
-  📋 原始上下文数据（用于生成本报告的聊天记录）
-</summary>
-<pre style="white-space: pre-wrap; word-wrap: break-word; font-size: 12px; color: #a0a0b0; margin-top: 10px; max-height: 500px; overflow-y: auto;">
-{escaped_context}
-</pre>
-</details>
-'''
-                # Use regex to find LAST tag for correct placement
-                body_matches = list(re_mod.finditer(r'</body>', final_content, re_mod.IGNORECASE))
-                if body_matches:
-                    last_body = body_matches[-1]
-                    final_content = final_content[:last_body.start()] + context_section + final_content[last_body.start():]
-                elif '</html>' in final_content.lower():
-                    html_matches = list(re_mod.finditer(r'</html>', final_content, re_mod.IGNORECASE))
-                    if html_matches:
-                        last_html = html_matches[-1]
-                        final_content = final_content[:last_html.start()] + context_section + final_content[last_html.start():]
-                else:
-                    final_content += context_section
+                from src.crewai_enterprise.utils.html_context import append_context_section
+                final_content = append_context_section(final_content, raw_context, max_len=100_000)
                 logger.info(f"[AIBOT_FILE] Appended raw_context to {filename}")
 
             # 2. Save to local storage (consistent with fallback logic)
@@ -926,6 +902,15 @@ async def _call_llm_async(
         else:
             logger.info(f"[ARCHIVE_CTX] No history found for {effective_range} in chat={chat_id}")
 
+        if file_output_mode and archive_context:
+            system_prompt = (
+                system_prompt
+                + "\n\n[ARCHIVE_CONTEXT]\n"
+                + archive_context
+                + "\n[END_ARCHIVE_CONTEXT]\n"
+                + "Do NOT include raw context in your output. The system will append it."
+            )
+
         url_contents = []
         if urls:
             logger.info(f"[URL_DETECT] Found {len(urls)} URL(s) in message")
@@ -956,7 +941,7 @@ async def _call_llm_async(
                 logger.info(f"[URL_CTX] Added {len(url_contents)} URL(s) content to context")
 
         # Inject Archive Context if available
-        if archive_context and messages and messages[-1]["role"] == "user":
+        if archive_context and messages and messages[-1]["role"] == "user" and not file_output_mode:
             messages[-1]["content"] = (
                 f"### 今日群聊记录摘要 (仅供参考):\n\n{archive_context}\n\n"
                 f"---\n\n基于以上对话内容，请根据要求执行：{messages[-1]['content']}"

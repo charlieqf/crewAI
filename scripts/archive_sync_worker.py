@@ -231,18 +231,27 @@ def process_file_message(sdk, msg: dict, cursor) -> bool:
         if not file_uri:
             return False
         
-        # Save to database using existing cursor
+        # Save to database using existing cursor (Beijing time)
+        msg_time_ms = msg.get("msgtime", 0)
+        if msg_time_ms:
+            dt_utc = datetime.fromtimestamp(msg_time_ms / 1000.0, tz=timezone.utc)
+            dt_beijing = dt_utc.astimezone(timezone(timedelta(hours=8)))
+            created_at_str = dt_beijing.strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            created_at_str = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
+
         cursor.execute("""
             INSERT OR REPLACE INTO chat_files 
             (msgid, room_id, sender_id, filename, file_size, file_uri, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
         """, (
             msg.get("msgid"),
             msg.get("roomid", ""),
             msg.get("from", ""),
             filename,
             len(file_bytes),
-            file_uri
+            file_uri,
+            created_at_str,
         ))
         
         _extract_and_store(
@@ -302,18 +311,27 @@ def process_image_message(sdk, msg: dict, cursor) -> bool:
         if not file_uri:
             return False
         
-        # Save to database using existing cursor
+        # Save to database using existing cursor (Beijing time)
+        msg_time_ms = msg.get("msgtime", 0)
+        if msg_time_ms:
+            dt_utc = datetime.fromtimestamp(msg_time_ms / 1000.0, tz=timezone.utc)
+            dt_beijing = dt_utc.astimezone(timezone(timedelta(hours=8)))
+            created_at_str = dt_beijing.strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            created_at_str = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
+
         cursor.execute("""
             INSERT OR REPLACE INTO chat_files 
             (msgid, room_id, sender_id, filename, file_size, file_uri, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
         """, (
             msgid,
             msg.get("roomid", ""),
             msg.get("from", ""),
             filename,
             len(image_bytes),
-            file_uri
+            file_uri,
+            created_at_str,
         ))
         
         _extract_and_store(
