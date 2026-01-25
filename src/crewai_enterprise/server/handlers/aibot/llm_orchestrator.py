@@ -938,7 +938,6 @@ async def _call_llm_async(
             system_prompt=system_prompt,
             bot_type=bot_type,
         )
-        
         # If URLs were fetched, prepend their content to the user's message context
         if url_contents:
             url_context = "\n\n---\n\n".join([
@@ -1072,6 +1071,10 @@ async def _call_llm_async(
                     storage_key = file_ctx.get("storage_key")
                     if storage_key:
                         extracted_record = store.get_by_storage_key(storage_key)
+                if not extracted_record:
+                    uri = file_ctx.get("uri")
+                    if uri and uri.startswith("http"):
+                        extracted_record = store.get_by_storage_key(uri)
 
             if not extracted_record and quoted_msg_id:
                 extracted_record = store.get_by_msg_id(quoted_msg_id)
@@ -1113,6 +1116,7 @@ async def _call_llm_async(
 
         start_time = time.time()
         loop = asyncio.get_running_loop()
+        current_user_content = messages[-1]["content"] if messages else content
 
         if use_file_context:
             try:
@@ -1152,22 +1156,23 @@ async def _call_llm_async(
                     context = context_manager.get_context(chat_id, bot_type=bot_type)
                     limited_messages = context.messages[-5:] if len(context.messages) > 5 else context.messages
                     
-                    messages = []
+                    file_messages = []
                     if system_prompt:
-                        messages.append({"role": "system", "content": system_prompt})
+                        file_messages.append({"role": "system", "content": system_prompt})
                     for msg in limited_messages:
-                        messages.append({"role": msg.get("role", "user"), "content": msg.get("content", "")})
-                    messages.append({"role": "user", "content": messages_for_llm[-1]["content"] if messages_for_llm else ""})
+                        file_messages.append({"role": msg.get("role", "user"), "content": msg.get("content", "")})
+                    # Use the latest message content to preserve any injected context
+                    file_messages.append({"role": "user", "content": current_user_content})
 
                     response = await loop.run_in_executor(
                         None,
                         lambda: router.chat_with_file(
                             provider=provider,
-                            text=messages[-1]["content"],
+                            text=file_messages[-1]["content"],
                             file_data=file_bytes,
                             file_mime_type=file_ctx["mime"],
                             filename=filename,
-                            history=messages[:-1],
+                            history=file_messages[:-1],
                             system_prompt=system_prompt,
                             max_tokens=4096,
                         )
@@ -1203,9 +1208,13 @@ async def _call_llm_async(
                             storage_key = file_ctx.get("storage_key")
                             
                             if storage_key:
-                                # Genuine cloud file with key -> Generate signed URL (1 hour)
-                                signed_url = storage.get_url(storage_key, expires_in_seconds=3600)
-                                logger.info(f"[AIBOT_CTX] Using signed URL for cloud access: {signed_url[:100]}...")
+                                if storage_key.startswith("http"):
+                                    signed_url = storage_key
+                                    logger.info(f"[AIBOT_CTX] Using direct URL (storage_key is full URL): {signed_url[:100]}...")
+                                else:
+                                    # Genuine cloud file with key -> Generate signed URL (1 hour)
+                                    signed_url = storage.get_url(storage_key, expires_in_seconds=3600)
+                                    logger.info(f"[AIBOT_CTX] Using signed URL for cloud access: {signed_url[:100]}...")
                             else:
                                 # Legacy message (no key) -> Fallback to using URI directly
                                 signed_url = file_uri

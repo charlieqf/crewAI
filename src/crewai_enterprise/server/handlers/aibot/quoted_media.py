@@ -175,8 +175,17 @@ def _infer_mime_type(filename: str) -> str:
     name = (filename or "").lower()
     if name.endswith(".pdf"):
         return "application/pdf"
-    if any(name.endswith(ext) for ext in (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp")):
-        return "image/jpeg"
+    image_types = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".gif": "image/gif",
+        ".bmp": "image/bmp",
+        ".webp": "image/webp",
+    }
+    for ext, mime in image_types.items():
+        if name.endswith(ext):
+            return mime
     return "application/octet-stream"
 
 
@@ -184,8 +193,12 @@ def _parse_storage_key(file_uri: str | None) -> str | None:
     if not file_uri:
         return None
     if not file_uri.startswith("http"):
-        return None
+        return file_uri
     parsed = urlparse(file_uri)
-    if parsed.netloc == QINIU_DOMAIN:
-        return parsed.path.lstrip("/")
-    return None
+    if not parsed.path:
+        return None
+    if QINIU_DOMAIN:
+        if parsed.netloc == QINIU_DOMAIN or parsed.netloc.endswith(f".{QINIU_DOMAIN}"):
+            return parsed.path.lstrip("/")
+        return None
+    return parsed.path.lstrip("/")

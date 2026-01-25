@@ -13,6 +13,24 @@ class ArchiveSyncError(Exception):
     """Fail-fast error for one-shot archive sync."""
 
 
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _pid_matches_worker(pid: int) -> bool:
+    cmdline_path = f"/proc/{pid}/cmdline"
+    try:
+        with open(cmdline_path, "rb") as handle:
+            raw = handle.read().decode("utf-8", errors="ignore")
+        return "archive_sync_worker.py" in raw
+    except Exception:
+        return False
+
+
 def trigger_archive_sync(*, reason: str, lock_ttl_secs: int = 900) -> str:
     """
     Trigger a one-shot archive sync (non-blocking).
@@ -23,15 +41,29 @@ def trigger_archive_sync(*, reason: str, lock_ttl_secs: int = 900) -> str:
     _ensure_worker_exists()
 
     if os.path.exists(ARCHIVE_SYNC_LOCK):
-        # Lock exists: check staleness
+        pid = None
         try:
-            mtime = os.path.getmtime(ARCHIVE_SYNC_LOCK)
-            age = time.time() - mtime
+            with open(ARCHIVE_SYNC_LOCK, "r", encoding="utf-8") as handle:
+                raw = handle.read().strip()
+            if raw.isdigit():
+                pid = int(raw)
         except Exception:
-            age = 0
+            pid = None
 
-        if age < lock_ttl_secs:
-            raise ArchiveSyncError("archive sync already running (lock active)")
+        if pid and _pid_alive(pid):
+            if _pid_matches_worker(pid):
+                raise ArchiveSyncError(f"archive sync already running (pid={pid})")
+            pid = None
+
+        if pid is None:
+            try:
+                mtime = os.path.getmtime(ARCHIVE_SYNC_LOCK)
+                age = time.time() - mtime
+            except Exception:
+                age = 0
+
+            if age < lock_ttl_secs:
+                raise ArchiveSyncError("archive sync already running (lock active)")
 
         # Stale lock: remove and proceed
         try:

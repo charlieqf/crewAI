@@ -52,8 +52,17 @@ def _get_mime_type(filename: str) -> str:
     name = (filename or "").lower()
     if name.endswith(".pdf"):
         return "application/pdf"
-    if name.endswith((".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp")):
-        return "image/jpeg"
+    image_types = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".gif": "image/gif",
+        ".bmp": "image/bmp",
+        ".webp": "image/webp",
+    }
+    for ext, mime in image_types.items():
+        if name.endswith(ext):
+            return mime
     return "application/octet-stream"
 
 
