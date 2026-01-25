@@ -72,6 +72,8 @@ def resolve_quoted_media(
     if not os.path.exists(ARCHIVE_DB_PATH):
         raise QuotedMediaError(f"archive db not found: {ARCHIVE_DB_PATH}")
     record = _fetch_chat_file_by_msgid(chat_id, quoted_msg_id) if quoted_msg_id else None
+    if not record and quoted_msg_id and quoted_msg_id.startswith("file_"):
+        record = _fetch_chat_file_by_msgid(chat_id, quoted_msg_id[5:])
     if not record and quoted_filename:
         record = _fetch_chat_file_by_filename(chat_id, quoted_filename)
 
