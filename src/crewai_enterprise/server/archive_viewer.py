@@ -51,7 +51,7 @@ async def list_messages(room_id: Optional[str] = None, limit: int = 100, offset:
             FROM archived_messages m
             LEFT JOIN chat_files f ON m.msgid = f.msgid
             WHERE m.room_id = ?
-            ORDER BY m.seq DESC
+            ORDER BY m.created_at DESC, m.seq DESC
             LIMIT ? OFFSET ?
         """, (room_id, limit, offset))
     else:
@@ -59,7 +59,7 @@ async def list_messages(room_id: Optional[str] = None, limit: int = 100, offset:
             SELECT m.id, m.seq, m.msgid, m.msgtype, m.sender_id, m.room_id, m.content, m.created_at, f.file_uri
             FROM archived_messages m
             LEFT JOIN chat_files f ON m.msgid = f.msgid
-            ORDER BY m.seq DESC
+            ORDER BY m.created_at DESC, m.seq DESC
             LIMIT ? OFFSET ?
         """, (limit, offset))
     
