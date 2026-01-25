@@ -302,6 +302,7 @@ async def _handle_text_message(
             user_id=user_id,
             user_name=user_name,
             wecom_msg_id=wecom_msg_id,
+            quoted_content=quoted_content,
             quoted_msg_id=quoted_msg_id,
             quoted_filename=quoted_filename,
             response_url=response_url,
@@ -624,6 +625,7 @@ async def _handle_file_message(
             user_id=user_id,
             user_name=user_name,
             wecom_msg_id=wecom_msg_id,
+            quoted_content=None,
             response_url=response_url,
         )
     )

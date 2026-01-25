@@ -22,6 +22,15 @@ from src.crewai_enterprise.server.handlers.aibot.commands import (
     _handle_prompt_command,
 )
 from src.crewai_enterprise.server.handlers.aibot.file_output import _format_chat_history
+from src.crewai_enterprise.server.handlers.aibot.quoted_media import (
+    QuotedMediaError,
+    is_media_quote,
+    resolve_quoted_media,
+)
+from src.crewai_enterprise.server.handlers.aibot.sync_trigger import (
+    ArchiveSyncError,
+    trigger_archive_sync,
+)
 from src.crewai_enterprise.utils.file_content_store import FileContentStore
 from src.crewai_enterprise.utils.llm_router import LLMError, get_router
 from src.crewai_enterprise.utils.chat_context import get_context_manager
@@ -507,6 +516,7 @@ async def _call_llm_async(
     user_id: str,
     user_name: str,
     wecom_msg_id: str | None,
+    quoted_content: str | None = None,
     quoted_msg_id: str | None = None,
     quoted_filename: str | None = None,
     response_url: str | None = None,
@@ -947,9 +957,83 @@ async def _call_llm_async(
                 f"---\n\n基于以上对话内容，请根据要求执行：{messages[-1]['content']}"
             )
 
-        # 1. Quoted File (Specific)
+        def _finish_early(message: str, *, is_error: bool = False) -> None:
+            if stream_id in _stream_tasks:
+                _stream_tasks[stream_id]["content"] = message
+                _stream_tasks[stream_id]["finished"] = True
+                _stream_tasks[stream_id]["completed_at"] = time.time()
+                if is_error:
+                    _stream_tasks[stream_id]["error"] = True
+            context_manager.add_message(
+                chat_id=chat_id,
+                sender_id=f"bot_{bot_type}",
+                sender_name=f"{bot_type}",
+                content=message,
+                role="assistant",
+                bot_type=bot_type,
+            )
+
         file_ctx = None
-        if quoted_msg_id:
+        skip_sticky_file = False
+        skip_extracted_injection = False
+        strict_media_quote = False
+        ocr_notice_prefix = ""
+
+        # Quoted media resolution (fail fast, explicit)
+        if quoted_msg_id or quoted_filename:
+            if is_media_quote(quoted_content, quoted_filename):
+                strict_media_quote = True
+                skip_sticky_file = True
+                try:
+                    media_result = resolve_quoted_media(
+                        chat_id=chat_id,
+                        quoted_msg_id=quoted_msg_id,
+                        quoted_filename=quoted_filename,
+                        bot_type=bot_type,
+                    )
+                except QuotedMediaError as e:
+                    msg = f"❗引用文件解析失败: {e}"
+                    logger.error(f"[AIBOT_QUOTE] {msg}")
+                    _finish_early(msg, is_error=True)
+                    return
+
+                if media_result.status == "file_ctx" and media_result.file_ctx:
+                    file_ctx = media_result.file_ctx
+                    skip_extracted_injection = True
+                    logger.info(
+                        f"[AIBOT_QUOTE] Using quoted file context: {media_result.reason}"
+                    )
+                elif media_result.status == "ocr_only" and media_result.ocr_text:
+                    skip_extracted_injection = True
+                    ocr_notice_prefix = "⚠️ 未获取到原图/原文件，仅基于OCR文本回答。\n\n"
+                    ocr_snippet = media_result.ocr_text[:5000]
+                    if messages and messages[-1]["role"] == "user":
+                        messages[-1]["content"] = (
+                            f"[Quoted OCR Content]\n{ocr_snippet}\n\n{messages[-1]['content']}"
+                        )
+                    logger.info(
+                        f"[AIBOT_QUOTE] Using OCR-only fallback ({len(ocr_snippet)} chars)"
+                    )
+                elif media_result.status in ("pending", "not_found"):
+                    try:
+                        sync_status = trigger_archive_sync(
+                            reason=f"quoted_media:{quoted_msg_id or quoted_filename}"
+                        )
+                        msg = "引用的图片/文件尚未同步完成，已触发同步，请稍后重试。"
+                        logger.warning(f"[AIBOT_QUOTE] {msg} ({sync_status})")
+                    except ArchiveSyncError as e:
+                        msg = f"❗引用文件未就绪，且触发同步失败: {e}"
+                        logger.error(f"[AIBOT_QUOTE] {msg}")
+                    _finish_early(msg, is_error=True)
+                    return
+                else:
+                    msg = f"❗引用文件解析失败: {media_result.reason}"
+                    logger.error(f"[AIBOT_QUOTE] {msg}")
+                    _finish_early(msg, is_error=True)
+                    return
+
+        # 1. Quoted File (Specific)
+        if not file_ctx and not strict_media_quote and quoted_msg_id:
             # Try original ID first
             file_ctx = context_manager.get_active_file(chat_id, wecom_msg_id=quoted_msg_id, bot_type=bot_type)
             if not file_ctx:
@@ -959,13 +1043,13 @@ async def _call_llm_async(
             if file_ctx:
                 logger.info(f"[AIBOT_CTX] Found quoted file by MsgId: {file_ctx['filename']}")
         
-        if not file_ctx and quoted_filename:
+        if not file_ctx and not strict_media_quote and quoted_filename:
              file_ctx = context_manager.get_active_file(chat_id, filename=quoted_filename, bot_type=bot_type)
              if file_ctx:
                  logger.info(f"[AIBOT_CTX] Found quoted file by Filename: {file_ctx['filename']}")
 
         # 2. Latest File (Sticky/Global) - with 10-minute time window
-        if not file_ctx:
+        if not file_ctx and not skip_sticky_file:
              file_ctx = context_manager.get_active_file(chat_id, limit=50, bot_type=bot_type)
              
              # Check if file is within 10-minute window
@@ -978,7 +1062,7 @@ async def _call_llm_async(
                     file_ctx = None  # Expired, don't use
 
         extracted_record = None
-        if file_ctx or quoted_msg_id:
+        if (file_ctx or quoted_msg_id) and not skip_extracted_injection:
             store = FileContentStore()
             if file_ctx:
                 file_hash = file_ctx.get("hash")
@@ -1015,6 +1099,11 @@ async def _call_llm_async(
                     f"[AIBOT_CTX] Skipping file context - {bot_type} does not support "
                     f"native file analysis (file: {file_ctx['filename']})"
                 )
+                if strict_media_quote:
+                    msg = "❗当前机器人不支持文件/图片解析，请更换支持文件分析的机器人。"
+                    logger.error(f"[AIBOT_QUOTE] {msg}")
+                    _finish_early(msg, is_error=True)
+                    return
                 file_ctx = None  # Clear it, don't use
 
         logger.info(
@@ -1167,6 +1256,11 @@ async def _call_llm_async(
                             logger.error(f"[AIBOT_CTX] Failed to download cloud file: {download_err}")
                             raise download_err
             except Exception as e:
+                if strict_media_quote:
+                    msg = f"❗引用文件解析失败（无法读取文件内容）: {str(e)[:100]}"
+                    logger.error(f"[AIBOT_QUOTE] {msg}")
+                    _finish_early(msg, is_error=True)
+                    return
                 logger.warning(f"[AIBOT_CTX] Failed to use file context (fallback to text): {e}")
                 use_file_context = False
                 # Auditor Suggestion: If file context was expected but failed, notify the user.
@@ -1187,6 +1281,9 @@ async def _call_llm_async(
             f"[AIBOT_LLM_RES] bot={bot_type} elapsed={elapsed_ms}ms "
             f"response_len={len(response.content)} content={response.content[:50]!r}..."
         )
+
+        if ocr_notice_prefix:
+            response.content = f"{ocr_notice_prefix}{response.content}"
 
         # Post-process response for generated files (Auditor Refinement)
         final_content = await _process_llm_file_output(
