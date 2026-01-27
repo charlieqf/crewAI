@@ -94,6 +94,10 @@ class SessionStore:
         self._save()
         return new_id
 
+    def set_session_id(self, chat_id: str, session_id: str) -> None:
+        self.sessions[chat_id] = self._normalize_session_id(session_id)
+        self._save()
+
     def _normalize_session_id(self, session_id: str) -> str:
         if session_id.startswith("ses"):
             return session_id

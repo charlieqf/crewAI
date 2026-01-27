@@ -781,6 +781,32 @@ async def _call_opencode_async(
     except requests.HTTPError as e:
         resp = e.response
         detail = resp.text if resp is not None else str(e)
+        if _is_opencode_not_found(resp, detail):
+            try:
+                new_session_id = _opencode_client.create_session(directory=repo_path)
+                _opencode_session_store.set_session_id(chat_id, new_session_id)
+                retry_response = _opencode_client.prompt_interactive(
+                    session_id=new_session_id,
+                    parts=parts,
+                    message_id=message_id,
+                    directory=repo_path,
+                )
+                result = ""
+                if retry_response is not None:
+                    try:
+                        data = retry_response.json()
+                        result = _extract_opencode_text(data)
+                    except ValueError:
+                        result = retry_response.text.strip()
+                if not result:
+                    result = "OpenCode returned an empty response."
+
+                _stream_tasks[stream_id]["content"] = result
+                _stream_tasks[stream_id]["finished"] = True
+                return
+            except Exception as retry_error:
+                detail = str(retry_error)
+
         _stream_tasks[stream_id]["content"] = f"抱歉,OpenCode服务暂时不可用: {detail}"
         _stream_tasks[stream_id]["finished"] = True
     except Exception as e:
@@ -818,6 +844,14 @@ def _extract_opencode_text(data: dict) -> str:
             return error.strip()
 
     return ""
+
+
+def _is_opencode_not_found(resp: requests.Response | None, detail: str) -> bool:
+    if resp is not None and resp.status_code == 404:
+        return True
+    if detail:
+        return "NotFoundError" in detail or "Resource not found" in detail
+    return False
 
 
 def _file_error_response(
