@@ -731,7 +731,11 @@ async def _call_opencode_async(
 
         session_id = _opencode_session_store.get_session_id(chat_id)
 
-        parts = [{"type": "text", "text": content}]
+        safe_content = content.strip() if content else ""
+        if not safe_content:
+            safe_content = "(empty message)"
+
+        parts = [{"type": "text", "text": safe_content}]
         if quoted_content:
             parts.append(
                 {
@@ -758,6 +762,11 @@ async def _call_opencode_async(
         result = data.get("content") or data.get("message") or str(data)
 
         _stream_tasks[stream_id]["content"] = result
+        _stream_tasks[stream_id]["finished"] = True
+    except requests.HTTPError as e:
+        resp = e.response
+        detail = resp.text if resp is not None else str(e)
+        _stream_tasks[stream_id]["content"] = f"抱歉,OpenCode服务暂时不可用: {detail}"
         _stream_tasks[stream_id]["finished"] = True
     except Exception as e:
         _stream_tasks[stream_id]["content"] = f"抱歉,OpenCode服务暂时不可用: {e}"
