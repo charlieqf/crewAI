@@ -160,6 +160,17 @@ class OpenCodeClient:
         if last_error:
             raise last_error
 
+    def create_session(self, directory: Optional[str] = None) -> str:
+        url = f"{self.base_url}/session"
+        params = {"directory": directory} if directory else None
+        response = self.retry_session.post(url, json={}, params=params, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+        session_id = data.get("id")
+        if not session_id:
+            raise ValueError("OpenCode session create did not return id")
+        return session_id
+
     def send_command(
         self,
         session_id: str,

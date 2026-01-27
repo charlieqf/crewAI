@@ -2,7 +2,7 @@ import json
 import os
 import uuid
 import logging
-from typing import Dict
+from typing import Dict, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -72,10 +72,13 @@ class SessionStore:
         except Exception as e:
             logger.error(f"Failed to save session store: {e}")
 
-    def get_session_id(self, chat_id: str) -> str:
-        """Get or create a session UUID for a chat_id."""
+    def get_session_id(
+        self, chat_id: str, creator: Callable[[], str] | None = None
+    ) -> str:
+        """Get or create a session ID for a chat_id."""
         if chat_id not in self.sessions:
-            self.sessions[chat_id] = self._normalize_session_id(str(uuid.uuid4()))
+            session_id = creator() if creator is not None else str(uuid.uuid4())
+            self.sessions[chat_id] = self._normalize_session_id(session_id)
             self._save()
         else:
             normalized = self._normalize_session_id(self.sessions[chat_id])

@@ -415,7 +415,10 @@ class OpenCodeBridge:
         """
         chat_id = msg.chat_id
         msg_id = msg.msg_id
-        session_uuid = self.session_store.get_session_id(chat_id)
+        session_uuid = self.session_store.get_session_id(
+            chat_id,
+            creator=lambda: self.client.create_session(directory=directory),
+        )
         directory = self._get_directory(chat_id)
 
         # 0. Force Archive Sync

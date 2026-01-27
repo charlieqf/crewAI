@@ -729,7 +729,10 @@ async def _call_opencode_async(
         if _opencode_session_store is None:
             _opencode_session_store = SessionStore(session_file)
 
-        session_id = _opencode_session_store.get_session_id(chat_id)
+        session_id = _opencode_session_store.get_session_id(
+            chat_id,
+            creator=lambda: _opencode_client.create_session(directory=repo_path),
+        )
 
         safe_content = content.strip() if content else ""
         if not safe_content:
