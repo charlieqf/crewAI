@@ -763,8 +763,15 @@ async def _call_opencode_async(
             message_id=message_id,
             directory=repo_path,
         )
-        data = response.json() if response is not None else {}
-        result = data.get("content") or data.get("message") or str(data)
+        result = ""
+        if response is not None:
+            try:
+                data = response.json()
+                result = data.get("content") or data.get("message") or ""
+            except ValueError:
+                result = response.text.strip()
+        if not result:
+            result = "OpenCode returned an empty response."
 
         _stream_tasks[stream_id]["content"] = result
         _stream_tasks[stream_id]["finished"] = True
