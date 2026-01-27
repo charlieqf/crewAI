@@ -39,6 +39,8 @@ from fastapi.responses import PlainTextResponse, Response
 from src.crewai_enterprise.utils.chat_context import get_context_manager
 from src.crewai_enterprise.utils.file_extraction_queue import schedule_file_extraction
 from src.crewai_enterprise.utils.storage_manager import get_storage_manager
+from src.crewai_enterprise.server.opencode_client import OpenCodeClient
+from src.crewai_enterprise.server.session_store import SessionStore
 from src.crewai_enterprise.server.handlers.aibot import (
     BOT_CONFIGS,
     PROJECT_NICKNAMES,
@@ -71,6 +73,9 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+_opencode_client: OpenCodeClient | None = None
+_opencode_session_store: SessionStore | None = None
 
 
 def register_aibot_routes(app: FastAPI) -> None:
@@ -118,7 +123,10 @@ def register_aibot_routes(app: FastAPI) -> None:
         nonce: str = Query(...),
     ) -> Response:
         """Handle incoming messages from WeCom intelligent robot."""
-        print(f"--- [AIBOT_ENTRY] bot={bot_type} signature={msg_signature[:10]}... timestamp={timestamp} ---", flush=True)
+        print(
+            f"--- [AIBOT_ENTRY] bot={bot_type} signature={msg_signature[:10]}... timestamp={timestamp} ---",
+            flush=True,
+        )
         if bot_type not in BOT_CONFIGS:
             raise HTTPException(status_code=404, detail=f"Unknown bot: {bot_type}")
 
@@ -145,18 +153,26 @@ def register_aibot_routes(app: FastAPI) -> None:
             )
 
             if msgtype == "text":
-                return await _handle_text_message(bot_type, data, nonce, timestamp, response_url=response_url)
+                return await _handle_text_message(
+                    bot_type, data, nonce, timestamp, response_url=response_url
+                )
             elif msgtype == "stream":
                 return await _handle_stream_refresh(bot_type, data, nonce, timestamp)
             elif msgtype == "mixed":
                 # Handle mixed messages (text + image combination)
-                return await _handle_mixed_message(bot_type, data, nonce, timestamp, response_url=response_url)
+                return await _handle_mixed_message(
+                    bot_type, data, nonce, timestamp, response_url=response_url
+                )
             elif msgtype == "image":
                 # Handle image-only messages
-                return await _handle_image_message(bot_type, data, nonce, timestamp, response_url=response_url)
+                return await _handle_image_message(
+                    bot_type, data, nonce, timestamp, response_url=response_url
+                )
             elif msgtype == "file":
                 # Handle file messages (PDF, Excel, etc.)
-                return await _handle_file_message(bot_type, data, nonce, timestamp, response_url=response_url)
+                return await _handle_file_message(
+                    bot_type, data, nonce, timestamp, response_url=response_url
+                )
             elif msgtype == "event":
                 # Handle events (e.g., bot added to group)
                 logger.info(f"[AIBOT_EVENT] bot={bot_type} event={data}")
@@ -183,7 +199,9 @@ async def _handle_text_message(
     response_url: str | None = None,
 ) -> Response:
     """Handle text message: start LLM processing, return immediate 'thinking' response."""
-    print(f"[AIBOT_TEXT_START] bot={bot_type} data_keys={list(data.keys())}", flush=True)
+    print(
+        f"[AIBOT_TEXT_START] bot={bot_type} data_keys={list(data.keys())}", flush=True
+    )
     # Cleanup old tasks on each message to prevent unbounded growth
     _cleanup_old_tasks()
 
@@ -200,26 +218,26 @@ async def _handle_text_message(
     quoted_content, quoted_msg_id = _extract_quote_content(data)
     original_content = content  # Save original user input
     quoted_filename = None
-    
+
     # file_output_mode will be detected inside _call_llm_async via _handle_prompt_command
     file_output_mode = False
-    
+
     if quoted_content:
         # If quoting a file, content is often the filename
         # Clean it up: remove common prefixes like "user:" or "[icon]"
         clean_name = quoted_content.strip()
-        
+
         # Split by newline or colon and take the last part (often contains the filename)
         if "\n" in clean_name:
             clean_name = clean_name.split("\n")[-1].strip()
         elif ":" in clean_name:
             clean_name = clean_name.split(":")[-1].strip()
-            
+
         # Remove common marks
         for mark in ["[文件]", "[图片]", "附件", "📄"]:
             clean_name = clean_name.replace(mark, "")
         clean_name = clean_name.strip()
-            
+
         if "." in clean_name and len(clean_name) < 100:
             quoted_filename = clean_name
             logger.info(f"[AIBOT_QUOTE] Detected quoted filename: {quoted_filename}")
@@ -293,22 +311,37 @@ async def _handle_text_message(
         _processed_messages[wecom_msg_id] = stream_id
 
     # Start LLM call asynchronously (don't wait for it)
-    asyncio.create_task(
-        _call_llm_async(
-            stream_id=stream_id,
-            bot_type=bot_type,
-            content=content,
-            chat_id=chat_id,
-            user_id=user_id,
-            user_name=user_name,
-            wecom_msg_id=wecom_msg_id,
-            quoted_content=quoted_content,
-            quoted_msg_id=quoted_msg_id,
-            quoted_filename=quoted_filename,
-            response_url=response_url,
-            file_output_mode=file_output_mode,
+    if bot_type == "chatgpt" and _should_proxy_chatgpt_to_opencode():
+        asyncio.create_task(
+            _call_opencode_async(
+                stream_id=stream_id,
+                content=content,
+                chat_id=chat_id,
+                user_id=user_id,
+                user_name=user_name,
+                wecom_msg_id=wecom_msg_id,
+                quoted_content=quoted_content,
+                quoted_msg_id=quoted_msg_id,
+                quoted_filename=quoted_filename,
+            )
         )
-    )
+    else:
+        asyncio.create_task(
+            _call_llm_async(
+                stream_id=stream_id,
+                bot_type=bot_type,
+                content=content,
+                chat_id=chat_id,
+                user_id=user_id,
+                user_name=user_name,
+                wecom_msg_id=wecom_msg_id,
+                quoted_content=quoted_content,
+                quoted_msg_id=quoted_msg_id,
+                quoted_filename=quoted_filename,
+                response_url=response_url,
+                file_output_mode=file_output_mode,
+            )
+        )
 
     # Return immediate response with "thinking" status
     stream_json = _make_text_stream(stream_id, "思考中...", finish=False)
@@ -334,7 +367,9 @@ async def _handle_stream_refresh(
     if not task:
         # Task not found - may be expired or on different worker
         logger.warning(f"[AIBOT_STREAM] bot={bot_type} stream_id={stream_id} not found")
-        stream_json = _make_text_stream(stream_id, "任务已过期，请重新提问", finish=True)
+        stream_json = _make_text_stream(
+            stream_id, "任务已过期，请重新提问", finish=True
+        )
         encrypted = _encrypt_response(bot_type, stream_json, nonce, timestamp)
         return Response(content=encrypted, media_type="text/plain")
 
@@ -395,13 +430,17 @@ async def _handle_mixed_message(
         existing_stream_id = _processed_messages[wecom_msg_id]
         task = _stream_tasks.get(existing_stream_id)
         if task:
-            logger.info(f"[AIBOT_DEDUP] bot={bot_type} msg_id={wecom_msg_id} returning existing stream_id={existing_stream_id}")
-            stream_json = _make_text_stream(existing_stream_id, task["content"], task["finished"])
+            logger.info(
+                f"[AIBOT_DEDUP] bot={bot_type} msg_id={wecom_msg_id} returning existing stream_id={existing_stream_id}"
+            )
+            stream_json = _make_text_stream(
+                existing_stream_id, task["content"], task["finished"]
+            )
             encrypted = _encrypt_response(bot_type, stream_json, nonce, timestamp)
             return Response(content=encrypted, media_type="text/plain")
 
     _cleanup_old_tasks()
-    
+
     # Extract text from mixed message
     text_content = _extract_text_from_mixed(data)
     image_urls = _extract_image_urls_from_mixed(data)
@@ -426,7 +465,9 @@ async def _handle_mixed_message(
         modified_data = data.copy()
         modified_data["text"] = {"content": text_content}
         modified_data["msgtype"] = "text"
-        return await _handle_text_message(bot_type, modified_data, nonce, timestamp, response_url=response_url)
+        return await _handle_text_message(
+            bot_type, modified_data, nonce, timestamp, response_url=response_url
+        )
 
     # Process with image - try to download and decrypt
     aes_key = _get_bot_aes_key(bot_type)
@@ -442,12 +483,12 @@ async def _handle_mixed_message(
         if success:
             image_base64 = base64.b64encode(result).decode("utf-8")
             logger.info(f"[AIBOT_MIXED] bot={bot_type} image decrypted successfully")
-            
+
             # Use same stream_id logic to avoid duplicate uploads
             stream_id = _generate_stream_id()
             if wecom_msg_id:
                 _processed_messages[wecom_msg_id] = stream_id
-            
+
             # Upload to cloud storage (UCS Phase 1) - Fix: Persistence for mixed messages
             file_url, storage_key, mime_type, filename = _upload_image_to_ucs(result)
             file_hash = schedule_file_extraction(
@@ -460,7 +501,9 @@ async def _handle_mixed_message(
             )
         else:
             image_error = result
-            logger.warning(f"[AIBOT_MIXED] bot={bot_type} image decrypt failed: {result}")
+            logger.warning(
+                f"[AIBOT_MIXED] bot={bot_type} image decrypt failed: {result}"
+            )
 
     # Build prompt
     if text_content:
@@ -474,7 +517,9 @@ async def _handle_mixed_message(
         modified_data = data.copy()
         modified_data["text"] = {"content": prompt + error_note}
         modified_data["msgtype"] = "text"
-        return await _handle_text_message(bot_type, modified_data, nonce, timestamp, response_url=response_url)
+        return await _handle_text_message(
+            bot_type, modified_data, nonce, timestamp, response_url=response_url
+        )
 
     # Process with image using vision API
     return await _handle_vision_message(
@@ -507,8 +552,12 @@ async def _handle_file_message(
         existing_stream_id = _processed_messages[wecom_msg_id]
         task = _stream_tasks.get(existing_stream_id)
         if task:
-            logger.info(f"[AIBOT_DEDUP] bot={bot_type} file msg_id={wecom_msg_id} returning cached response")
-            stream_json = _make_text_stream(existing_stream_id, task["content"], task["finished"])
+            logger.info(
+                f"[AIBOT_DEDUP] bot={bot_type} file msg_id={wecom_msg_id} returning cached response"
+            )
+            stream_json = _make_text_stream(
+                existing_stream_id, task["content"], task["finished"]
+            )
             encrypted = _encrypt_response(bot_type, stream_json, nonce, timestamp)
             return Response(content=encrypted, media_type="text/plain")
 
@@ -527,8 +576,13 @@ async def _handle_file_message(
 
     if not file_url:
         return _file_error_response(
-            bot_type, nonce, timestamp, user_id, user_name, chat_id,
-            "未获取到文件链接，请重试。"
+            bot_type,
+            nonce,
+            timestamp,
+            user_id,
+            user_name,
+            chat_id,
+            "未获取到文件链接，请重试。",
         )
 
     try:
@@ -538,8 +592,13 @@ async def _handle_file_message(
     except Exception as e:
         logger.error(f"[AIBOT_FILE] Failed to download file: {e}")
         return _file_error_response(
-            bot_type, nonce, timestamp, user_id, user_name, chat_id,
-            f"文件下载失败：{str(e)[:50]}"
+            bot_type,
+            nonce,
+            timestamp,
+            user_id,
+            user_name,
+            chat_id,
+            f"文件下载失败：{str(e)[:50]}",
         )
 
     header_name = None
@@ -635,6 +694,76 @@ async def _handle_file_message(
     return Response(content=encrypted, media_type="text/plain")
 
 
+def _should_proxy_chatgpt_to_opencode() -> bool:
+    return os.getenv("CHATGPT_PROXY_OPENCODE", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+
+
+async def _call_opencode_async(
+    stream_id: str,
+    content: str,
+    chat_id: str,
+    user_id: str,
+    user_name: str,
+    wecom_msg_id: str | None,
+    quoted_content: str | None,
+    quoted_msg_id: str | None,
+    quoted_filename: str | None,
+) -> None:
+    global _opencode_client
+    global _opencode_session_store
+
+    try:
+        opencode_url = os.getenv("OPENCODE_URL", "http://127.0.0.1:4096")
+        repo_path = os.getenv("DEFAULT_REPO_PATH", "/opt/oh-my-opencode")
+        state_dir = os.path.dirname(
+            os.getenv("HISTORY_DB_PATH", "/var/lib/wecom-callback/chat_history.db")
+        )
+        session_file = os.path.join(state_dir, "opencode_sessions.json")
+
+        if _opencode_client is None:
+            _opencode_client = OpenCodeClient(opencode_url)
+        if _opencode_session_store is None:
+            _opencode_session_store = SessionStore(session_file)
+
+        session_id = _opencode_session_store.get_session_id(chat_id)
+
+        parts = [{"type": "text", "text": content}]
+        if quoted_content:
+            parts.append(
+                {
+                    "type": "text",
+                    "text": f"[Quoted] {quoted_content}",
+                    "metadata": {"quoted_msg_id": quoted_msg_id},
+                }
+            )
+        if quoted_filename:
+            parts.append(
+                {
+                    "type": "text",
+                    "text": f"[Quoted File] {quoted_filename}",
+                }
+            )
+
+        response = _opencode_client.prompt_interactive(
+            session_id=session_id,
+            parts=parts,
+            message_id=wecom_msg_id or stream_id,
+            directory=repo_path,
+        )
+        data = response.json() if response is not None else {}
+        result = data.get("content") or data.get("message") or str(data)
+
+        _stream_tasks[stream_id]["content"] = result
+        _stream_tasks[stream_id]["finished"] = True
+    except Exception as e:
+        _stream_tasks[stream_id]["content"] = f"抱歉,OpenCode服务暂时不可用: {e}"
+        _stream_tasks[stream_id]["finished"] = True
+
+
 def _file_error_response(
     bot_type: str,
     nonce: str,
@@ -676,8 +805,12 @@ async def _handle_image_message(
         existing_stream_id = _processed_messages[wecom_msg_id]
         task = _stream_tasks.get(existing_stream_id)
         if task:
-            logger.info(f"[AIBOT_DEDUP] bot={bot_type} image msg_id={wecom_msg_id} returning cached response")
-            stream_json = _make_text_stream(existing_stream_id, task["content"], task["finished"])
+            logger.info(
+                f"[AIBOT_DEDUP] bot={bot_type} image msg_id={wecom_msg_id} returning cached response"
+            )
+            stream_json = _make_text_stream(
+                existing_stream_id, task["content"], task["finished"]
+            )
             encrypted = _encrypt_response(bot_type, stream_json, nonce, timestamp)
             return Response(content=encrypted, media_type="text/plain")
 
@@ -717,7 +850,9 @@ async def _handle_image_message(
     if not success:
         logger.error(f"[AIBOT_IMAGE] bot={bot_type} decrypt failed: {result}")
         stream_id = _generate_stream_id()
-        response_text = f"收到你的图片，但处理时出现问题：{result}\n\n请稍后重试，或添加文字说明。"
+        response_text = (
+            f"收到你的图片，但处理时出现问题：{result}\n\n请稍后重试，或添加文字说明。"
+        )
         _stream_tasks[stream_id] = {
             "content": response_text,
             "finished": True,
@@ -802,7 +937,9 @@ async def _handle_vision_message(
         existing_stream_id = _processed_messages[wecom_msg_id]
         task = _stream_tasks.get(existing_stream_id)
         if task:
-            logger.info(f"[AIBOT_VISION] Returning cached response for msgid={wecom_msg_id}")
+            logger.info(
+                f"[AIBOT_VISION] Returning cached response for msgid={wecom_msg_id}"
+            )
             stream_json = _make_text_stream(
                 existing_stream_id, task["content"], task["finished"]
             )
@@ -824,7 +961,7 @@ async def _handle_vision_message(
     if wecom_msg_id:
         _processed_messages[wecom_msg_id] = stream_id
 
-    is_report_request = False # Initialize for scope safety
+    is_report_request = False  # Initialize for scope safety
 
     # Save persistent context (UCS Phase 1)
     if file_url:
@@ -859,7 +996,9 @@ async def _handle_vision_message(
                 bot_type=bot_type,
                 storage_key=storage_key,
             )
-            logger.info(f"[AIBOT_VISION] Saved persistent image context for chat={chat_id} (msgid={file_msg_id})")
+            logger.info(
+                f"[AIBOT_VISION] Saved persistent image context for chat={chat_id} (msgid={file_msg_id})"
+            )
         except Exception as e:
             logger.error(f"[AIBOT_VISION] Failed to save image context: {e}")
 
@@ -888,5 +1027,3 @@ async def _handle_vision_message(
 
     logger.info(f"[AIBOT_VISION] bot={bot_type} stream_id={stream_id} analyzing image")
     return Response(content=encrypted, media_type="text/plain")
-
-
