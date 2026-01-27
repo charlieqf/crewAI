@@ -12,6 +12,7 @@ from src.crewai_enterprise.server.handlers.text_handler import (
     handle_clear_command,
 )
 from src.crewai_enterprise.server.handlers.file_handler import process_file_message
+from src.crewai_enterprise.server.handlers.opencode_handler import process_opencode_message
 
 __all__ = [
     "BOT_CONFIG",
@@ -20,4 +21,5 @@ __all__ = [
     "process_text_message",
     "handle_clear_command",
     "process_file_message",
+    "process_opencode_message",
 ]

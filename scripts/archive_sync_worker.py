@@ -21,10 +21,13 @@ import time
 from datetime import datetime, timedelta, timezone
 
 # Add project to path
-sys.path.insert(0, "/opt/wecom-callback")
+base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, base_dir)
 
 MAX_ARCHIVE_FILE_BYTES = 5 * 1024 * 1024
-ARCHIVE_SYNC_LOCK = os.getenv("ARCHIVE_SYNC_LOCK", "/var/lib/wecom-callback/archive_sync.lock")
+# Default to project root for lock and env
+ARCHIVE_SYNC_LOCK = os.getenv("ARCHIVE_SYNC_LOCK", os.path.join(base_dir, "archive_sync.lock"))
+ARCHIVE_INLINE_EXTRACT = os.getenv("ARCHIVE_INLINE_EXTRACT", "").strip().lower() in {"1", "true", "yes"}
 
 def load_env(path):
     if not os.path.exists(path):
@@ -39,7 +42,9 @@ def load_env(path):
                 os.environ[key.strip()] = val.strip()
 
 # Load env before importing SDK
-load_env("/etc/wecom-callback/env")
+# Try .env in current directory or project root
+env_path = os.getenv("ENV_PATH", os.path.join(base_dir, ".env"))
+load_env(env_path)
 
 from src.crewai_enterprise.utils.wework_finance_sdk import WeWorkFinanceSDK
 from src.crewai_enterprise.utils.file_content_store import FileContentStore
@@ -256,14 +261,19 @@ def process_file_message(sdk, msg: dict, cursor) -> bool:
             created_at_str,
         ))
         
-        _extract_and_store(
-            file_bytes=file_bytes,
-            mime_type=mime_type,
-            filename=filename,
-            storage_key=file_uri,
-            chat_id=msg.get("roomid", ""),
-            msgid=msg.get("msgid"),
-        )
+        if ARCHIVE_INLINE_EXTRACT:
+            # Inline extraction can crash on some PDFs; keep it optional.
+            try:
+                _extract_and_store(
+                    file_bytes=file_bytes,
+                    mime_type=mime_type,
+                    filename=filename,
+                    storage_key=file_uri,
+                    chat_id=msg.get("roomid", ""),
+                    msgid=msg.get("msgid"),
+                )
+            except Exception as e:
+                logger.warning(f"Inline extraction failed for {filename}: {e}")
 
         logger.info(f"Saved file record: {filename} -> {file_uri}")
         return True
@@ -336,14 +346,19 @@ def process_image_message(sdk, msg: dict, cursor) -> bool:
             created_at_str,
         ))
         
-        _extract_and_store(
-            file_bytes=image_bytes,
-            mime_type=content_type,
-            filename=filename,
-            storage_key=file_uri,
-            chat_id=msg.get("roomid", ""),
-            msgid=msgid,
-        )
+        if ARCHIVE_INLINE_EXTRACT:
+            # Inline extraction can crash on some PDFs; keep it optional.
+            try:
+                _extract_and_store(
+                    file_bytes=image_bytes,
+                    mime_type=content_type,
+                    filename=filename,
+                    storage_key=file_uri,
+                    chat_id=msg.get("roomid", ""),
+                    msgid=msgid,
+                )
+            except Exception as e:
+                logger.warning(f"Inline extraction failed for {filename}: {e}")
 
         logger.info(f"Saved image record: {filename} -> {file_uri}")
         return True

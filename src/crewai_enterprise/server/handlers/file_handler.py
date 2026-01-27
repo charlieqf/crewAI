@@ -80,7 +80,9 @@ async def process_file_message(
 
         # Load file bytes for upload and extraction
         file_bytes = Path(file_info.file_path).read_bytes()
-        mime_type = mimetypes.guess_type(file_info.filename)[0] or "application/octet-stream"
+        mime_type = (
+            mimetypes.guess_type(file_info.filename)[0] or "application/octet-stream"
+        )
 
         storage = get_storage_manager()
         upload_res = storage.upload_file(
@@ -101,7 +103,7 @@ async def process_file_message(
         # Persist file context for later quoting/reporting
         context_manager.save_file(
             chat_id=chat_id,
-            sender_id=message.from_user_name or "unknown",
+            sender_id=message.from_user_id or "unknown",
             sender_name=user_name,
             file_uri=upload_res.url,
             filename=file_info.filename,
@@ -116,14 +118,13 @@ async def process_file_message(
         file_reference = f"[文件: {file_info.filename}] 已保存并上传"
         context_manager.add_message(
             chat_id=chat_id,
-            sender_id=message.from_user_name or "unknown",
+            sender_id=message.from_user_id or "unknown",
             sender_name=user_name,
             content=file_reference,
             role="user",
             wecom_msg_id=message.msg_id,  # Deduplication
         )
 
-        # Send acknowledgment based on file type
         if message.is_image:
             # TODO: Implement GPT-4 Vision or Gemini image analysis
             logger.info("Image saved, Vision API processing to be implemented")

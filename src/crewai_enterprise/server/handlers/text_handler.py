@@ -42,13 +42,20 @@ BOT_CONFIG: dict[str, dict[str, str]] = {
         "webhook_env": "WEBHOOK_GROK",
         "system_prompt": "你是Grok，一个风趣幽默且知识渊博的AI助手。请用中文回答。",
     },
+    "opencode": {
+        "provider": "opencode",
+        "webhook_env": "WEBHOOK_OPENCODE",
+        "system_prompt": "OpenCode Sisyphus Orchestrator",
+    },
 }
 
 
 def detect_bot_type(content: str) -> str:
     """Detect which bot should handle the message based on mention."""
     content_lower = content.lower()
-    if "@gemini" in content_lower or "gemini" in content_lower:
+    if "@opencode" in content_lower:
+        return "opencode"
+    elif "@gemini" in content_lower or "gemini" in content_lower:
         return "gemini"
     elif "@grok" in content_lower or "grok" in content_lower:
         return "grok"
@@ -61,20 +68,23 @@ def is_clear_command(content: str) -> bool:
     tokens = content.replace("\u00a0", " ").split()
     if not tokens:
         return False
-        
+
     first_token = tokens[0].lower()
     canonical_reset = "/reset"
-    
+
     # 场景1：直接以 /reset 开头 (1:1 或 直接指令)
     if first_token == canonical_reset:
         return True
-        
+
     # 场景2：艾特机器人后紧跟 /reset (必须有空格分隔)
     if first_token.startswith("@"):
         # @gemini /reset (必须有空格)
-        if len(tokens) >= 2 and tokens[1].lower().replace("\u00a0", " ") == canonical_reset:
+        if (
+            len(tokens) >= 2
+            and tokens[1].lower().replace("\u00a0", " ") == canonical_reset
+        ):
             return True
-            
+
     return False
 
 
@@ -83,19 +93,22 @@ def strip_reset_command(content: str) -> str:
     tokens = content.split()
     if not tokens:
         return ""
-        
+
     first_token = tokens[0].lower().replace("\u00a0", " ")
     canonical_reset = "/reset"
-    
+
     # 判断哪一部分是开头的动作指令，并返回其后的内容
     if first_token == canonical_reset:
         return " ".join(tokens[1:]).strip()
-        
+
     if first_token.startswith("@"):
         # @gemini /reset ... (必须有空格分隔)
-        if len(tokens) >= 2 and tokens[1].lower().replace("\u00a0", " ") == canonical_reset:
+        if (
+            len(tokens) >= 2
+            and tokens[1].lower().replace("\u00a0", " ") == canonical_reset
+        ):
             return " ".join(tokens[2:]).strip()
-            
+
     return content.strip()
 
 
@@ -105,6 +118,7 @@ async def process_text_message(
     user_name: str,
     content: str,
     webhook_url: str,
+    user_id: str | None = None,
     wecom_msg_id: str | None = None,
     llm_router: LLMRouter | None = None,
     context_manager: ChatContextManager | None = None,
@@ -133,9 +147,10 @@ async def process_text_message(
         system_prompt = config["system_prompt"]
 
         # Add user message to context
+        sender_id = user_id or user_name
         context_manager.add_message(
             chat_id=chat_id,
-            sender_id=user_name,
+            sender_id=sender_id,
             sender_name=user_name,
             content=content,
             role="user",
@@ -220,6 +235,7 @@ async def handle_clear_command(
     bot_type: str,
     chat_id: str,
     user_name: str,
+    user_id: str | None,
     webhook_url: str,
     remaining_text: str | None = None,
     wecom_msg_id: str | None = None,
@@ -238,10 +254,9 @@ async def handle_clear_command(
         context_manager = get_context_manager()
 
     # [FIX] Medium finding: Use the new per-bot reset logic instead of the deleted clear_context
+    sender_id = user_id or user_name
     success = context_manager.set_context_start(
-        chat_id=chat_id,
-        bot_type=bot_type,
-        user_id=user_name
+        chat_id=chat_id, bot_type=bot_type, user_id=sender_id
     )
     logger.info(f"Reset context for {chat_id} bot={bot_type}: {success}")
 
@@ -252,19 +267,22 @@ async def handle_clear_command(
             f"@{user_name} 已重置针对 {bot_type.upper()} 的对话记忆，让我们重新开始吧！",
             msg_type="text",
         )
-        
+
         # 2. If there's a follow-up question, process it immediately
         if remaining_text:
-            logger.info(f"[CLEAR_FLOW] Processing follow-up question: {remaining_text[:50]}...")
+            logger.info(
+                f"[CLEAR_FLOW] Processing follow-up question: {remaining_text[:50]}..."
+            )
             await process_text_message(
                 bot_type=bot_type,
                 chat_id=chat_id,
                 user_name=user_name,
+                user_id=user_id,
                 content=remaining_text,
                 webhook_url=webhook_url,
                 wecom_msg_id=wecom_msg_id,
                 context_manager=context_manager,
             )
-            
+
     except WeComWebhookError as e:
         logger.error(f"Failed to handle clear command: {e}")

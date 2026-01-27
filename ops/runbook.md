@@ -84,6 +84,47 @@ SELECT seq, updated_at FROM archive_cursor WHERE id = 1;
 SELECT MAX(created_at) FROM archived_messages;
 ```
 
+**Daily Ops Checklist (Archive + OCR Health)**
+1) **Service + worker health**
+```bash
+ssh -i $env:USERPROFILE\.ssh\kamatera root@104.238.213.119 "systemctl is-active wecom-callback"
+ssh -i $env:USERPROFILE\.ssh\kamatera root@104.238.213.119 "ps aux | grep -E 'archive_sync_worker.py|backfill_ocr' | grep -v grep"
+```
+
+2) **Archive sync lock (must be absent unless worker is running)**
+```bash
+ssh -i $env:USERPROFILE\.ssh\kamatera root@104.238.213.119 "ls -l /var/lib/wecom-callback/archive_sync.lock"
+ssh -i $env:USERPROFILE\.ssh\kamatera root@104.238.213.119 "cat /var/lib/wecom-callback/archive_sync.lock; ps -p \$(cat /var/lib/wecom-callback/archive_sync.lock) -o pid,cmd"
+```
+- If lock exists but PID not running, remove it and trigger one-shot sync:
+```bash
+ssh -i $env:USERPROFILE\.ssh\kamatera root@104.238.213.119 "rm -f /var/lib/wecom-callback/archive_sync.lock"
+ssh -i $env:USERPROFILE\.ssh\kamatera root@104.238.213.119 "/opt/wecom-callback/venv/bin/python /opt/wecom-callback/scripts/archive_sync_worker.py 0"
+```
+
+3) **Archive freshness (global + per room)**
+```bash
+ssh -i $env:USERPROFILE\.ssh\kamatera root@104.238.213.119 "sqlite3 /var/lib/wecom-callback/chat_history.db \"SELECT seq, updated_at FROM archive_cursor WHERE id=1;\""
+ssh -i $env:USERPROFILE\.ssh\kamatera root@104.238.213.119 "sqlite3 /var/lib/wecom-callback/chat_history.db \"SELECT MAX(created_at) FROM archived_messages;\""
+```
+- Per-room latest:
+```bash
+ssh -i $env:USERPROFILE\.ssh\kamatera root@104.238.213.119 "sqlite3 /var/lib/wecom-callback/chat_history.db \"SELECT room_id, MAX(created_at) FROM archived_messages GROUP BY room_id ORDER BY MAX(created_at) DESC LIMIT 10;\""
+```
+
+4) **OCR freshness and failures**
+- Google Vision is used for images; PaddleOCR for PDFs.
+```bash
+ssh -i $env:USERPROFILE\.ssh\kamatera root@104.238.213.119 "sqlite3 /var/lib/wecom-callback/chat_storage.db \"SELECT mime_type, status, COUNT(*) FROM file_contents GROUP BY mime_type, status ORDER BY mime_type, status;\""
+```
+- Recent failures:
+```bash
+ssh -i $env:USERPROFILE\.ssh\kamatera root@104.238.213.119 "sqlite3 /var/lib/wecom-callback/chat_storage.db \"SELECT wecom_msg_id, filename, mime_type, status, error_message, updated_at FROM file_contents WHERE status='failed' ORDER BY updated_at DESC LIMIT 20;\""
+```
+
+5) **Archive page correctness**
+- Archive viewer orders by `created_at DESC` (not seq) to show true latest when seq wraps.
+
 **File OCR status**
 ```sql
 SELECT status, COUNT(*) FROM file_contents WHERE mime_type LIKE 'image/%' GROUP BY status;

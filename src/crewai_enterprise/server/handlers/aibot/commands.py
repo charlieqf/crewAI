@@ -4,7 +4,7 @@ import logging
 import os
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 from src.crewai_enterprise.server.handlers.aibot.config import (
     BOT_CONFIGS,
@@ -146,7 +146,7 @@ def _handle_prompt_command(
     elif command == "reset":
         # Completely clear all chat metrics and history via timestamp reset
         try:
-            now_iso = datetime.now().isoformat()
+            now_iso = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
             
             # 1. Set context start timestamp in DB (Per Session isolation)
             success = context_manager.set_context_start(

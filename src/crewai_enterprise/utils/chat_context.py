@@ -291,15 +291,15 @@ class ChatContextManager:
                     {
                         "role": role,
                         "content": content,
+                        "sender_id": msg.get("sender_id", ""),
                         "sender_name": msg.get("sender_name", ""),
+                        "message_type": msg.get("message_type", "text"),
+                        "timestamp": msg.get("timestamp", ""), # Propagate timestamp for bridge sync
+                        "wecom_msg_id": msg.get("wecom_msg_id", ""),
                     }
                 )
 
             return formatted
-
-        except json.JSONDecodeError as e:
-            logger.warning(f"Failed to parse storage result as JSON: {e}")
-            return []
         except Exception as e:
             logger.warning(f"Error parsing storage result: {e}")
             return []

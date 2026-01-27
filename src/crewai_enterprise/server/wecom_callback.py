@@ -32,6 +32,7 @@ from src.crewai_enterprise.server.handlers import (
     process_text_message,
     handle_clear_command,
     process_file_message,
+    process_opencode_message,
 )
 
 # Import callback routers
@@ -69,20 +70,20 @@ def create_app() -> FastAPI:
         description="Receives and processes Enterprise WeChat callback messages for CrewAI agents.",
         version="0.4.0",  # Version bump for archive callback support
     )
-    
+
     # Include archive callback router
     app.include_router(archive_callback.router)
     logger.info("[APP] Archive callback router registered")
-    
+
     # Include archive viewer router
     app.include_router(archive_viewer.router)
     logger.info("[APP] Archive viewer router registered")
-    
+
     # Register AI bot routes (gemini, chatgpt, grok)
     from src.crewai_enterprise.server.aibot_callback import register_aibot_routes
+
     register_aibot_routes(app)
     logger.info("[APP] AI bot routes registered")
-
 
     # Lazy initialization for crypto
     _crypto: WeComCrypto | None = None
@@ -166,17 +167,21 @@ def create_app() -> FastAPI:
 
         logger.info(
             f"[RECV] msg_id={message.msg_id} type={message.msg_type} "
-            f"from={message.from_user_name} agent={message.agent_id} "
+            f"from={message.from_user_id} agent={message.agent_id} "
             f"content={repr(message.content[:50] if message.content else '[media]')}..."
         )
 
         # Determine chat_id for context isolation
-        chat_id = message.agent_id or message.to_user_name or "default"
-        user_name = message.from_user_name or "用户"
+        # Priority: Group ChatId > Sender ID (for 1:1) > AgentID (last resort)
+        chat_id = (
+            message.chat_id or message.from_user_id or message.agent_id or "default"
+        )
+        user_id = message.from_user_id or "unknown"
+        user_name = user_id  # We'll try to resolve name later in ArchiveReader
         content = message.content or ""
         bot_type = detect_bot_type(content)
 
-        logger.debug(f"[ROUTE] chat_id={chat_id} user={user_name} bot_type={bot_type}")
+        logger.debug(f"[ROUTE] chat_id={chat_id} user_id={user_id} bot_type={bot_type}")
 
         # Get webhook URL for bot
         config = BOT_CONFIG.get(bot_type, BOT_CONFIG["gpt"])
@@ -188,30 +193,52 @@ def create_app() -> FastAPI:
             )
             return {
                 "status": "no_webhook",
-                "from": message.from_user_name,
+                "from": message.from_user_id,
                 "type": message.msg_type,
+            }
+
+        if bot_type == "opencode":
+            logger.info(f"[OPENCODE_ROUTE] msg_id={message.msg_id} chat={chat_id}")
+            background_tasks.add_task(
+                process_opencode_message,
+                chat_id,
+                user_name,
+                content,
+                webhook_url,
+                message,
+            )
+            return {
+                "status": "received_opencode",
+                "chat_id": chat_id,
+                "from": message.from_user_id,
             }
 
         # Route message to appropriate handler
         if message.msg_type == "text" and content:
             # Check for clear command
             if is_clear_command(content):
-                from src.crewai_enterprise.server.handlers.text_handler import strip_reset_command
+                from src.crewai_enterprise.server.handlers.text_handler import (
+                    strip_reset_command,
+                )
+
                 remaining_text = strip_reset_command(content)
-                logger.info(f"[CLEAR] chat_id={chat_id} user={user_name} has_followup={bool(remaining_text)}")
+                logger.info(
+                    f"[CLEAR] chat_id={chat_id} user={user_name} has_followup={bool(remaining_text)}"
+                )
                 background_tasks.add_task(
                     handle_clear_command,
                     bot_type,
                     chat_id,
                     user_name,
+                    user_id,
                     webhook_url,
                     remaining_text,
-                    message.msg_id
+                    message.msg_id,
                 )
                 return {
                     "status": "clearing",
                     "chat_id": chat_id,
-                    "from": message.from_user_name,
+                    "from": message.from_user_id,
                 }
 
             # Normal text message
@@ -225,7 +252,8 @@ def create_app() -> FastAPI:
                 user_name,
                 content,
                 webhook_url,
-                message.msg_id,  # Pass WeCom MsgId for deduplication
+                user_id=user_id,
+                wecom_msg_id=message.msg_id,  # Pass WeCom MsgId for deduplication
             )
 
         elif message.has_media:
@@ -250,7 +278,7 @@ def create_app() -> FastAPI:
         # Always acknowledge receipt quickly
         return {
             "status": "received",
-            "from": message.from_user_name,
+            "from": message.from_user_id,
             "type": message.msg_type,
             "has_media": message.has_media,
             "routed_to": bot_type,
@@ -260,11 +288,6 @@ def create_app() -> FastAPI:
     async def health_check() -> dict[str, str]:
         """Health check endpoint."""
         return {"status": "healthy", "service": "wecom-callback", "version": "0.3.0"}
-
-    # Register AI Bot routes for intelligent robots
-    from src.crewai_enterprise.server.aibot_callback import register_aibot_routes
-
-    register_aibot_routes(app)
 
     return app
 

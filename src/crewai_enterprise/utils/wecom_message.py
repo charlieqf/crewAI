@@ -22,13 +22,14 @@ class WeComMessage:
     """Represents a parsed WeCom message."""
 
     to_user_name: str
-    from_user_name: str
+    from_user_id: str
     create_time: int
     msg_type: str
     content: str | None = None
     msg_id: str | None = None
     agent_id: str | None = None
-
+    chat_id: str | None = None
+    quoted_msg_id: str | None = None
     # File/media fields
     media_id: str | None = None
     pic_url: str | None = None  # For image messages
@@ -105,11 +106,13 @@ def parse_message(xml_content: str) -> WeComMessage:
         # Common fields
         msg = WeComMessage(
             to_user_name=to_user,
-            from_user_name=from_user,
+            from_user_id=from_user,
             create_time=create_time,
             msg_type=msg_type,
             msg_id=_get_text(root, "MsgId"),
             agent_id=_get_text(root, "AgentID"),
+            chat_id=_get_text(root, "ChatId"),
+            quoted_msg_id=_get_text(root, "QuotedMsgId"),
         )
 
         # Parse type-specific fields
