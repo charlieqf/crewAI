@@ -108,7 +108,11 @@ def register_aibot_routes(app: FastAPI) -> None:
                 raise HTTPException(status_code=403, detail="Verification failed")
 
             logger.info(f"[AIBOT_VERIFY] bot={bot_type} Verification successful")
-            return decrypted_echostr
+            if isinstance(decrypted_echostr, bytes):
+                return decrypted_echostr.decode("utf-8")
+            if decrypted_echostr is None:
+                return ""
+            return str(decrypted_echostr)
 
         except ValueError as e:
             logger.error(f"[AIBOT_VERIFY] bot={bot_type} Config error: {e}")
@@ -143,7 +147,15 @@ def register_aibot_routes(app: FastAPI) -> None:
                 logger.error(f"[AIBOT_MSG] bot={bot_type} Decryption failed: {ret}")
                 raise HTTPException(status_code=400, detail="Decryption failed")
 
-            data = json.loads(decrypted_msg)
+            if not decrypted_msg:
+                raise HTTPException(status_code=400, detail="Empty decrypted payload")
+
+            payload = (
+                decrypted_msg.decode("utf-8")
+                if isinstance(decrypted_msg, (bytes, bytearray))
+                else decrypted_msg
+            )
+            data = json.loads(payload)
             msgtype = data.get("msgtype", "")
             response_url = data.get("response_url")
 
@@ -450,6 +462,7 @@ async def _handle_mixed_message(
     from_data = data.get("from", {})
     user_id = from_data.get("user_id", from_data.get("userid", "unknown"))
     user_name = from_data.get("name", from_data.get("alias", user_id))
+    chat_id = _extract_chat_id(data, user_id)
 
     logger.info(
         f"[AIBOT_MIXED] bot={bot_type} user={user_name} "
@@ -476,12 +489,14 @@ async def _handle_mixed_message(
     file_url = None
     storage_key = None
     file_hash = None
+    stream_id: str | None = None
 
     # Try the first image
     if image_urls:
         success, result = _decrypt_media(image_urls[0], aes_key)
-        if success:
-            image_base64 = base64.b64encode(result).decode("utf-8")
+        if success and isinstance(result, (bytes, bytearray)):
+            image_bytes = bytes(result)
+            image_base64 = base64.b64encode(image_bytes).decode("utf-8")
             logger.info(f"[AIBOT_MIXED] bot={bot_type} image decrypted successfully")
 
             # Use same stream_id logic to avoid duplicate uploads
@@ -490,14 +505,16 @@ async def _handle_mixed_message(
                 _processed_messages[wecom_msg_id] = stream_id
 
             # Upload to cloud storage (UCS Phase 1) - Fix: Persistence for mixed messages
-            file_url, storage_key, mime_type, filename = _upload_image_to_ucs(result)
+            file_url, storage_key, mime_type, filename = _upload_image_to_ucs(
+                image_bytes
+            )
             file_hash = schedule_file_extraction(
                 chat_id=chat_id,
                 wecom_msg_id=wecom_msg_id,
                 storage_key=storage_key,
                 filename=filename,
                 mime_type=mime_type,
-                file_bytes=result,
+                file_bytes=image_bytes,
             )
         else:
             image_error = result
@@ -522,6 +539,8 @@ async def _handle_mixed_message(
         )
 
     # Process with image using vision API
+    if stream_id is None:
+        stream_id = _generate_stream_id()
     return await _handle_vision_message(
         bot_type,
         data,
@@ -702,6 +721,13 @@ def _should_proxy_chatgpt_to_opencode() -> bool:
     }
 
 
+def _should_use_opencode_stream() -> bool:
+    raw = os.getenv("OPENCODE_USE_STREAM", "").strip().lower()
+    if raw == "":
+        return True
+    return raw in {"1", "true", "yes"}
+
+
 async def _call_opencode_async(
     stream_id: str,
     content: str,
@@ -716,29 +742,34 @@ async def _call_opencode_async(
     global _opencode_client
     global _opencode_session_store
 
+    opencode_client: OpenCodeClient | None = None
+    session_store: SessionStore | None = None
+    run_prompt_fn = None
+    repo_path = os.getenv("DEFAULT_REPO_PATH", "/opt/oh-my-opencode")
+
     try:
         opencode_url = os.getenv("OPENCODE_URL", "http://127.0.0.1:4096")
-        repo_path = os.getenv("DEFAULT_REPO_PATH", "/opt/oh-my-opencode")
+        opencode_api_key = os.getenv("OPENCODE_API_KEY")
         state_dir = os.path.dirname(
             os.getenv("HISTORY_DB_PATH", "/var/lib/wecom-callback/chat_history.db")
         )
         session_file = os.path.join(state_dir, "opencode_sessions.json")
 
         if _opencode_client is None:
-            _opencode_client = OpenCodeClient(opencode_url)
+            _opencode_client = OpenCodeClient(opencode_url, api_key=opencode_api_key)
         if _opencode_session_store is None:
             _opencode_session_store = SessionStore(session_file)
 
-        session_id = _opencode_session_store.get_session_id(
-            chat_id,
-            creator=lambda: _opencode_client.create_session(directory=repo_path),
-        )
+        opencode_client = _opencode_client
+        session_store = _opencode_session_store
+        if opencode_client is None or session_store is None:
+            raise RuntimeError("OpenCode client initialization failed")
 
         safe_content = content.strip() if content else ""
         if not safe_content:
             safe_content = "(empty message)"
 
-        parts = [{"type": "text", "text": safe_content}]
+        parts: list[dict[str, Any]] = [{"type": "text", "text": safe_content}]
         if quoted_content:
             parts.append(
                 {
@@ -760,19 +791,55 @@ async def _call_opencode_async(
         if not message_id.startswith("msg"):
             message_id = f"msg_{message_id}"
 
-        response = _opencode_client.prompt_interactive(
-            session_id=session_id,
-            parts=parts,
-            message_id=message_id,
-            directory=repo_path,
+        def run_prompt(session_uuid: str) -> str:
+            result_text = ""
+            if _should_use_opencode_stream():
+                try:
+                    for event in opencode_client.stream_interactive(
+                        session_id=session_uuid,
+                        parts=parts,
+                        message_id=message_id,
+                        directory=repo_path,
+                    ):
+                        delta = _extract_opencode_stream_text(event)
+                        if not delta:
+                            continue
+                        if len(delta) > len(result_text) and delta.startswith(
+                            result_text
+                        ):
+                            result_text = delta
+                        else:
+                            result_text += delta
+                        _stream_tasks[stream_id]["content"] = result_text
+                except requests.HTTPError:
+                    raise
+                except Exception as e:
+                    logger.warning(f"OpenCode stream failed, falling back: {e}")
+
+            if not result_text:
+                response = opencode_client.prompt_interactive(
+                    session_id=session_uuid,
+                    parts=parts,
+                    message_id=message_id,
+                    directory=repo_path,
+                )
+                if response is not None:
+                    try:
+                        data = response.json()
+                        result_text = _extract_opencode_text(data)
+                    except ValueError:
+                        result_text = response.text.strip()
+
+            return result_text
+
+        run_prompt_fn = run_prompt
+
+        session_id = session_store.get_session_id(
+            chat_id,
+            creator=lambda: opencode_client.create_session(directory=repo_path),
         )
-        result = ""
-        if response is not None:
-            try:
-                data = response.json()
-                result = _extract_opencode_text(data)
-            except ValueError:
-                result = response.text.strip()
+
+        result = run_prompt(session_id)
         if not result:
             result = "OpenCode returned an empty response."
 
@@ -783,21 +850,12 @@ async def _call_opencode_async(
         detail = resp.text if resp is not None else str(e)
         if _is_opencode_not_found(resp, detail):
             try:
-                new_session_id = _opencode_client.create_session(directory=repo_path)
-                _opencode_session_store.set_session_id(chat_id, new_session_id)
-                retry_response = _opencode_client.prompt_interactive(
-                    session_id=new_session_id,
-                    parts=parts,
-                    message_id=message_id,
-                    directory=repo_path,
-                )
-                result = ""
-                if retry_response is not None:
-                    try:
-                        data = retry_response.json()
-                        result = _extract_opencode_text(data)
-                    except ValueError:
-                        result = retry_response.text.strip()
+                if not opencode_client or not session_store or not run_prompt_fn:
+                    raise RuntimeError("OpenCode client not initialized")
+
+                new_session_id = opencode_client.create_session(directory=repo_path)
+                session_store.set_session_id(chat_id, new_session_id)
+                result = run_prompt_fn(new_session_id)
                 if not result:
                     result = "OpenCode returned an empty response."
 
@@ -842,6 +900,27 @@ def _extract_opencode_text(data: dict) -> str:
         error = info.get("error")
         if isinstance(error, str) and error.strip():
             return error.strip()
+
+    return ""
+
+
+def _extract_opencode_stream_text(event: Any) -> str:
+    if not isinstance(event, dict):
+        return ""
+
+    event_type = event.get("type")
+    if event_type == "error":
+        error = event.get("content") or event.get("message") or event.get("error")
+        if isinstance(error, str) and error.strip():
+            return error.strip()
+
+    for key in ("delta", "content", "text", "message"):
+        value = event.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+
+    if "parts" in event:
+        return _extract_opencode_text(event)
 
     return ""
 
@@ -957,8 +1036,27 @@ async def _handle_image_message(
         encrypted = _encrypt_response(bot_type, stream_json, nonce, timestamp)
         return Response(content=encrypted, media_type="text/plain")
 
+    if not isinstance(result, (bytes, bytearray)):
+        logger.error(f"[AIBOT_IMAGE] bot={bot_type} decrypt returned non-bytes")
+        stream_id = _generate_stream_id()
+        response_text = "收到你的图片，但处理时出现问题，请稍后重试。"
+        _stream_tasks[stream_id] = {
+            "content": response_text,
+            "finished": True,
+            "created_at": time.time(),
+            "completed_at": time.time(),
+            "bot_type": bot_type,
+            "chat_id": _extract_chat_id(data, user_id),
+            "user_id": user_id,
+            "user_name": user_name,
+        }
+        stream_json = _make_text_stream(stream_id, response_text, finish=True)
+        encrypted = _encrypt_response(bot_type, stream_json, nonce, timestamp)
+        return Response(content=encrypted, media_type="text/plain")
+
     # Image decrypted successfully
-    image_base64 = base64.b64encode(result).decode("utf-8")
+    image_bytes = bytes(result)
+    image_base64 = base64.b64encode(image_bytes).decode("utf-8")
     prompt = "请描述并分析这张图片的内容"
     # Use same stream_id logic to avoid duplicate uploads
     stream_id = _generate_stream_id()
@@ -966,14 +1064,14 @@ async def _handle_image_message(
         _processed_messages[wecom_msg_id] = stream_id
 
     # Upload to cloud storage (UCS Phase 1)
-    file_url, storage_key, mime_type, filename = _upload_image_to_ucs(result)
+    file_url, storage_key, mime_type, filename = _upload_image_to_ucs(image_bytes)
     file_hash = schedule_file_extraction(
         chat_id=_extract_chat_id(data, user_id),
         wecom_msg_id=wecom_msg_id,
         storage_key=storage_key,
         filename=filename,
         mime_type=mime_type,
-        file_bytes=result,
+        file_bytes=image_bytes,
     )
 
     logger.info(f"[AIBOT_IMAGE] bot={bot_type} image ready, sending to vision API")
@@ -1015,8 +1113,10 @@ async def _handle_vision_message(
     This is the core function that calls the vision API asynchronously.
     """
     config = BOT_CONFIGS[bot_type]
-    provider = config["provider"]
-    system_prompt = config["system_prompt"]
+    provider = config["provider"] if isinstance(config["provider"], str) else ""
+    system_prompt = (
+        config["system_prompt"] if isinstance(config["system_prompt"], str) else ""
+    )
 
     chat_id = _extract_chat_id(data, user_id)
     wecom_msg_id = _extract_msg_id(data)
