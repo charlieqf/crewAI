@@ -752,10 +752,15 @@ async def _call_opencode_async(
                 }
             )
 
+        raw_message_id = wecom_msg_id or stream_id
+        message_id = raw_message_id
+        if not message_id.startswith("msg"):
+            message_id = f"msg_{message_id}"
+
         response = _opencode_client.prompt_interactive(
             session_id=session_id,
             parts=parts,
-            message_id=wecom_msg_id or stream_id,
+            message_id=message_id,
             directory=repo_path,
         )
         data = response.json() if response is not None else {}
