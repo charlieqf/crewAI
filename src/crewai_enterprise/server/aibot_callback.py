@@ -770,7 +770,7 @@ async def _call_opencode_async(
         if response is not None:
             try:
                 data = response.json()
-                result = data.get("content") or data.get("message") or ""
+                result = _extract_opencode_text(data)
             except ValueError:
                 result = response.text.strip()
         if not result:
@@ -786,6 +786,38 @@ async def _call_opencode_async(
     except Exception as e:
         _stream_tasks[stream_id]["content"] = f"抱歉,OpenCode服务暂时不可用: {e}"
         _stream_tasks[stream_id]["finished"] = True
+
+
+def _extract_opencode_text(data: dict) -> str:
+    if not isinstance(data, dict):
+        return ""
+
+    direct = data.get("content") or data.get("message")
+    if isinstance(direct, str) and direct.strip():
+        return direct.strip()
+
+    parts = data.get("parts")
+    if isinstance(parts, list):
+        texts = []
+        for part in parts:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") in ("text", "reasoning"):
+                if part.get("ignored"):
+                    continue
+                text = part.get("text")
+                if isinstance(text, str) and text.strip():
+                    texts.append(text.strip())
+        if texts:
+            return "\n".join(texts)
+
+    info = data.get("info")
+    if isinstance(info, dict):
+        error = info.get("error")
+        if isinstance(error, str) and error.strip():
+            return error.strip()
+
+    return ""
 
 
 def _file_error_response(
