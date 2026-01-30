@@ -13,3 +13,12 @@ def test_task_page_exists():
     client = TestClient(app, raise_server_exceptions=False)
     res = client.get("/task/1")
     assert res.status_code == 200
+
+
+def test_task_page_has_data_loader():
+    client = TestClient(app, raise_server_exceptions=False)
+    res = client.get("/task/123")
+    assert res.status_code == 200
+    body = res.text
+    assert "/api/task/123" in body
+    assert "fetch(" in body
