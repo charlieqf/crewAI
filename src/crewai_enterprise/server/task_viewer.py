@@ -296,6 +296,247 @@ def task_page(task_id: int):
     return HTMLResponse(html)
 
 
+@router.get("/tasks", response_class=HTMLResponse)
+def task_list_page():
+    html = """<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Tasks</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@300;400;500;600;700&family=Newsreader:opsz,wght@6..72,400;600;700&display=swap" rel="stylesheet" />
+    <style>
+      :root {
+        --bg: #f4f2ef;
+        --ink: #1f1c19;
+        --muted: #6f6a64;
+        --panel: #fbfaf8;
+        --line: #e4dfd8;
+        --accent: #b8a489;
+        --accent-strong: #6a5f52;
+        --shadow: 0 18px 45px rgba(44, 38, 32, 0.15);
+      }
+
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: "Manrope", "Segoe UI", sans-serif;
+        color: var(--ink);
+        background: radial-gradient(1200px 600px at 10% -10%, #efe7dc 0%, transparent 60%),
+                    radial-gradient(1000px 500px at 90% 0%, #f0ece6 0%, transparent 55%),
+                    var(--bg);
+        min-height: 100vh;
+      }
+
+      .page {
+        max-width: 980px;
+        margin: 0 auto;
+        padding: 32px 24px 64px;
+      }
+
+      .nav {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 28px;
+      }
+
+      .brand {
+        font-family: "Newsreader", serif;
+        font-size: 20px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--accent-strong);
+      }
+
+      .tag {
+        border: 1px solid var(--line);
+        padding: 6px 12px;
+        border-radius: 999px;
+        font-size: 12px;
+        color: var(--muted);
+        background: rgba(255, 255, 255, 0.7);
+      }
+
+      .hero {
+        padding: 22px 26px;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        box-shadow: var(--shadow);
+      }
+
+      .title {
+        font-family: "Newsreader", serif;
+        font-size: 28px;
+        margin: 0;
+      }
+
+      .subtitle {
+        color: var(--muted);
+        font-size: 13px;
+        margin-top: 6px;
+      }
+
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        padding: 18px;
+        margin-top: 22px;
+      }
+
+      .panel h3 {
+        margin: 0 0 12px;
+        font-size: 14px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--accent-strong);
+      }
+
+      .list {
+        display: grid;
+        gap: 12px;
+      }
+
+      .item {
+        padding: 14px 16px;
+        border-radius: 12px;
+        border: 1px solid #efe9e2;
+        background: #fff;
+        display: grid;
+        gap: 6px;
+      }
+
+      .row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .id {
+        font-weight: 600;
+      }
+
+      .meta {
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .status {
+        padding: 4px 10px;
+        border-radius: 999px;
+        border: 1px solid var(--line);
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        background: #fff;
+      }
+
+      .link {
+        color: var(--accent-strong);
+        text-decoration: none;
+      }
+
+      .link:hover { text-decoration: underline; }
+      .empty { color: var(--muted); }
+      .error { color: #9c2f2f; font-size: 13px; }
+    </style>
+  </head>
+  <body>
+    <div class="page">
+      <div class="nav">
+        <div class="brand">Open Jobs</div>
+        <div class="tag">Task Index</div>
+      </div>
+
+      <div class="hero">
+        <div class="title">Task List</div>
+        <div class="subtitle">Latest tasks across group chats.</div>
+      </div>
+
+      <div class="panel">
+        <h3>Tasks</h3>
+        <div class="list" id="list">Loading...</div>
+      </div>
+    </div>
+    <script>
+      const listEl = document.getElementById('list');
+      const apiUrl = "/api/tasks";
+
+      function render(items) {
+        if (!items || items.length === 0) {
+          listEl.innerHTML = '<div class="empty">No tasks yet.</div>';
+          return;
+        }
+        listEl.innerHTML = '';
+        for (const task of items) {
+          const card = document.createElement('div');
+          card.className = 'item';
+
+          const row = document.createElement('div');
+          row.className = 'row';
+
+          const id = document.createElement('div');
+          id.className = 'id';
+          id.textContent = `#${task.id}`;
+
+          const status = document.createElement('div');
+          status.className = 'status';
+          status.textContent = task.status || 'unknown';
+
+          row.appendChild(id);
+          row.appendChild(status);
+
+          const meta = document.createElement('div');
+          meta.className = 'meta';
+          const chat = task.wecom_chat_id || 'unknown';
+          meta.textContent = `chat: ${chat} · updated: ${task.updated_at || 'n/a'}`;
+
+          const link = document.createElement('a');
+          link.className = 'link';
+          link.href = `/task/${task.id}`;
+          link.textContent = 'Open task';
+
+          card.appendChild(row);
+          card.appendChild(meta);
+          card.appendChild(link);
+          listEl.appendChild(card);
+        }
+      }
+
+      async function load() {
+        try {
+          const res = await fetch(apiUrl);
+          if (!res.ok) {
+            throw new Error(`List fetch failed: ${res.status}`);
+          }
+          const data = await res.json();
+          render(data);
+        } catch (err) {
+          listEl.innerHTML = `<div class="error">${err.message}</div>`;
+        }
+      }
+
+      load();
+      setInterval(load, 5000);
+    </script>
+  </body>
+</html>
+"""
+    return HTMLResponse(html)
+
+
+@router.get("/api/tasks")
+def list_tasks():
+    cfg = get_task_config()
+    store = TaskStore(cfg.db_path)
+    return store.list_tasks()
+
+
 @router.get("/api/task/{task_id}/files")
 def list_task_files(task_id: int):
     cfg = get_task_config()

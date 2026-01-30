@@ -63,7 +63,11 @@ class TaskStore:
                 """,
                 (wecom_chat_id, wecom_user_id, title),
             )
-            return int(cur.lastrowid)
+            last_id = cur.lastrowid
+            if last_id is None:
+                raise ValueError("Failed to create task")
+            assert last_id is not None
+            return int(last_id)
 
     def append_message(
         self, task_id: int, role: str, content: str, source: str
@@ -84,7 +88,11 @@ class TaskStore:
                 "INSERT INTO task_input(task_id, content, source) VALUES (?, ?, ?)",
                 (task_id, content, source),
             )
-            return int(cur.lastrowid)
+            last_id = cur.lastrowid
+            if last_id is None:
+                raise ValueError("Failed to append input")
+            assert last_id is not None
+            return int(last_id)
 
     def claim_next_input(self) -> dict[str, Any] | None:
         with self.connect() as conn:
@@ -184,3 +192,11 @@ class TaskStore:
         with self.connect() as conn:
             row = conn.execute("SELECT * FROM task WHERE id=?", (task_id,)).fetchone()
         return dict(row) if row else None
+
+    def list_tasks(self, limit: int = 50) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM task ORDER BY updated_at DESC, id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
