@@ -88,6 +88,10 @@ class TaskStore:
                 "INSERT INTO task_input(task_id, content, source) VALUES (?, ?, ?)",
                 (task_id, content, source),
             )
+            conn.execute(
+                "UPDATE task SET status='queued', updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                (task_id,),
+            )
             last_id = cur.lastrowid
             if last_id is None:
                 raise ValueError("Failed to append input")
