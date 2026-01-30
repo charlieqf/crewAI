@@ -16,7 +16,7 @@ def test_mirror_session_files_copies_new_file(tmp_path: Path):
     session_dir.mkdir(parents=True)
     session_file = session_dir / f"{session_id}.json"
     session_file.write_text(
-        '{"directory": "' + str(repo_dir) + '"}',
+        '{"directory": "' + str(repo_dir) + '", "time": {"created": 2000}}',
         encoding="utf-8",
     )
 
@@ -46,7 +46,7 @@ def test_mirror_session_files_uses_default_last_sync(tmp_path: Path):
     session_dir.mkdir(parents=True)
     session_file = session_dir / f"{session_id}.json"
     session_file.write_text(
-        '{"directory": "' + str(repo_dir) + '"}',
+        '{"directory": "' + str(repo_dir) + '", "time": {"created": 1000}}',
         encoding="utf-8",
     )
 

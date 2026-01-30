@@ -24,16 +24,22 @@ def _find_session_file(storage_root: str, session_id: str) -> str | None:
     return None
 
 
-def _load_session_directory(session_file: str) -> str | None:
+def _load_session_meta(session_file: str) -> tuple[str | None, float | None]:
     try:
         with open(session_file, "r", encoding="utf-8") as handle:
             data = json.load(handle)
     except (OSError, json.JSONDecodeError):
-        return None
+        return None, None
     directory = data.get("directory")
+    created = None
+    time_info = data.get("time") if isinstance(data, dict) else None
+    if isinstance(time_info, dict):
+        created_ms = time_info.get("created")
+        if isinstance(created_ms, (int, float)):
+            created = float(created_ms) / 1000.0
     if not directory or not isinstance(directory, str):
-        return None
-    return directory
+        return None, created
+    return directory, created
 
 
 def _read_last_sync(state_path: str) -> float:
@@ -65,14 +71,19 @@ def mirror_session_files(
     session_file = _find_session_file(storage_root, session_id)
     if not session_file:
         return []
-    repo_dir = _load_session_directory(session_file)
+    repo_dir, session_created = _load_session_meta(session_file)
     if not repo_dir or not os.path.isdir(repo_dir):
         return []
 
     if os.path.exists(state_path):
         last_sync = _read_last_sync(state_path)
     else:
-        last_sync = float(default_last_sync) if default_last_sync is not None else 0.0
+        if default_last_sync is not None:
+            last_sync = float(default_last_sync)
+        elif session_created is not None:
+            last_sync = session_created
+        else:
+            last_sync = 0.0
     os.makedirs(task_files_dir, exist_ok=True)
     copied: list[str] = []
 
