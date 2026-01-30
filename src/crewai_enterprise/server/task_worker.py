@@ -5,6 +5,7 @@ from src.crewai_enterprise.server.task_config import get_task_config
 from src.crewai_enterprise.server.task_store import TaskStore
 from src.crewai_enterprise.server.opencode_client import OpenCodeClient
 from src.crewai_enterprise.server.opencode_storage_reader import read_new_messages
+from src.crewai_enterprise.server.opencode_file_sync import mirror_session_files
 
 
 class TaskWorker:
@@ -59,5 +60,18 @@ class TaskWorker:
                 self.store.update_last_seen_file(task_id, chunk["filename"])
                 last_seen_file = chunk["filename"]
         self.store.mark_input_done(inp["id"])
+        if task and task.get("wecom_chat_id"):
+            chat_id = task["wecom_chat_id"]
+            base_dir = os.path.join(
+                self.cfg.storage_root, chat_id, "tasks", str(task_id)
+            )
+            files_dir = os.path.join(base_dir, "files")
+            state_path = os.path.join(base_dir, "sync.json")
+            mirror_session_files(
+                session_id,
+                files_dir,
+                self.cfg.opencode_storage_root,
+                state_path,
+            )
         self.store.mark_task_done_if_idle(task_id)
         return True
