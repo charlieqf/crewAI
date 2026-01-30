@@ -2,32 +2,12 @@
 import argparse
 import json
 import sys
-import urllib.error
 import urllib.request
 
 
 def fetch_json(url: str):
-    try:
-        with urllib.request.urlopen(url) as resp:
-            raw = resp.read()
-    except urllib.error.HTTPError as exc:
-        print(f"[oc_session_dump] HTTP error {exc.code} for {url}", file=sys.stderr)
-        raise
-    except urllib.error.URLError as exc:
-        print(f"[oc_session_dump] Network error for {url}: {exc}", file=sys.stderr)
-        raise
-
-    if not raw:
-        raise ValueError(f"[oc_session_dump] Empty response from {url}")
-
-    text = raw.decode("utf-8", errors="replace")
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError as exc:
-        preview = text[:200].replace("\n", " ")
-        print(f"[oc_session_dump] JSON decode error for {url}: {exc}", file=sys.stderr)
-        print(f"[oc_session_dump] Response preview: {preview}", file=sys.stderr)
-        raise
+    with urllib.request.urlopen(url) as resp:
+        return json.loads(resp.read().decode("utf-8"))
 
 
 def main() -> int:
