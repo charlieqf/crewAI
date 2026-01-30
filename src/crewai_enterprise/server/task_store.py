@@ -196,7 +196,22 @@ class TaskStore:
     def list_tasks(self, limit: int = 50) -> list[dict[str, Any]]:
         with self.connect() as conn:
             rows = conn.execute(
-                "SELECT * FROM task ORDER BY updated_at DESC, id DESC LIMIT ?",
+                """
+                SELECT
+                    t.*,
+                    (
+                        SELECT tm.content
+                        FROM task_message tm
+                        WHERE tm.task_id = t.id
+                          AND tm.role = 'user'
+                          AND tm.source = 'wecom'
+                        ORDER BY tm.created_at ASC, tm.id ASC
+                        LIMIT 1
+                    ) AS first_prompt
+                FROM task t
+                ORDER BY t.updated_at DESC, t.id DESC
+                LIMIT ?
+                """,
                 (limit,),
             ).fetchall()
         return [dict(r) for r in rows]

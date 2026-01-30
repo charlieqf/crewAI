@@ -426,6 +426,12 @@ def task_list_page():
         font-size: 12px;
       }
 
+      .content {
+        font-size: 14px;
+        line-height: 1.5;
+        color: var(--ink);
+      }
+
       .status {
         padding: 4px 10px;
         border-radius: 999px;
@@ -496,6 +502,10 @@ def task_list_page():
           const chat = task.wecom_chat_id || 'unknown';
           meta.textContent = `chat: ${chat} · updated: ${task.updated_at || 'n/a'}`;
 
+          const prompt = document.createElement('div');
+          prompt.className = 'content';
+          prompt.textContent = task.first_prompt || task.title || 'No prompt';
+
           const link = document.createElement('a');
           link.className = 'link';
           link.href = `/task/${task.id}`;
@@ -503,6 +513,7 @@ def task_list_page():
 
           card.appendChild(row);
           card.appendChild(meta);
+          card.appendChild(prompt);
           card.appendChild(link);
           listEl.appendChild(card);
         }
