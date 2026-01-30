@@ -1,4 +1,5 @@
 import sys
+import sys
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -23,6 +24,7 @@ def test_task_list_api_returns_tasks(monkeypatch, tmp_path):
     store = TaskStore(str(tmp_path / "tasks.db"))
     store.init_schema()
     task_id = store.create_task("room-1", "u1", "title")
+    store.append_message(task_id, "user", "hello task", "wecom")
 
     client = TestClient(app, raise_server_exceptions=False)
     res = client.get("/api/tasks")
@@ -30,3 +32,4 @@ def test_task_list_api_returns_tasks(monkeypatch, tmp_path):
     data = res.json()
     assert data[0]["id"] == task_id
     assert data[0]["wecom_chat_id"] == "room-1"
+    assert data[0]["first_prompt"] == "hello task"
