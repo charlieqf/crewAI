@@ -38,6 +38,8 @@ from src.crewai_enterprise.server.handlers import (
 # Import callback routers
 from src.crewai_enterprise.server import archive_callback
 from src.crewai_enterprise.server import archive_viewer
+from src.crewai_enterprise.server import task_service
+from src.crewai_enterprise.server import task_viewer
 
 
 logger = logging.getLogger(__name__)
@@ -78,6 +80,14 @@ def create_app() -> FastAPI:
     # Include archive viewer router
     app.include_router(archive_viewer.router)
     logger.info("[APP] Archive viewer router registered")
+
+    # Include task service router
+    app.include_router(task_service.router)
+    logger.info("[APP] Task service router registered")
+
+    # Include task viewer router
+    app.include_router(task_viewer.router)
+    logger.info("[APP] Task viewer router registered")
 
     # Register AI bot routes (gemini, chatgpt, grok)
     from src.crewai_enterprise.server.aibot_callback import register_aibot_routes
