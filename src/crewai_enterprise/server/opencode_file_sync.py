@@ -60,6 +60,7 @@ def mirror_session_files(
     task_files_dir: str,
     storage_root: str,
     state_path: str,
+    default_last_sync: float | None = None,
 ) -> list[str]:
     session_file = _find_session_file(storage_root, session_id)
     if not session_file:
@@ -68,7 +69,10 @@ def mirror_session_files(
     if not repo_dir or not os.path.isdir(repo_dir):
         return []
 
-    last_sync = _read_last_sync(state_path)
+    if os.path.exists(state_path):
+        last_sync = _read_last_sync(state_path)
+    else:
+        last_sync = float(default_last_sync) if default_last_sync is not None else 0.0
     os.makedirs(task_files_dir, exist_ok=True)
     copied: list[str] = []
 

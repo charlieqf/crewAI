@@ -1,5 +1,7 @@
 import os
+import os
 import time
+from datetime import datetime
 
 from src.crewai_enterprise.server.task_config import get_task_config
 from src.crewai_enterprise.server.task_store import TaskStore
@@ -67,11 +69,21 @@ class TaskWorker:
             )
             files_dir = os.path.join(base_dir, "files")
             state_path = os.path.join(base_dir, "sync.json")
+            initial_sync = None
+            if task.get("created_at") and not os.path.exists(state_path):
+                try:
+                    created_at = datetime.strptime(
+                        task["created_at"], "%Y-%m-%d %H:%M:%S"
+                    )
+                    initial_sync = created_at.timestamp() - 1
+                except ValueError:
+                    initial_sync = time.time()
             mirror_session_files(
                 session_id,
                 files_dir,
                 self.cfg.opencode_storage_root,
                 state_path,
+                initial_sync,
             )
         self.store.mark_task_done_if_idle(task_id)
         return True
