@@ -4,6 +4,7 @@ Unit tests for AI Bot Callback Handler.
 Tests helper functions, crypto, and API endpoints for WeCom intelligent robots.
 """
 
+import asyncio
 import json
 import os
 import sys
@@ -230,8 +231,7 @@ class TestMakeTextStream(unittest.TestCase):
         self.assertIn("你好世界", result)
 
 
-@pytest.mark.asyncio
-async def test_handle_text_message_task_link(monkeypatch, tmp_path):
+def test_handle_text_message_task_link(monkeypatch, tmp_path):
     from src.crewai_enterprise.server import aibot_callback as mod
 
     monkeypatch.setenv("TASK_DB_PATH", str(tmp_path / "tasks.db"))
@@ -249,7 +249,7 @@ async def test_handle_text_message_task_link(monkeypatch, tmp_path):
         "chatid": "room1",
     }
 
-    response = await mod._handle_text_message("chatgpt", data, "nonce", "ts")
+    response = asyncio.run(mod._handle_text_message("chatgpt", data, "nonce", "ts"))
     body = response.body or b""
     if isinstance(body, memoryview):
         body = body.tobytes()
