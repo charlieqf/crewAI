@@ -2,6 +2,15 @@
 
 This refined roadmap aligns closely with the technical specifications in `opencode_integration_plan.md`.
 
+## Phase 0: Production Stabilization (Status: DONE)
+> **Goal**: Stop busy-session loops, incomplete replies, and `/file-html` truncation.
+1. [x] Remove custom `messageID` on interactive prompts (fix OpenCode loop exit).
+2. [x] Abort-if-busy guard before new prompts; return a clear busy message.
+3. [x] Add `/force` command to override busy sessions (fallback to new session if needed).
+4. [x] Improve response completeness (longest assistant text, stable timeout, 280s max wait).
+5. [x] Harden `/file-html` (wait for idle, pick matching response, upload link only).
+6. [x] Add debug scripts in `scripts/opencode_debug/`.
+
 ## Phase 1: Infrastructure Foundation (Status: DONE)
 > **Goal**: Establish the runtime environment on Kamatera.
 1. [x] Install Bun & Node.js runtimes.
@@ -56,6 +65,9 @@ This refined roadmap aligns closely with the technical specifications in `openco
 2. **Failure Handling**:
    - Implement the Failure Matrix (Appendix F) for OpenCode/Archive outages.
 3. **Systemd Integration**: Create `opencode-bridge.service` on Kamatera.
+4. **WeCom Display Completeness**:
+   - Ensure final reply persists (no short snippet overwrite).
+   - Verify `/file-html` always includes the full answer.
 
 ## Phase 6: Integration Testing & Verification
 > **Goal**: End-to-end validation.

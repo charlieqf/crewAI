@@ -29,6 +29,8 @@ chromadb-*.lock
 scripts/env_clean
 .codex/
 .opencode/
+.worktrees/
+temp_research/
 keys/
 tmp_*.html
 .agent/

@@ -466,6 +466,13 @@ def sync(start_seq: int):
 
                 decrypted_msg = json.loads(decrypted_json)
                 msg_type = decrypted_msg.get("msgtype", "unknown")
+                sender_id = decrypted_msg.get("from", "")
+
+                # [FIX] Debugging Archive Data Corruption: 
+                # Filter out "polluting" messages like internal events, switch_model, or missing sender_id.
+                if not sender_id or msg_type == "unknown" or "action" in decrypted_msg:
+                    logger.info(f"Filtering out noise/corrupted message (type: {msg_type}, action: {decrypted_msg.get('action')}) seq={msg_seq}")
+                    continue
 
                 # Save message to database
                 try:
@@ -490,7 +497,7 @@ def sync(start_seq: int):
                             msg_seq,
                             decrypted_msg.get("msgid", msg.get("msgid")),
                             msg_type,
-                            decrypted_msg.get("from", ""),
+                            sender_id,
                             decrypted_msg.get("roomid", ""),
                             json.dumps(decrypted_msg, ensure_ascii=False),
                             created_at_str,

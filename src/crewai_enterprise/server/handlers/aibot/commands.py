@@ -342,6 +342,17 @@ def _handle_prompt_command(
             "template_name": "meeting",  # Use meeting_notes.html template
             "date_range": time_range,
         }
+
+    elif command == "force":
+        # Force-abort any running session and continue with the new request
+        user_request = args.strip() if args else ""
+        if not user_request:
+            return {"content": "❌ 请提供要执行的内容\n\n用法：/force <你的问题或指令>"}
+        return {
+            "continue_with_llm": True,
+            "user_request": user_request,
+            "force_abort": True,
+        }
     
     # /1d, /1w, /3h etc. - Explicit archive time range for normal conversation
     elif re.match(r'^\d+[hdw]$', command):

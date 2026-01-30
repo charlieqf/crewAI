@@ -67,6 +67,8 @@ from src.crewai_enterprise.server.handlers.aibot import (
     _call_llm_async,
     _call_vision_llm_async,
 )
+from src.crewai_enterprise.server.handlers.aibot.commands import _handle_prompt_command
+from src.crewai_enterprise.server.handlers.aibot.llm_orchestrator import _process_llm_file_output
 
 # Configure logging
 logging.basicConfig(
@@ -219,6 +221,7 @@ async def _handle_text_message(
 
     text_data = data.get("text", {})
     content = _sanitize_text(text_data.get("content", "").strip())
+    content = _strip_self_mention(content, bot_type)
 
     # Extract user info
     from_data = data.get("from", {})
@@ -721,11 +724,61 @@ def _should_proxy_chatgpt_to_opencode() -> bool:
     }
 
 
+def _strip_self_mention(content: str, bot_type: str) -> str:
+    """Remove the bot's own @mention so OpenCode doesn't get confused."""
+    if not content:
+        return content
+    # Normalize non-breaking spaces
+    cleaned = content.replace("\u00a0", " ")
+    pattern = rf"(?:^|\s)@{re.escape(bot_type)}\b"
+    cleaned = re.sub(pattern, " ", cleaned, flags=re.IGNORECASE)
+    return " ".join(cleaned.split())
+
+
 def _should_use_opencode_stream() -> bool:
     raw = os.getenv("OPENCODE_USE_STREAM", "").strip().lower()
     if raw == "":
         return True
     return raw in {"1", "true", "yes"}
+
+
+def _get_opencode_agent() -> str | None:
+    raw = os.getenv("OPENCODE_AGENT", "sisyphus").strip()
+    if not raw:
+        return None
+    if raw.lower() in {"none", "null", "off", "disabled"}:
+        return None
+    return raw
+
+
+async def _ensure_opencode_session_idle(
+    opencode_client: OpenCodeClient,
+    session_id: str,
+    max_wait: float = 8.0,
+    poll_interval: float = 1.0,
+) -> bool:
+    """Abort busy sessions and reuse the same session (mirrors OpenCode UI behavior)."""
+    try:
+        status = opencode_client.get_session_status(session_id)
+        if status.get("type") != "busy":
+            return True
+        logger.warning(
+            f"[OPENCODE] Session {session_id} busy before prompt; aborting to avoid loops"
+        )
+        opencode_client.abort_session(session_id)
+        deadline = time.time() + max_wait
+        while time.time() < deadline:
+            await asyncio.sleep(poll_interval)
+            status = opencode_client.get_session_status(session_id)
+            if status.get("type") != "busy":
+                return True
+        logger.warning(
+            f"[OPENCODE] Session {session_id} still busy after abort; skipping prompt"
+        )
+        return False
+    except Exception as e:
+        logger.warning(f"[OPENCODE] Failed to check/abort session {session_id}: {e}")
+        return True
 
 
 async def _call_opencode_async(
@@ -746,8 +799,65 @@ async def _call_opencode_async(
     session_store: SessionStore | None = None
     run_prompt_fn = None
     repo_path = os.getenv("DEFAULT_REPO_PATH", "/opt/oh-my-opencode")
+    file_output_mode = False
+    link_only_mode = False
+    force_abort = False
+    allow_force_fallback = False
 
     try:
+        # Handle /file-html and other prompt commands (OpenCode path).
+        stripped_content = content.strip()
+        if stripped_content.startswith("/"):
+            parts = stripped_content.split(maxsplit=1)
+            command = parts[0].lstrip("/")
+            args = parts[1] if len(parts) > 1 else ""
+            cmd_result = _handle_prompt_command(
+                command=command,
+                args=args,
+                bot_type="chatgpt",
+                chat_id=chat_id,
+                user_id=user_id,
+            )
+            if cmd_result:
+                if cmd_result.get("continue_with_llm"):
+                    file_output_mode = bool(cmd_result.get("file_output_mode", False))
+                    if file_output_mode:
+                        link_only_mode = True
+                    content = cmd_result.get("user_request", content)
+                    force_abort = bool(cmd_result.get("force_abort", False))
+                    allow_force_fallback = force_abort
+                else:
+                    _stream_tasks[stream_id]["content"] = cmd_result.get(
+                        "content", "Command handled."
+                    )
+                    _stream_tasks[stream_id]["finished"] = True
+                    return
+
+            # If /force wraps another command, re-process it now (e.g., /force /file-html ...).
+            if content.strip().startswith("/"):
+                parts = content.strip().split(maxsplit=1)
+                nested_command = parts[0].lstrip("/")
+                nested_args = parts[1] if len(parts) > 1 else ""
+                nested_result = _handle_prompt_command(
+                    command=nested_command,
+                    args=nested_args,
+                    bot_type="chatgpt",
+                    chat_id=chat_id,
+                    user_id=user_id,
+                )
+                if nested_result:
+                    if nested_result.get("continue_with_llm"):
+                        file_output_mode = bool(nested_result.get("file_output_mode", False))
+                        if file_output_mode:
+                            link_only_mode = True
+                        content = nested_result.get("user_request", content)
+                    else:
+                        _stream_tasks[stream_id]["content"] = nested_result.get(
+                            "content", "Command handled."
+                        )
+                        _stream_tasks[stream_id]["finished"] = True
+                        return
+
         opencode_url = os.getenv("OPENCODE_URL", "http://127.0.0.1:4096")
         opencode_api_key = os.getenv("OPENCODE_API_KEY")
         state_dir = os.path.dirname(
@@ -786,20 +896,90 @@ async def _call_opencode_async(
                 }
             )
 
-        raw_message_id = wecom_msg_id or stream_id
-        message_id = raw_message_id
-        if not message_id.startswith("msg"):
-            message_id = f"msg_{message_id}"
+        # Let OpenCode generate message IDs to preserve ordering (avoids loop exits).
+        message_id: str | None = None
 
         def run_prompt(session_uuid: str) -> str:
             result_text = ""
+            logger.info(f"[OPENCODE] Starting prompt for session={session_uuid}")
+            opencode_agent = _get_opencode_agent()
+            parent_id: str | None = None
+            try:
+                existing = opencode_client.get_session_messages(session_uuid)
+                for msg in reversed(existing):
+                    info = msg.get("info", {}) if isinstance(msg, dict) else {}
+                    if info.get("role") == "assistant":
+                        parent_id = info.get("id")
+                        break
+                if parent_id:
+                    logger.info(
+                        f"[OPENCODE] Using parentID={parent_id} for session={session_uuid}"
+                    )
+            except Exception as e:
+                logger.warning(f"[OPENCODE] Failed to resolve parentID: {e}")
+
+            # Try polling-based approach (handles OpenCode's agentic loops)
+            try:
+                logger.info(f"[OPENCODE] Using polling approach")
+                for event in opencode_client.prompt_interactive_with_polling(
+                    session_id=session_uuid,
+                    parts=parts,
+                    message_id=message_id,
+                    directory=repo_path,
+                    agent=opencode_agent,
+                    parent_id=parent_id,
+                    poll_interval=3.0,
+                    max_wait=180.0,  # 3 minutes max
+                ):
+                    event_type = event.get("type", "")
+                    logger.info(f"[OPENCODE] Got event type={event_type}")
+                    if event_type in ("text", "final"):
+                        text = event.get("text", "")
+                        if text:
+                            result_text = text
+                            _stream_tasks[stream_id]["content"] = result_text
+                            logger.info(
+                                f"[OPENCODE] Got text response: {text[:100]}..."
+                            )
+                    elif event_type == "complete":
+                        # Got immediate response
+                        data = event.get("data", {})
+                        result_text = _extract_opencode_text(data)
+                        if result_text:
+                            _stream_tasks[stream_id]["content"] = result_text
+                            logger.info(
+                                f"[OPENCODE] Got complete response: {result_text[:100]}..."
+                            )
+                    elif event_type == "error":
+                        result_text = event.get("message", "OpenCode returned an error.")
+                        _stream_tasks[stream_id]["content"] = result_text
+                        logger.warning(f"[OPENCODE] {result_text}")
+                        break
+
+                if result_text:
+                    logger.info(
+                        f"[OPENCODE] Polling succeeded with {len(result_text)} chars"
+                    )
+                    return result_text
+                else:
+                    logger.warning(f"[OPENCODE] Polling returned no result")
+            except requests.HTTPError as e:
+                logger.error(f"[OPENCODE] HTTP error in polling: {e}")
+                raise
+            except Exception as e:
+                logger.warning(f"[OPENCODE] Polling failed: {e}", exc_info=True)
+
+            # Fallback to streaming if polling didn't work
             if _should_use_opencode_stream():
                 try:
+                    logger.info(f"[OPENCODE] Trying streaming fallback")
                     for event in opencode_client.stream_interactive(
                         session_id=session_uuid,
                         parts=parts,
                         message_id=message_id,
                         directory=repo_path,
+                        agent=opencode_agent,
+                        parent_id=parent_id,
                     ):
                         delta = _extract_opencode_stream_text(event)
                         if not delta:
@@ -814,19 +994,24 @@ async def _call_opencode_async(
                 except requests.HTTPError:
                     raise
                 except Exception as e:
-                    logger.warning(f"OpenCode stream failed, falling back: {e}")
+                    logger.warning(f"[OPENCODE] Stream failed: {e}")
 
+            # Final fallback to synchronous call with long timeout
             if not result_text:
+                logger.info(f"[OPENCODE] Trying synchronous fallback")
                 response = opencode_client.prompt_interactive(
                     session_id=session_uuid,
                     parts=parts,
                     message_id=message_id,
                     directory=repo_path,
+                    agent=opencode_agent,
+                    parent_id=parent_id,
                 )
                 if response is not None:
                     try:
                         data = response.json()
                         result_text = _extract_opencode_text(data)
+                        logger.info(f"[OPENCODE] Sync got {len(result_text)} chars")
                     except ValueError:
                         result_text = response.text.strip()
 
@@ -838,10 +1023,110 @@ async def _call_opencode_async(
             chat_id,
             creator=lambda: opencode_client.create_session(directory=repo_path),
         )
+        # If force-abort requested, cancel any running work immediately.
+        if force_abort:
+            logger.warning(
+                f"[OPENCODE] Force abort requested; aborting session {session_id}"
+            )
+            opencode_client.abort_session(session_id)
+        # If session is busy, abort and reuse same session (UI behavior).
+        ready = await _ensure_opencode_session_idle(opencode_client, session_id)
+        if not ready:
+            if allow_force_fallback:
+                logger.warning(
+                    f"[OPENCODE] Force fallback: creating new session for chat={chat_id}"
+                )
+                session_id = opencode_client.create_session(directory=repo_path)
+                session_store.set_session_id(chat_id, session_id)
+            else:
+                _stream_tasks[stream_id]["content"] = (
+                    "OpenCode session is still busy after abort. Please retry in a few seconds."
+                )
+                _stream_tasks[stream_id]["finished"] = True
+                return
 
-        result = run_prompt(session_id)
+        request_start_ms = int(time.time() * 1000)
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(None, run_prompt, session_id)
         if not result:
             result = "OpenCode returned an empty response."
+
+        if file_output_mode:
+            # For file-html, wait for session idle (or timeout) before selecting the final content.
+            try:
+                deadline = time.time() + 280.0
+                while time.time() < deadline:
+                    status = opencode_client.get_session_status(session_id)
+                    if status.get("type") != "busy":
+                        break
+                    time.sleep(2.0)
+            except Exception as e:
+                logger.warning(f"[OPENCODE] Failed while waiting for idle before file-html: {e}")
+            # For file-html, ensure we use the longest assistant text for this turn (not a lead-in snippet).
+            try:
+                messages = opencode_client.get_session_messages(session_id)
+                best_text = result
+                # Find the user message that matches this request (by time + content).
+                selected_user_id = None
+                best_score = -1
+                for msg in messages:
+                    info = msg.get("info", {})
+                    if info.get("role") != "user":
+                        continue
+                    ts = info.get("time", {}).get("created", 0) or 0
+                    if ts < request_start_ms - 2000:
+                        continue
+                    content_text = ""
+                    for part in msg.get("parts", []):
+                        if part.get("type") == "text":
+                            content_text = part.get("text", "")
+                            break
+                    score = 0
+                    if content_text and content.strip():
+                        if content_text.strip() == content.strip():
+                            score += 3
+                        elif content.strip()[:50] and content.strip()[:50] in content_text:
+                            score += 2
+                    if ts >= request_start_ms - 2000:
+                        score += 1
+                    if score > best_score:
+                        best_score = score
+                        selected_user_id = info.get("id")
+
+                if selected_user_id:
+                    for msg in messages:
+                        info = msg.get("info", {})
+                        if info.get("role") != "assistant":
+                            continue
+                        parent_id = info.get("parentID") or info.get("parentId")
+                        if parent_id != selected_user_id:
+                            continue
+                        for part in msg.get("parts", []):
+                            if part.get("type") == "text":
+                                text = part.get("text", "")
+                                if isinstance(text, str) and len(text) > len(best_text):
+                                    best_text = text
+                if best_text != result:
+                    logger.info("[OPENCODE] Using longest assistant text for file-html output")
+                    result = best_text
+            except Exception as e:
+                logger.warning(f"[OPENCODE] Failed to select longest text before file-html: {e}")
+            result = await _process_llm_file_output(
+                bot_type="chatgpt",
+                chat_id=chat_id,
+                content=result,
+                user_id=user_id,
+                user_name=user_name,
+                file_only_mode=True,
+                is_report_request=False,
+                template_name=None,
+            )
+            if link_only_mode:
+                import re
+
+                match = re.search(r"https?://\\S+", result)
+                if match:
+                    result = match.group(0)
 
         _stream_tasks[stream_id]["content"] = result
         _stream_tasks[stream_id]["finished"] = True
@@ -855,7 +1140,10 @@ async def _call_opencode_async(
 
                 new_session_id = opencode_client.create_session(directory=repo_path)
                 session_store.set_session_id(chat_id, new_session_id)
-                result = run_prompt_fn(new_session_id)
+                loop = asyncio.get_running_loop()
+                result = await loop.run_in_executor(
+                    None, run_prompt_fn, new_session_id
+                )
                 if not result:
                     result = "OpenCode returned an empty response."
 

@@ -82,6 +82,20 @@ We will build a Python/FastAPI bridge to handle the following:
   - **Length cap**: Limit status text (e.g., 200–300 chars) with truncation.
   - **De-dupe**: Ignore repeated identical status from the same subagent.
 
+### 2.5 Stability Guardrails (Production)
+These are **required** to avoid busy-session loops, short replies, and partial `/file-html` output.
+- **Do NOT send `messageID`** on interactive prompts. Let OpenCode generate ordered IDs.
+- **Abort-if-busy** before new prompts; if still busy, return a clear busy message.
+- **`/force`** command: abort busy sessions and proceed; fallback to new session if still busy.
+- **Response completeness**:
+  - `max_wait = 280s` (WeCom limit ~300s)
+  - `response_stable_timeout = 20s`
+  - Skip short/lead-in responses and prefer the **longest assistant text** after our user prompt.
+- **/file-html**:
+  - Wait for session idle (up to 280s)
+  - Match assistant text by **request time + content** before generating HTML
+  - Upload to Qiniu and send link only
+
 ### 2.2 Aggregated Backfill Transcript Format
 When backfilling large gaps, the bridge should send aggregated transcript chunks rather than individual messages.
 This preserves signal while reducing API calls.
@@ -116,7 +130,7 @@ participants=alice,bob,carol
 - **Bot Identity**: OpenCode bot only; isolated handler (no legacy bot command parsing).
 - **Trigger Rules**: Sync all messages with `noReply: true`. Only respond on `@OpenCode` or slash commands.
   - **Slash Commands**: Only honored if `@OpenCode` is mentioned in the same message or if the conversation is in a 1:1 private chat.
-- **Command Dispatch**: `/plan`, `/start-work`, `ulw`, `/ralph-loop`, `/cancel-ralph`, `/reset`, `/resync`.
+- **Command Dispatch**: `/plan`, `/start-work`, `ulw`, `/ralph-loop`, `/cancel-ralph`, `/reset`, `/resync`, `/force`, `/file-html`.
 
 ### Session & State
 - **Session Key**: `chat_id` for both groups and 1:1 chats.
@@ -196,7 +210,6 @@ OpenCode uses **session prompt APIs** with `parts`. For native sync, use
   "path": { "sessionID": "chat_or_user_session_key" },
   "query": { "directory": "/repo/path" },
   "body": {
-    "messageID": "wecom_msg_id",
     "agent": "sisyphus",
     "noReply": false,
     "parts": [
@@ -239,7 +252,7 @@ on_message(msg):
     trigger_archive_sync() 
     
     parts = normalize_parts(msg)
-    send_prompt(session_id, parts, no_reply=false, message_id=msg.id)
+    send_prompt(session_id, parts, no_reply=false)
     start_sse_aggregator(session_id)
   else:
     # WeCom only sends bot-mentions to callback, so non-mentions are not handled here.
@@ -291,8 +304,9 @@ class OpenCodeBridge:
     def send_prompt_async(self, session_id: str, parts: list[dict], message_id: str):
         return post_prompt_async(self.opencode_url, session_id, parts, message_id, no_reply=True)
 
-    def send_prompt(self, session_id: str, parts: list[dict], message_id: str):
-        return post_prompt(self.opencode_url, session_id, parts, message_id, no_reply=False)
+    def send_prompt(self, session_id: str, parts: list[dict]):
+        # Do NOT send messageID for interactive prompts.
+        return post_prompt(self.opencode_url, session_id, parts, no_reply=False)
 
     def send_command(self, session_id: str, command: str, arguments: str, message_id: str):
         return post_command(self.opencode_url, session_id, command, arguments, message_id)
@@ -330,9 +344,10 @@ class OpenCodeClient:
         params = {"directory": directory} if directory else None
         return self.session.post(url, json=body, params=params, timeout=15)
 
-    def prompt(self, session_id: str, parts: list[dict], message_id: str, no_reply: bool = False, directory: str | None = None):
+    def prompt(self, session_id: str, parts: list[dict], no_reply: bool = False, directory: str | None = None):
         url = f"{self.base_url}/session/{session_id}/message"
-        body = {"messageID": message_id, "noReply": no_reply, "parts": parts}
+        # Do NOT send messageID for interactive prompts (avoid ID ordering bugs).
+        body = {"noReply": no_reply, "parts": parts}
         params = {"directory": directory} if directory else None
         return self.session.post(url, json=body, params=params, timeout=60)
 
