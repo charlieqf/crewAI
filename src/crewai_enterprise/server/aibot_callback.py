@@ -68,7 +68,10 @@ from src.crewai_enterprise.server.handlers.aibot import (
     _call_vision_llm_async,
 )
 from src.crewai_enterprise.server.handlers.aibot.commands import _handle_prompt_command
-from src.crewai_enterprise.server.handlers.aibot.llm_orchestrator import _process_llm_file_output
+from src.crewai_enterprise.server.handlers.aibot.llm_orchestrator import (
+    _process_llm_file_output,
+)
+from src.crewai_enterprise.server.handlers.task_handler import handle_task_command
 
 # Configure logging
 logging.basicConfig(
@@ -311,6 +314,23 @@ async def _handle_text_message(
 
     # Generate stream ID and create task BEFORE starting LLM
     stream_id = _generate_stream_id()
+
+    task_reply = handle_task_command(content, chat_id, user_id)
+    if task_reply is None and content.strip().startswith("/task"):
+        task_reply = "请输入任务内容，格式：/task <内容>"
+    if task_reply:
+        _stream_tasks[stream_id] = {
+            "content": task_reply,
+            "finished": True,
+            "created_at": time.time(),
+            "bot_type": bot_type,
+            "user_name": user_name,
+        }
+        if wecom_msg_id:
+            _processed_messages[wecom_msg_id] = stream_id
+        stream_json = _make_text_stream(stream_id, task_reply, finish=True)
+        encrypted = _encrypt_response(bot_type, stream_json, nonce, timestamp)
+        return Response(content=encrypted, media_type="text/plain")
 
     # Store task with initial "thinking" state
     _stream_tasks[stream_id] = {
@@ -808,9 +828,9 @@ async def _call_opencode_async(
         # Handle /file-html and other prompt commands (OpenCode path).
         stripped_content = content.strip()
         if stripped_content.startswith("/"):
-            parts = stripped_content.split(maxsplit=1)
-            command = parts[0].lstrip("/")
-            args = parts[1] if len(parts) > 1 else ""
+            cmd_parts: list[str] = stripped_content.split(maxsplit=1)
+            command = cmd_parts[0].lstrip("/")
+            args = cmd_parts[1] if len(cmd_parts) > 1 else ""
             cmd_result = _handle_prompt_command(
                 command=command,
                 args=args,
@@ -835,9 +855,9 @@ async def _call_opencode_async(
 
             # If /force wraps another command, re-process it now (e.g., /force /file-html ...).
             if content.strip().startswith("/"):
-                parts = content.strip().split(maxsplit=1)
-                nested_command = parts[0].lstrip("/")
-                nested_args = parts[1] if len(parts) > 1 else ""
+                nested_parts: list[str] = content.strip().split(maxsplit=1)
+                nested_command = nested_parts[0].lstrip("/")
+                nested_args = nested_parts[1] if len(nested_parts) > 1 else ""
                 nested_result = _handle_prompt_command(
                     command=nested_command,
                     args=nested_args,
@@ -847,7 +867,9 @@ async def _call_opencode_async(
                 )
                 if nested_result:
                     if nested_result.get("continue_with_llm"):
-                        file_output_mode = bool(nested_result.get("file_output_mode", False))
+                        file_output_mode = bool(
+                            nested_result.get("file_output_mode", False)
+                        )
                         if file_output_mode:
                             link_only_mode = True
                         content = nested_result.get("user_request", content)
@@ -951,7 +973,9 @@ async def _call_opencode_async(
                                 f"[OPENCODE] Got complete response: {result_text[:100]}..."
                             )
                     elif event_type == "error":
-                        result_text = event.get("message", "OpenCode returned an error.")
+                        result_text = event.get(
+                            "message", "OpenCode returned an error."
+                        )
                         _stream_tasks[stream_id]["content"] = result_text
                         logger.warning(f"[OPENCODE] {result_text}")
                         break
@@ -1061,7 +1085,9 @@ async def _call_opencode_async(
                         break
                     time.sleep(2.0)
             except Exception as e:
-                logger.warning(f"[OPENCODE] Failed while waiting for idle before file-html: {e}")
+                logger.warning(
+                    f"[OPENCODE] Failed while waiting for idle before file-html: {e}"
+                )
             # For file-html, ensure we use the longest assistant text for this turn (not a lead-in snippet).
             try:
                 messages = opencode_client.get_session_messages(session_id)
@@ -1085,7 +1111,10 @@ async def _call_opencode_async(
                     if content_text and content.strip():
                         if content_text.strip() == content.strip():
                             score += 3
-                        elif content.strip()[:50] and content.strip()[:50] in content_text:
+                        elif (
+                            content.strip()[:50]
+                            and content.strip()[:50] in content_text
+                        ):
                             score += 2
                     if ts >= request_start_ms - 2000:
                         score += 1
@@ -1107,10 +1136,14 @@ async def _call_opencode_async(
                                 if isinstance(text, str) and len(text) > len(best_text):
                                     best_text = text
                 if best_text != result:
-                    logger.info("[OPENCODE] Using longest assistant text for file-html output")
+                    logger.info(
+                        "[OPENCODE] Using longest assistant text for file-html output"
+                    )
                     result = best_text
             except Exception as e:
-                logger.warning(f"[OPENCODE] Failed to select longest text before file-html: {e}")
+                logger.warning(
+                    f"[OPENCODE] Failed to select longest text before file-html: {e}"
+                )
             result = await _process_llm_file_output(
                 bot_type="chatgpt",
                 chat_id=chat_id,
@@ -1141,9 +1174,7 @@ async def _call_opencode_async(
                 new_session_id = opencode_client.create_session(directory=repo_path)
                 session_store.set_session_id(chat_id, new_session_id)
                 loop = asyncio.get_running_loop()
-                result = await loop.run_in_executor(
-                    None, run_prompt_fn, new_session_id
-                )
+                result = await loop.run_in_executor(None, run_prompt_fn, new_session_id)
                 if not result:
                     result = "OpenCode returned an empty response."
 
