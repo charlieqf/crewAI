@@ -16,36 +16,195 @@ def task_page(task_id: int):
     <meta charset=\"utf-8\" />
     <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
     <title>Task {task_id}</title>
+    <link rel=\"preconnect\" href=\"https://fonts.googleapis.com\" />
+    <link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin />
+    <link href=\"https://fonts.googleapis.com/css2?family=Manrope:wght@300;400;500;600;700&family=Newsreader:opsz,wght@6..72,400;600;700&display=swap\" rel=\"stylesheet\" />
     <style>
-      body {{ font-family: Arial, sans-serif; margin: 24px; color: #111; }}
-      .header {{ margin-bottom: 16px; }}
-      .title {{ font-size: 20px; font-weight: 600; }}
-      .meta {{ color: #666; font-size: 13px; margin-top: 4px; }}
-      .section {{ margin-top: 20px; }}
-      .messages {{ border: 1px solid #ddd; padding: 12px; border-radius: 6px; }}
-      .msg {{ margin-bottom: 12px; }}
-      .role {{ font-weight: 600; text-transform: uppercase; font-size: 11px; color: #888; }}
-      .content {{ white-space: pre-wrap; font-size: 14px; }}
-      .files a {{ display: block; margin: 4px 0; }}
-      .status {{ display: inline-block; padding: 2px 8px; border-radius: 10px; background: #f2f2f2; font-size: 12px; }}
-      .error {{ color: #b00020; }}
+      :root {{
+        --bg: #f4f2ef;
+        --ink: #1f1c19;
+        --muted: #6f6a64;
+        --panel: #fbfaf8;
+        --line: #e4dfd8;
+        --accent: #b8a489;
+        --accent-strong: #6a5f52;
+        --shadow: 0 18px 45px rgba(44, 38, 32, 0.15);
+      }}
+
+      * {{ box-sizing: border-box; }}
+      body {{
+        margin: 0;
+        font-family: "Manrope", "Segoe UI", sans-serif;
+        color: var(--ink);
+        background: radial-gradient(1200px 600px at 10% -10%, #efe7dc 0%, transparent 60%),
+                    radial-gradient(1000px 500px at 90% 0%, #f0ece6 0%, transparent 55%),
+                    var(--bg);
+        min-height: 100vh;
+      }}
+
+      .page {{
+        max-width: 980px;
+        margin: 0 auto;
+        padding: 32px 24px 64px;
+      }}
+
+      .nav {{
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 28px;
+      }}
+
+      .brand {{
+        font-family: "Newsreader", serif;
+        font-size: 20px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--accent-strong);
+      }}
+
+      .tag {{
+        border: 1px solid var(--line);
+        padding: 6px 12px;
+        border-radius: 999px;
+        font-size: 12px;
+        color: var(--muted);
+        background: rgba(255, 255, 255, 0.7);
+      }}
+
+      .hero {{
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 16px;
+        align-items: center;
+        padding: 22px 26px;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        box-shadow: var(--shadow);
+      }}
+
+      .title {{
+        font-family: "Newsreader", serif;
+        font-size: 28px;
+        margin: 0;
+      }}
+
+      .meta {{
+        color: var(--muted);
+        font-size: 13px;
+        margin-top: 6px;
+      }}
+
+      .status {{
+        padding: 8px 14px;
+        border-radius: 999px;
+        border: 1px solid var(--line);
+        background: #fff;
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+      }}
+
+      .grid {{
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 260px;
+        gap: 22px;
+        margin-top: 26px;
+      }}
+
+      .panel {{
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        padding: 18px;
+      }}
+
+      .panel h3 {{
+        margin: 0 0 12px;
+        font-size: 14px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--accent-strong);
+      }}
+
+      .messages {{
+        display: grid;
+        gap: 14px;
+      }}
+
+      .msg {{
+        padding: 12px 14px;
+        border-radius: 12px;
+        border: 1px solid #efe9e2;
+        background: #fff;
+      }}
+
+      .role {{
+        font-size: 11px;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        color: var(--muted);
+        margin-bottom: 6px;
+      }}
+
+      .content {{
+        white-space: pre-wrap;
+        font-size: 14px;
+        line-height: 1.55;
+      }}
+
+      .files a {{
+        display: block;
+        margin: 6px 0;
+        color: var(--accent-strong);
+        text-decoration: none;
+      }}
+
+      .files a:hover {{
+        text-decoration: underline;
+      }}
+
+      .error {{
+        color: #9c2f2f;
+        font-size: 13px;
+      }}
+
+      @media (max-width: 900px) {{
+        .hero {{
+          grid-template-columns: 1fr;
+        }}
+        .grid {{
+          grid-template-columns: 1fr;
+        }}
+      }}
     </style>
   </head>
   <body>
-    <div class=\"header\">
-      <div class=\"title\">Task #{task_id}</div>
-      <div class=\"meta\" id=\"meta\">Loading...</div>
-    </div>
-    <div class=\"section\">
-      <div class=\"status\" id=\"status\">loading</div>
-    </div>
-    <div class=\"section\">
-      <h3>Messages</h3>
-      <div class=\"messages\" id=\"messages\">Loading...</div>
-    </div>
-    <div class=\"section\">
-      <h3>Files</h3>
-      <div class=\"files\" id=\"files\">No files</div>
+    <div class=\"page\">
+      <div class=\"nav\">
+        <div class=\"brand\">Open Jobs</div>
+        <div class=\"tag\">Task Stream</div>
+      </div>
+
+      <div class=\"hero\">
+        <div>
+          <div class=\"title\">Task #{task_id}</div>
+          <div class=\"meta\" id=\"meta\">Loading...</div>
+        </div>
+        <div class=\"status\" id=\"status\">loading</div>
+      </div>
+
+      <div class=\"grid\">
+        <div class=\"panel\">
+          <h3>Messages</h3>
+          <div class=\"messages\" id=\"messages\">Loading...</div>
+        </div>
+        <div class=\"panel\">
+          <h3>Files</h3>
+          <div class=\"files\" id=\"files\">No files</div>
+        </div>
+      </div>
     </div>
     <script>
       const taskId = {task_id};
