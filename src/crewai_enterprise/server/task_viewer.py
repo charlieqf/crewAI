@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
 
 from src.crewai_enterprise.server.task_config import get_task_config
+from src.crewai_enterprise.server.task_store import TaskStore
 
 router = APIRouter()
 
@@ -298,7 +299,12 @@ def task_page(task_id: int):
 @router.get("/api/task/{task_id}/files")
 def list_task_files(task_id: int):
     cfg = get_task_config()
-    files_dir = os.path.join(cfg.storage_root, f"task-{task_id}", "files")
+    store = TaskStore(cfg.db_path)
+    task = store.get_task(task_id)
+    chat_id = task.get("wecom_chat_id") if task else None
+    if not chat_id:
+        return {"files": []}
+    files_dir = os.path.join(cfg.storage_root, chat_id, "tasks", str(task_id), "files")
     if not os.path.isdir(files_dir):
         return {"files": []}
     return {"files": sorted(os.listdir(files_dir))}
@@ -309,7 +315,14 @@ def download_task_file(task_id: int, filename: str):
     if ".." in filename or "/" in filename or "\\" in filename:
         raise HTTPException(status_code=400, detail="invalid filename")
     cfg = get_task_config()
-    path = os.path.join(cfg.storage_root, f"task-{task_id}", "files", filename)
+    store = TaskStore(cfg.db_path)
+    task = store.get_task(task_id)
+    chat_id = task.get("wecom_chat_id") if task else None
+    if not chat_id:
+        raise HTTPException(status_code=404, detail="not found")
+    path = os.path.join(
+        cfg.storage_root, chat_id, "tasks", str(task_id), "files", filename
+    )
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="not found")
     return FileResponse(path)
