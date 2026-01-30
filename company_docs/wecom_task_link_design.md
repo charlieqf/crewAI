@@ -53,6 +53,7 @@ WeCom -> wecom-callback -> Task Service -> OpenCode
 ### 3.2 数据存储（低成本决策）
 - **v1 使用 VM 本地 SQLite**（`{TASK_STORAGE_ROOT}/tasks.db`）。
 - 后续再迁移到现有数据库或服务化存储。
+ - 需要配置环境变量：`TASK_BASE_URL`、`TASK_STORAGE_ROOT`、`TASK_DB_PATH`、`OPENCODE_STORAGE_ROOT`。
 
 ## 4. 数据模型（最小可用）
 
@@ -237,6 +238,7 @@ OpenCode 在 Kamatera 本地持久化 session 到：
 - `TASK_BASE_URL`（如 `http://104.238.213.119:8080`）
 - `TASK_STORAGE_ROOT`（如 `/var/lib/wecom-tasks`）
 - `OPENCODE_STORAGE_ROOT`（如 `/root/.local/share/opencode/storage`）
+ - `TASK_DB_PATH`（如 `/var/lib/wecom-tasks/tasks.db`）
 
 ## 7. 页面结构（最小可用）
 
@@ -297,6 +299,12 @@ OpenCode 在 Kamatera 本地持久化 session 到：
 ### 8.4 任务链接（低成本默认）
 - 先使用固定 base URL（如 `{TASK_BASE_URL}/task/{id}`）。
 - 后续再替换成正式域名。
+
+## 8.5 Worker 启动方式（VM）
+
+```
+/opt/wecom-callback/venv/bin/python scripts/task_worker.py
+```
 
 ## 9. 风险与限制（接受版）
 
