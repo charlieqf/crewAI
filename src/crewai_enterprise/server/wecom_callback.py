@@ -34,6 +34,8 @@ from src.crewai_enterprise.server.handlers import (
     process_file_message,
     process_opencode_message,
 )
+from src.crewai_enterprise.server.handlers.task_handler import handle_task_command
+from src.crewai_enterprise.tools.wecom.wecom_webhook_tool import send_webhook_message
 
 # Import callback routers
 from src.crewai_enterprise.server import archive_callback
@@ -225,6 +227,10 @@ def create_app() -> FastAPI:
 
         # Route message to appropriate handler
         if message.msg_type == "text" and content:
+            task_reply = handle_task_command(content, chat_id, user_id)
+            if task_reply:
+                send_webhook_message(webhook_url, task_reply, msg_type="text")
+                return {"status": "task_created", "chat_id": chat_id}
             # Check for clear command
             if is_clear_command(content):
                 from src.crewai_enterprise.server.handlers.text_handler import (
