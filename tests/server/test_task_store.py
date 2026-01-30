@@ -29,3 +29,21 @@ def test_task_store_crud(tmp_path):
     assert task["id"] == task_id
     messages = store.list_messages(task_id)
     assert messages[-1]["content"] == "q1"
+
+
+def test_append_input_sets_task_queued(tmp_path):
+    db_path = tmp_path / "tasks.db"
+    store = TaskStore(str(db_path))
+    store.init_schema()
+
+    task_id = store.create_task("room1", "user1", "title")
+    store.append_input(task_id, content="first", source="wecom")
+    inp = store.claim_next_input()
+    assert inp["task_id"] == task_id
+    store.mark_input_done(inp["id"])
+
+    store.append_input(task_id, content="second", source="wecom")
+    task = store.get_task(task_id)
+    assert task["status"] == "queued"
+    inp2 = store.claim_next_input()
+    assert inp2["content"] == "second"
