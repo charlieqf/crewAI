@@ -1,6 +1,8 @@
 import os
+import tempfile
+import zipfile
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
 
 from src.crewai_enterprise.server.task_config import get_task_config
@@ -129,6 +131,28 @@ def task_page(task_id: int):
         color: var(--accent-strong);
       }}
 
+      .panel-header {{
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }}
+
+      .btn {{
+        border: 1px solid var(--line);
+        background: #f7f3ee;
+        color: var(--ink);
+        padding: 8px 14px;
+        border-radius: 999px;
+        font-size: 12px;
+        letter-spacing: 0.02em;
+        cursor: pointer;
+      }}
+
+      .btn:hover {{
+        background: #efe7dc;
+      }}
+
       .messages {{
         display: grid;
         gap: 14px;
@@ -220,7 +244,10 @@ def task_page(task_id: int):
           <div class=\"messages\" id=\"messages\">Loading...</div>
         </div>
         <div class=\"panel\">
-          <h3>Files</h3>
+          <div class=\"panel-header\">
+            <h3>Files</h3>
+            <button class=\"btn\" id=\"download-zip\">Download zip</button>
+          </div>
           <div class=\"files\" id=\"files\">No files</div>
         </div>
       </div>
@@ -238,6 +265,7 @@ def task_page(task_id: int):
       const statusEl = document.getElementById('status');
       const messagesEl = document.getElementById('messages');
       const filesEl = document.getElementById('files');
+      const zipEl = document.getElementById('download-zip');
       const logsEl = document.getElementById('logs');
 
       function renderMessages(items) {{
@@ -314,6 +342,11 @@ def task_page(task_id: int):
         }}
       }}
 
+      function downloadZip() {{
+        const path = currentPath ? `${{filesUrl}}.zip?path=${{encodeURIComponent(currentPath)}}` : `${{filesUrl}}.zip`;
+        window.location.href = path;
+      }}
+
       async function loadTask() {{
         try {{
           const res = await fetch(taskUrl);
@@ -364,6 +397,13 @@ def task_page(task_id: int):
         loadTask();
         loadFiles(currentPath);
         loadLogs();
+      }}
+
+      if (zipEl) {{
+        zipEl.addEventListener('click', (e) => {{
+          e.preventDefault();
+          downloadZip();
+        }});
       }}
 
       refresh();
@@ -681,6 +721,45 @@ def list_task_files(task_id: int, path: str | None = None):
             }
         )
     return {"files": entries, "path": path or ""}
+
+
+@router.get("/api/task/{task_id}/files.zip")
+def download_task_files_zip(
+    task_id: int, background_tasks: BackgroundTasks, path: str | None = None
+):
+    cfg = get_task_config()
+    store = TaskStore(cfg.db_path)
+    task = store.get_task(task_id)
+    chat_id = task.get("wecom_chat_id") if task else None
+    if not chat_id:
+        raise HTTPException(status_code=404, detail="not found")
+    root_dir = os.path.join(cfg.storage_root, chat_id, "tasks", str(task_id), "files")
+    if not os.path.isdir(root_dir):
+        raise HTTPException(status_code=404, detail="not found")
+    if path:
+        if ".." in path or path.startswith("/") or path.startswith("\\"):
+            raise HTTPException(status_code=400, detail="invalid path")
+        target_dir = os.path.join(root_dir, path)
+    else:
+        target_dir = root_dir
+    if not os.path.isdir(target_dir):
+        raise HTTPException(status_code=404, detail="not found")
+
+    temp = tempfile.NamedTemporaryFile(delete=False, suffix=".zip")
+    temp_path = temp.name
+    temp.close()
+
+    with zipfile.ZipFile(temp_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for dirpath, _, files in os.walk(target_dir):
+            for fname in files:
+                full_path = os.path.join(dirpath, fname)
+                rel_path = os.path.relpath(full_path, target_dir)
+                zf.write(full_path, rel_path)
+
+    base_name = "files" if not path else path.replace("/", "_")
+    filename = f"task-{task_id}-{base_name}.zip"
+    background_tasks.add_task(os.remove, temp_path)
+    return FileResponse(temp_path, filename=filename, media_type="application/zip")
 
 
 @router.get("/api/task/{task_id}/file")
