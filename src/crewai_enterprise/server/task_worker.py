@@ -36,10 +36,12 @@ class TaskWorker:
             os.makedirs(workdir, exist_ok=True)
         session_id = self.store.ensure_session(task_id, self.client, workdir)
         self._write_worker_log(task_id, chat_id, f"session {session_id} ready")
+        skill_text = _load_task_skill()
+        prompt_text = _build_prompt(skill_text, inp.get("content", ""))
         try:
             self.client.prompt_interactive(
                 session_id,
-                [{"type": "text", "text": inp["content"]}],
+                [{"type": "text", "text": prompt_text}],
                 None,
                 directory=workdir,
             )
@@ -54,7 +56,15 @@ class TaskWorker:
             )
             self.client.prompt_interactive(
                 session_id,
-                [{"type": "text", "text": replay_text + "\n" + inp["content"]}],
+                [
+                    {
+                        "type": "text",
+                        "text": _build_prompt(
+                            skill_text,
+                            replay_text + "\n" + inp.get("content", ""),
+                        ),
+                    }
+                ],
                 None,
                 directory=workdir,
             )
@@ -118,3 +128,27 @@ class TaskWorker:
                 handle.write(f"[{ts}] {message}\n")
         except OSError:
             return
+
+
+def _load_task_skill() -> str | None:
+    skill_path = os.getenv(
+        "TASK_SKILL_PATH",
+        "/opt/oh-my-opencode/.opencode/skills/save-to-workdir/SKILL.md",
+    )
+    try:
+        with open(skill_path, "r", encoding="utf-8") as handle:
+            content = handle.read()
+    except OSError:
+        return None
+    if content.startswith("---"):
+        parts = content.split("---", 2)
+        if len(parts) >= 3:
+            return parts[2].lstrip()
+    return content.strip()
+
+
+def _build_prompt(skill_text: str | None, prompt: str) -> str:
+    prompt = prompt.strip()
+    if not skill_text:
+        return prompt
+    return f"{skill_text}\n\nUser request:\n{prompt}".strip()
