@@ -271,16 +271,45 @@ def task_page(task_id: int):
         }}
       }}
 
-      function renderFiles(files) {{
-        if (!files || files.length === 0) {{
+      let currentPath = '';
+
+      function renderFiles(payload) {{
+        const items = payload?.files || [];
+        currentPath = payload?.path || '';
+        if (!items || items.length === 0) {{
           filesEl.textContent = 'No files';
           return;
         }}
         filesEl.innerHTML = '';
-        for (const name of files) {{
+        if (currentPath) {{
+          const up = document.createElement('a');
+          up.href = '#';
+          up.textContent = '⬅ Back';
+          up.addEventListener('click', (e) => {{
+            e.preventDefault();
+            const parts = currentPath.split('/').filter(Boolean);
+            parts.pop();
+            loadFiles(parts.join('/'));
+          }});
+          filesEl.appendChild(up);
+        }}
+        for (const entry of items) {{
+          const name = entry.name || entry;
+          const kind = entry.type || 'file';
           const link = document.createElement('a');
-          link.href = `/api/task/${{taskId}}/files/${{encodeURIComponent(name)}}`;
-          link.textContent = name;
+          if (kind === 'dir') {{
+            link.href = '#';
+            link.textContent = `${{name}}/`;
+            link.addEventListener('click', (e) => {{
+              e.preventDefault();
+              const nextPath = currentPath ? `${{currentPath}}/${{name}}` : name;
+              loadFiles(nextPath);
+            }});
+          }} else {{
+            const filePath = currentPath ? `${{currentPath}}/${{name}}` : name;
+            link.href = `/api/task/${{taskId}}/files/download?path=${{encodeURIComponent(filePath)}}`;
+            link.textContent = name;
+          }}
           filesEl.appendChild(link);
         }}
       }}
@@ -303,14 +332,15 @@ def task_page(task_id: int):
         }}
       }}
 
-      async function loadFiles() {{
+      async function loadFiles(path = '') {{
         try {{
-          const res = await fetch(filesUrl);
+          const url = path ? `${{filesUrl}}?path=${{encodeURIComponent(path)}}` : filesUrl;
+          const res = await fetch(url);
           if (!res.ok) {{
             throw new Error(`Files fetch failed: ${{res.status}}`);
           }}
           const data = await res.json();
-          renderFiles(data.files || []);
+          renderFiles(data);
         }} catch (err) {{
           filesEl.innerHTML = `<div class=\"error\">${{err.message}}</div>`;
         }}
@@ -623,17 +653,34 @@ def list_tasks():
 
 
 @router.get("/api/task/{task_id}/files")
-def list_task_files(task_id: int):
+def list_task_files(task_id: int, path: str | None = None):
     cfg = get_task_config()
     store = TaskStore(cfg.db_path)
     task = store.get_task(task_id)
     chat_id = task.get("wecom_chat_id") if task else None
     if not chat_id:
         return {"files": []}
-    files_dir = os.path.join(cfg.storage_root, chat_id, "tasks", str(task_id), "files")
-    if not os.path.isdir(files_dir):
+    root_dir = os.path.join(cfg.storage_root, chat_id, "tasks", str(task_id), "files")
+    if not os.path.isdir(root_dir):
         return {"files": []}
-    return {"files": sorted(os.listdir(files_dir))}
+    if path:
+        if ".." in path or path.startswith("/") or path.startswith("\\"):
+            raise HTTPException(status_code=400, detail="invalid path")
+        target_dir = os.path.join(root_dir, path)
+    else:
+        target_dir = root_dir
+    if not os.path.isdir(target_dir):
+        return {"files": []}
+    entries = []
+    for name in sorted(os.listdir(target_dir)):
+        full_path = os.path.join(target_dir, name)
+        entries.append(
+            {
+                "name": name,
+                "type": "dir" if os.path.isdir(full_path) else "file",
+            }
+        )
+    return {"files": entries, "path": path or ""}
 
 
 @router.get("/api/task/{task_id}/files/{filename}")
@@ -652,3 +699,21 @@ def download_task_file(task_id: int, filename: str):
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="not found")
     return FileResponse(path)
+
+
+@router.get("/api/task/{task_id}/files/download")
+def download_task_file_path(task_id: int, path: str):
+    if ".." in path or path.startswith("/") or path.startswith("\\"):
+        raise HTTPException(status_code=400, detail="invalid path")
+    cfg = get_task_config()
+    store = TaskStore(cfg.db_path)
+    task = store.get_task(task_id)
+    chat_id = task.get("wecom_chat_id") if task else None
+    if not chat_id:
+        raise HTTPException(status_code=404, detail="not found")
+    full_path = os.path.join(
+        cfg.storage_root, chat_id, "tasks", str(task_id), "files", path
+    )
+    if not os.path.exists(full_path) or os.path.isdir(full_path):
+        raise HTTPException(status_code=404, detail="not found")
+    return FileResponse(full_path)
