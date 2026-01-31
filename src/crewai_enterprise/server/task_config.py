@@ -8,6 +8,7 @@ class TaskConfig:
     storage_root: str
     db_path: str
     opencode_storage_root: str
+    workdir_root: str
 
 
 def get_task_config() -> TaskConfig:
@@ -17,9 +18,11 @@ def get_task_config() -> TaskConfig:
     opencode_storage_root = os.getenv(
         "OPENCODE_STORAGE_ROOT", "/root/.local/share/opencode/storage"
     )
+    workdir_root = os.getenv("TASK_WORKDIR_ROOT", "/opt/oh-my-opencode/tasks")
     return TaskConfig(
         base_url=base_url,
         storage_root=storage_root,
         db_path=db_path,
         opencode_storage_root=opencode_storage_root,
+        workdir_root=workdir_root,
     )

@@ -1,3 +1,7 @@
+import os
+
+import os
+
 from fastapi import APIRouter
 from pydantic import BaseModel
 
@@ -32,6 +36,9 @@ def create_task(body: CreateTaskIn):
     store.init_schema()
     title = body.text[:60]
     task_id = store.create_task(body.chat_id, body.user_id, title)
+    workdir = os.path.join(cfg.workdir_root, str(task_id))
+    os.makedirs(workdir, exist_ok=True)
+    store.set_workdir(task_id, workdir)
     store.append_message(task_id, "user", body.text, "wecom")
     store.append_input(task_id, body.text, "wecom")
     return {"task_id": task_id, "url": f"{cfg.base_url}/task/{task_id}"}

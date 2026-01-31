@@ -25,21 +25,26 @@ class TaskWorker:
         task_id = inp["task_id"]
         task = self.store.get_task(task_id)
         last_seen_file = task.get("last_seen_message_file") if task else None
-        session_id = self.store.ensure_session(task_id, self.client)
+        workdir = task.get("workdir") if task else None
+        if workdir:
+            os.makedirs(workdir, exist_ok=True)
+        session_id = self.store.ensure_session(task_id, self.client, workdir)
         try:
             self.client.prompt_interactive(
                 session_id,
                 [{"type": "text", "text": inp["content"]}],
                 None,
+                directory=workdir,
             )
         except Exception:
             replay = self.store.list_recent_messages(task_id, limit=50)
             replay_text = "\n".join(f"{m['role']}: {m['content']}" for m in replay)
-            session_id = self.client.create_session()
+            session_id = self.client.create_session(directory=workdir)
             self.client.prompt_interactive(
                 session_id,
                 [{"type": "text", "text": replay_text + "\n" + inp["content"]}],
                 None,
+                directory=workdir,
             )
 
         quiet_rounds = 0
@@ -73,6 +78,7 @@ class TaskWorker:
                 files_dir,
                 self.cfg.opencode_storage_root,
                 state_path,
+                workdir=workdir,
             )
         self.store.mark_task_done_if_idle(task_id)
         return True

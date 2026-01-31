@@ -25,6 +25,7 @@ class TaskStore:
                     wecom_chat_id TEXT,
                     wecom_user_id TEXT,
                     opencode_session_id TEXT,
+                    workdir TEXT,
                     title TEXT,
                     status TEXT DEFAULT 'queued',
                     last_seen_message_file TEXT
@@ -53,6 +54,13 @@ class TaskStore:
                 ON task_message(task_id, created_at);
                 """
             )
+            self._ensure_task_columns(conn)
+
+    @staticmethod
+    def _ensure_task_columns(conn: sqlite3.Connection) -> None:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(task)").fetchall()}
+        if "workdir" not in cols:
+            conn.execute("ALTER TABLE task ADD COLUMN workdir TEXT")
 
     def create_task(self, wecom_chat_id: str, wecom_user_id: str, title: str) -> int:
         with self.connect() as conn:
@@ -97,6 +105,13 @@ class TaskStore:
                 raise ValueError("Failed to append input")
             assert last_id is not None
             return int(last_id)
+
+    def set_workdir(self, task_id: int, workdir: str) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE task SET workdir=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                (workdir, task_id),
+            )
 
     def claim_next_input(self) -> dict[str, Any] | None:
         with self.connect() as conn:
@@ -143,15 +158,21 @@ class TaskStore:
                 (filename, task_id),
             )
 
-    def ensure_session(self, task_id: int, client: OpenCodeClient) -> str:
+    def ensure_session(
+        self,
+        task_id: int,
+        client: OpenCodeClient,
+        workdir: str | None = None,
+    ) -> str:
         with self.connect() as conn:
             row = conn.execute(
-                "SELECT opencode_session_id FROM task WHERE id=?",
+                "SELECT opencode_session_id, workdir FROM task WHERE id=?",
                 (task_id,),
             ).fetchone()
             if row and row[0]:
                 return str(row[0])
-            session_id = client.create_session()
+            resolved_workdir = workdir or (row[1] if row and row[1] else None)
+            session_id = client.create_session(directory=resolved_workdir)
             conn.execute(
                 "UPDATE task SET opencode_session_id=?, status='running' WHERE id=?",
                 (session_id, task_id),

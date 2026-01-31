@@ -67,11 +67,17 @@ def mirror_session_files(
     storage_root: str,
     state_path: str,
     default_last_sync: float | None = None,
+    workdir: str | None = None,
 ) -> list[str]:
-    session_file = _find_session_file(storage_root, session_id)
-    if not session_file:
-        return []
-    repo_dir, session_created = _load_session_meta(session_file)
+    session_created = None
+    repo_dir = None
+    if workdir:
+        repo_dir = workdir
+    else:
+        session_file = _find_session_file(storage_root, session_id)
+        if not session_file:
+            return []
+        repo_dir, session_created = _load_session_meta(session_file)
     if not repo_dir or not os.path.isdir(repo_dir):
         return []
 
