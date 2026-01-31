@@ -36,8 +36,8 @@ class TaskWorker:
             os.makedirs(workdir, exist_ok=True)
         session_id = self.store.ensure_session(task_id, self.client, workdir)
         self._write_worker_log(task_id, chat_id, f"session {session_id} ready")
-        skill_text = _load_task_skill()
-        prompt_text = _build_prompt(skill_text, inp.get("content", ""))
+        skills = _load_task_skills()
+        prompt_text = _build_prompt(skills, inp.get("content", ""))
         try:
             self.client.prompt_interactive(
                 session_id,
@@ -60,7 +60,7 @@ class TaskWorker:
                     {
                         "type": "text",
                         "text": _build_prompt(
-                            skill_text,
+                            skills,
                             replay_text + "\n" + inp.get("content", ""),
                         ),
                     }
@@ -130,25 +130,54 @@ class TaskWorker:
             return
 
 
-def _load_task_skill() -> str | None:
-    skill_path = os.getenv(
-        "TASK_SKILL_PATH",
-        "/opt/oh-my-opencode/.opencode/skills/save-to-workdir/SKILL.md",
-    )
-    try:
-        with open(skill_path, "r", encoding="utf-8") as handle:
-            content = handle.read()
-    except OSError:
-        return None
+def _load_task_skills() -> list[tuple[str, str]]:
+    paths = []
+    explicit_paths = os.getenv("TASK_SKILL_PATHS")
+    if explicit_paths:
+        paths.extend([p.strip() for p in explicit_paths.split(",") if p.strip()])
+    legacy_path = os.getenv("TASK_SKILL_PATH")
+    if legacy_path:
+        paths.append(legacy_path.strip())
+    if not paths:
+        base_dir = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..", "..")
+        )
+        paths.append(
+            os.path.join(base_dir, "opencode_skills", "save-to-workdir", "SKILL.md")
+        )
+
+    loaded: list[tuple[str, str]] = []
+    for path in paths:
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                content = handle.read()
+        except OSError:
+            continue
+        name, body = _parse_skill_content(path, content)
+        if body:
+            loaded.append((name, body))
+    return loaded
+
+
+def _parse_skill_content(path: str, content: str) -> tuple[str, str]:
+    name = os.path.splitext(os.path.basename(path))[0]
+    body = content.strip()
     if content.startswith("---"):
         parts = content.split("---", 2)
         if len(parts) >= 3:
-            return parts[2].lstrip()
-    return content.strip()
+            frontmatter = parts[1]
+            for line in frontmatter.splitlines():
+                if line.strip().startswith("name:"):
+                    name = line.split(":", 1)[1].strip() or name
+                    break
+            body = parts[2].lstrip()
+    return name, body.strip()
 
 
-def _build_prompt(skill_text: str | None, prompt: str) -> str:
+def _build_prompt(skills: list[tuple[str, str]], prompt: str) -> str:
     prompt = prompt.strip()
-    if not skill_text:
+    if not skills:
         return prompt
-    return f"{skill_text}\n\nUser request:\n{prompt}".strip()
+    skill_names = ", ".join(name for name, _ in skills)
+    skill_blocks = "\n\n".join(body for _, body in skills if body)
+    return f"Loaded skills: {skill_names}\n\n{skill_blocks}\n\nUser request:\n{prompt}".strip()
