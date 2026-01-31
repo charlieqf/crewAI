@@ -1,5 +1,7 @@
 import os
 
+import subprocess
+
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
 
@@ -149,6 +151,12 @@ def task_page(task_id: int):
         margin-bottom: 6px;
       }}
 
+      .meta-line {{
+        font-size: 11px;
+        color: var(--muted);
+        margin-bottom: 6px;
+      }}
+
       .content {{
         white-space: pre-wrap;
         font-size: 14px;
@@ -164,6 +172,18 @@ def task_page(task_id: int):
 
       .files a:hover {{
         text-decoration: underline;
+      }}
+
+      .logs {{
+        font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+        font-size: 12px;
+        background: #111;
+        color: #f1f1f1;
+        padding: 12px;
+        border-radius: 10px;
+        max-height: 240px;
+        overflow: auto;
+        white-space: pre-wrap;
       }}
 
       .error {{
@@ -206,15 +226,21 @@ def task_page(task_id: int):
           <div class=\"files\" id=\"files\">No files</div>
         </div>
       </div>
+      <div class=\"panel\">
+        <h3>Worker Logs</h3>
+        <div class=\"logs\" id=\"logs\">Loading...</div>
+      </div>
     </div>
     <script>
       const taskId = {task_id};
       const taskUrl = "/api/task/{task_id}";
       const filesUrl = "/api/task/{task_id}/files";
+      const logsUrl = "/api/task/{task_id}/logs";
       const metaEl = document.getElementById('meta');
       const statusEl = document.getElementById('status');
       const messagesEl = document.getElementById('messages');
       const filesEl = document.getElementById('files');
+      const logsEl = document.getElementById('logs');
 
       function renderMessages(items) {{
         if (!items || items.length === 0) {{
@@ -228,10 +254,16 @@ def task_page(task_id: int):
           const role = document.createElement('div');
           role.className = 'role';
           role.textContent = msg.role || 'unknown';
+          const meta = document.createElement('div');
+          meta.className = 'meta-line';
+          const msgIdValue = msg.id || 'unknown';
+          const msgSourceValue = msg.source || 'unknown';
+          meta.textContent = `Message ID: ${{msgIdValue}} · Source: ${{msgSourceValue}}`;
           const content = document.createElement('div');
           content.className = 'content';
           content.textContent = msg.content || '';
           wrap.appendChild(role);
+          wrap.appendChild(meta);
           wrap.appendChild(content);
           messagesEl.appendChild(wrap);
         }}
@@ -282,9 +314,24 @@ def task_page(task_id: int):
         }}
       }}
 
+      async function loadLogs() {{
+        try {{
+          const res = await fetch(logsUrl);
+          if (!res.ok) {{
+            throw new Error(`Logs fetch failed: ${{res.status}}`);
+          }}
+          const data = await res.json();
+          const lines = data.lines || [];
+          logsEl.textContent = lines.join('\n') || 'No logs';
+        }} catch (err) {{
+          logsEl.textContent = err.message;
+        }}
+      }}
+
       function refresh() {{
         loadTask();
         loadFiles();
+        loadLogs();
       }}
 
       refresh();
@@ -294,6 +341,26 @@ def task_page(task_id: int):
 </html>
 """
     return HTMLResponse(html)
+
+
+def _read_worker_logs(limit: int = 120) -> list[str]:
+    try:
+        result = subprocess.run(
+            ["journalctl", "-u", "wecom-task-worker", "-n", str(limit), "--no-pager"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except Exception:
+        return ["log reader failed"]
+    output = result.stdout or ""
+    lines = [line for line in output.splitlines() if line]
+    return lines[-limit:]
+
+
+@router.get("/api/task/{task_id}/logs")
+def task_logs(task_id: int):
+    return {"lines": _read_worker_logs()}
 
 
 @router.get("/tasks", response_class=HTMLResponse)
