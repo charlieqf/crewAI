@@ -227,7 +227,10 @@ def task_page(task_id: int):
     <div class=\"page\">
       <div class=\"nav\">
         <div class=\"brand\">Open Jobs</div>
-        <div class=\"tag\">Task Stream</div>
+        <div class=\"panel-header\">
+          <a class=\"btn\" href=\"/tasks\">Back to list</a>
+          <div class=\"tag\">Task Stream</div>
+        </div>
       </div>
 
       <div class=\"hero\">
