@@ -1,7 +1,5 @@
 import os
 
-import subprocess
-
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
 
@@ -347,24 +345,29 @@ def task_page(task_id: int):
     return HTMLResponse(html)
 
 
-def _read_worker_logs(limit: int = 120) -> list[str]:
+def _read_worker_logs(task_id: int, limit: int = 120) -> list[str]:
+    cfg = get_task_config()
+    store = TaskStore(cfg.db_path)
+    task = store.get_task(task_id)
+    chat_id = task.get("wecom_chat_id") if task else None
+    if not chat_id:
+        return []
+    log_path = os.path.join(
+        cfg.storage_root, chat_id, "tasks", str(task_id), "worker.log"
+    )
+    if not os.path.exists(log_path):
+        return []
     try:
-        result = subprocess.run(
-            ["journalctl", "-u", "wecom-task-worker", "-n", str(limit), "--no-pager"],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-    except Exception:
+        with open(log_path, "r", encoding="utf-8") as handle:
+            lines = [line.rstrip("\n") for line in handle.readlines() if line.strip()]
+    except OSError:
         return ["log reader failed"]
-    output = result.stdout or ""
-    lines = [line for line in output.splitlines() if line]
     return lines[-limit:]
 
 
 @router.get("/api/task/{task_id}/logs")
 def task_logs(task_id: int):
-    return {"lines": _read_worker_logs()}
+    return {"lines": _read_worker_logs(task_id)}
 
 
 @router.get("/tasks", response_class=HTMLResponse)

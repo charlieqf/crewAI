@@ -11,7 +11,8 @@ from src.crewai_enterprise.server.wecom_callback import app
 
 
 def test_task_logs_endpoint(monkeypatch):
-    def fake_reader():
+    def fake_reader(task_id: int, limit: int = 120):
+        assert task_id == 1
         return ["line 1", "line 2"]
 
     monkeypatch.setattr(task_viewer, "_read_worker_logs", fake_reader)
