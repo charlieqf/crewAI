@@ -26,6 +26,13 @@ def test_task_page_has_data_loader():
     assert "fetch(" in body
 
 
+def test_task_page_includes_message_id_label():
+    client = TestClient(app, raise_server_exceptions=False)
+    res = client.get("/task/1")
+    assert res.status_code == 200
+    assert "Message ID" in res.text
+
+
 def test_task_files_use_chat_folder(monkeypatch, tmp_path):
     monkeypatch.setenv("TASK_STORAGE_ROOT", str(tmp_path))
     monkeypatch.setenv("TASK_DB_PATH", str(tmp_path / "tasks.db"))
