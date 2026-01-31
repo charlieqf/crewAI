@@ -61,3 +61,25 @@ def test_mirror_session_files_uses_default_last_sync(tmp_path: Path):
     )
 
     assert not (files_dir / "old.txt").exists()
+
+
+def test_mirror_session_files_with_workdir(tmp_path: Path):
+    storage_root = tmp_path / "storage"
+    workdir = tmp_path / "workdir"
+    task_dir = tmp_path / "task"
+    session_id = "ses_override"
+
+    workdir.mkdir(parents=True)
+    (workdir / "report.md").write_text("ok", encoding="utf-8")
+
+    files_dir = task_dir / "files"
+    state_path = task_dir / "sync.json"
+    mirror_session_files(
+        session_id,
+        str(files_dir),
+        str(storage_root),
+        str(state_path),
+        workdir=str(workdir),
+    )
+
+    assert (files_dir / "report.md").is_file()
