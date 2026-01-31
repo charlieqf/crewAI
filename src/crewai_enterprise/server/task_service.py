@@ -39,8 +39,15 @@ def create_task(body: CreateTaskIn):
     workdir = os.path.join(cfg.workdir_root, str(task_id))
     os.makedirs(workdir, exist_ok=True)
     store.set_workdir(task_id, workdir)
-    store.append_message(task_id, "user", body.text, "wecom")
-    store.append_input(task_id, body.text, "wecom")
+    input_id = store.append_input(task_id, body.text, "wecom")
+    store.append_message(
+        task_id,
+        "user",
+        body.text,
+        "wecom",
+        input_id=input_id,
+        user_id=body.user_id,
+    )
     return {"task_id": task_id, "url": f"{cfg.base_url}/task/{task_id}"}
 
 
@@ -48,8 +55,15 @@ def create_task(body: CreateTaskIn):
 def append_task(task_id: int, body: AppendTaskIn):
     cfg = get_task_config()
     store = TaskStore(cfg.db_path)
-    store.append_message(task_id, "user", body.text, "wecom")
-    store.append_input(task_id, body.text, "wecom")
+    input_id = store.append_input(task_id, body.text, "wecom")
+    store.append_message(
+        task_id,
+        "user",
+        body.text,
+        "wecom",
+        input_id=input_id,
+        user_id=body.user_id,
+    )
     return {"ok": True, "url": f"{cfg.base_url}/task/{task_id}"}
 
 

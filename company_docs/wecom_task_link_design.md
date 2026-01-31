@@ -239,6 +239,7 @@ OpenCode 在 Kamatera 本地持久化 session 到：
 - `TASK_STORAGE_ROOT`（如 `/var/lib/wecom-tasks`）
 - `OPENCODE_STORAGE_ROOT`（如 `/root/.local/share/opencode/storage`）
  - `TASK_DB_PATH`（如 `/var/lib/wecom-tasks/tasks.db`）
+- `TASK_WORKDIR_ROOT`（如 `/opt/oh-my-opencode/tasks`）
 
 ## 7. 页面结构（最小可用）
 

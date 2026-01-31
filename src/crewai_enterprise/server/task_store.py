@@ -37,6 +37,8 @@ class TaskStore:
                     role TEXT NOT NULL,
                     content TEXT NOT NULL,
                     source TEXT NOT NULL,
+                    input_id INTEGER,
+                    user_id TEXT,
                     FOREIGN KEY (task_id) REFERENCES task(id)
                 );
                 CREATE TABLE IF NOT EXISTS task_input (
@@ -55,12 +57,23 @@ class TaskStore:
                 """
             )
             self._ensure_task_columns(conn)
+            self._ensure_task_message_columns(conn)
 
     @staticmethod
     def _ensure_task_columns(conn: sqlite3.Connection) -> None:
         cols = {row[1] for row in conn.execute("PRAGMA table_info(task)").fetchall()}
         if "workdir" not in cols:
             conn.execute("ALTER TABLE task ADD COLUMN workdir TEXT")
+
+    @staticmethod
+    def _ensure_task_message_columns(conn: sqlite3.Connection) -> None:
+        cols = {
+            row[1] for row in conn.execute("PRAGMA table_info(task_message)").fetchall()
+        }
+        if "input_id" not in cols:
+            conn.execute("ALTER TABLE task_message ADD COLUMN input_id INTEGER")
+        if "user_id" not in cols:
+            conn.execute("ALTER TABLE task_message ADD COLUMN user_id TEXT")
 
     def create_task(self, wecom_chat_id: str, wecom_user_id: str, title: str) -> int:
         with self.connect() as conn:
@@ -78,12 +91,21 @@ class TaskStore:
             return int(last_id)
 
     def append_message(
-        self, task_id: int, role: str, content: str, source: str
+        self,
+        task_id: int,
+        role: str,
+        content: str,
+        source: str,
+        input_id: int | None = None,
+        user_id: str | None = None,
     ) -> None:
         with self.connect() as conn:
             conn.execute(
-                "INSERT INTO task_message(task_id, role, content, source) VALUES (?, ?, ?, ?)",
-                (task_id, role, content, source),
+                """
+                INSERT INTO task_message(task_id, role, content, source, input_id, user_id)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (task_id, role, content, source, input_id, user_id),
             )
             conn.execute(
                 "UPDATE task SET updated_at=CURRENT_TIMESTAMP WHERE id=?",
@@ -182,7 +204,13 @@ class TaskStore:
     def list_messages(self, task_id: int) -> list[dict[str, Any]]:
         with self.connect() as conn:
             rows = conn.execute(
-                "SELECT * FROM task_message WHERE task_id=? ORDER BY created_at ASC",
+                """
+                SELECT tm.*, ti.status AS input_status
+                FROM task_message tm
+                LEFT JOIN task_input ti ON ti.id = tm.input_id
+                WHERE tm.task_id=?
+                ORDER BY tm.created_at ASC, tm.id ASC
+                """,
                 (task_id,),
             ).fetchall()
         return [dict(r) for r in rows]
@@ -192,7 +220,14 @@ class TaskStore:
     ) -> list[dict[str, Any]]:
         with self.connect() as conn:
             rows = conn.execute(
-                "SELECT * FROM task_message WHERE task_id=? ORDER BY created_at DESC LIMIT ?",
+                """
+                SELECT tm.*, ti.status AS input_status
+                FROM task_message tm
+                LEFT JOIN task_input ti ON ti.id = tm.input_id
+                WHERE tm.task_id=?
+                ORDER BY tm.created_at DESC, tm.id DESC
+                LIMIT ?
+                """,
                 (task_id, limit),
             ).fetchall()
         return list(reversed([dict(r) for r in rows]))

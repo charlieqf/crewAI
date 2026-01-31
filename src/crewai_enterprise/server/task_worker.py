@@ -61,7 +61,11 @@ class TaskWorker:
             quiet_rounds = 0
             for chunk in chunks:
                 self.store.append_message(
-                    task_id, "assistant", chunk["text"], "opencode"
+                    task_id,
+                    "assistant",
+                    chunk["text"],
+                    "opencode",
+                    input_id=inp["id"],
                 )
                 self.store.update_last_seen_file(task_id, chunk["filename"])
                 last_seen_file = chunk["filename"]

@@ -13,9 +13,11 @@ def test_task_config_defaults(monkeypatch):
     monkeypatch.delenv("TASK_STORAGE_ROOT", raising=False)
     monkeypatch.delenv("TASK_DB_PATH", raising=False)
     monkeypatch.delenv("OPENCODE_STORAGE_ROOT", raising=False)
+    monkeypatch.delenv("TASK_WORKDIR_ROOT", raising=False)
 
     cfg = get_task_config()
     assert cfg.base_url
     assert cfg.storage_root
     assert cfg.db_path.endswith("tasks.db")
     assert "opencode" in cfg.opencode_storage_root
+    assert cfg.workdir_root

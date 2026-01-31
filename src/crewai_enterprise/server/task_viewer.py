@@ -21,7 +21,7 @@ def task_page(task_id: int):
     <title>Task {task_id}</title>
     <link rel=\"preconnect\" href=\"https://fonts.googleapis.com\" />
     <link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin />
-    <link href=\"https://fonts.googleapis.com/css2?family=Manrope:wght@300;400;500;600;700&family=Newsreader:opsz,wght@6..72,400;600;700&display=swap\" rel=\"stylesheet\" />
+    <link href=\"https://fonts.googleapis.com/css2?family=Manrope:wght@300;400;500;600;700&family=Newsreader:opsz,wght@6..72,400;6..72,600;6..72,700&display=swap\" rel=\"stylesheet\" />
     <style>
       :root {{
         --bg: #f4f2ef;
@@ -258,7 +258,11 @@ def task_page(task_id: int):
           meta.className = 'meta-line';
           const msgIdValue = msg.id || 'unknown';
           const msgSourceValue = msg.source || 'unknown';
-          meta.textContent = `Message ID: ${{msgIdValue}} · Source: ${{msgSourceValue}}`;
+          const userValue = msg.user_id ? ` · User: ${{msg.user_id}}` : '';
+          const statusValue = (msg.role === 'user' && msg.input_status)
+            ? ` · Status: ${{msg.input_status}}`
+            : '';
+          meta.textContent = `Message ID: ${{msgIdValue}} · Source: ${{msgSourceValue}}${{userValue}}${{statusValue}}`;
           const content = document.createElement('div');
           content.className = 'content';
           content.textContent = msg.content || '';
@@ -322,7 +326,7 @@ def task_page(task_id: int):
           }}
           const data = await res.json();
           const lines = data.lines || [];
-          logsEl.textContent = lines.join('\n') || 'No logs';
+          logsEl.textContent = lines.join('\\n') || 'No logs';
         }} catch (err) {{
           logsEl.textContent = err.message;
         }}
@@ -373,7 +377,7 @@ def task_list_page():
     <title>Tasks</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@300;400;500;600;700&family=Newsreader:opsz,wght@6..72,400;600;700&display=swap" rel="stylesheet" />
+    <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@300;400;500;600;700&family=Newsreader:opsz,wght@6..72,400;6..72,600;6..72,700&display=swap" rel="stylesheet" />
     <style>
       :root {
         --bg: #f4f2ef;

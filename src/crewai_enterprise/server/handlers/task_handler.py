@@ -19,8 +19,15 @@ def handle_task_command(text: str, chat_id: str, user_id: str) -> str | None:
         _ensure_task_dirs(cfg.storage_root, chat_id, task_id)
         workdir = os.path.join(cfg.workdir_root, str(task_id))
         _ensure_task_workdir(store, task_id, workdir)
-        store.append_message(task_id, "user", cmd["text"], "wecom")
-        store.append_input(task_id, cmd["text"], "wecom")
+        input_id = store.append_input(task_id, cmd["text"], "wecom")
+        store.append_message(
+            task_id,
+            "user",
+            cmd["text"],
+            "wecom",
+            input_id=input_id,
+            user_id=user_id,
+        )
         return f"已创建任务 #{task_id} 查看进度: {cfg.base_url}/task/{task_id}"
     task_id = cmd["task_id"]
     if not cmd["text"].strip():
@@ -31,8 +38,15 @@ def handle_task_command(text: str, chat_id: str, user_id: str) -> str | None:
         _ensure_task_dirs(cfg.storage_root, chat_folder, task_id)
     if task and task.get("workdir"):
         os.makedirs(task["workdir"], exist_ok=True)
-    store.append_message(task_id, "user", cmd["text"], "wecom")
-    store.append_input(task_id, cmd["text"], "wecom")
+    input_id = store.append_input(task_id, cmd["text"], "wecom")
+    store.append_message(
+        task_id,
+        "user",
+        cmd["text"],
+        "wecom",
+        input_id=input_id,
+        user_id=user_id,
+    )
     return f"已追加到任务 #{task_id} 查看进度: {cfg.base_url}/task/{task_id}"
 
 
