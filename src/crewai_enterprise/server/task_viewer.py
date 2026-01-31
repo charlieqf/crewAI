@@ -307,7 +307,7 @@ def task_page(task_id: int):
             }});
           }} else {{
             const filePath = currentPath ? `${{currentPath}}/${{name}}` : name;
-            link.href = `/api/task/${{taskId}}/files/download?path=${{encodeURIComponent(filePath)}}`;
+            link.href = `/api/task/${{taskId}}/file?path=${{encodeURIComponent(filePath)}}`;
             link.textContent = name;
           }}
           filesEl.appendChild(link);
@@ -683,6 +683,24 @@ def list_task_files(task_id: int, path: str | None = None):
     return {"files": entries, "path": path or ""}
 
 
+@router.get("/api/task/{task_id}/file")
+def download_task_file_path(task_id: int, path: str):
+    if ".." in path or path.startswith("/") or path.startswith("\\"):
+        raise HTTPException(status_code=400, detail="invalid path")
+    cfg = get_task_config()
+    store = TaskStore(cfg.db_path)
+    task = store.get_task(task_id)
+    chat_id = task.get("wecom_chat_id") if task else None
+    if not chat_id:
+        raise HTTPException(status_code=404, detail="not found")
+    full_path = os.path.join(
+        cfg.storage_root, chat_id, "tasks", str(task_id), "files", path
+    )
+    if not os.path.exists(full_path) or os.path.isdir(full_path):
+        raise HTTPException(status_code=404, detail="not found")
+    return FileResponse(full_path)
+
+
 @router.get("/api/task/{task_id}/files/{filename}")
 def download_task_file(task_id: int, filename: str):
     if ".." in filename or "/" in filename or "\\" in filename:
@@ -699,21 +717,3 @@ def download_task_file(task_id: int, filename: str):
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="not found")
     return FileResponse(path)
-
-
-@router.get("/api/task/{task_id}/files/download")
-def download_task_file_path(task_id: int, path: str):
-    if ".." in path or path.startswith("/") or path.startswith("\\"):
-        raise HTTPException(status_code=400, detail="invalid path")
-    cfg = get_task_config()
-    store = TaskStore(cfg.db_path)
-    task = store.get_task(task_id)
-    chat_id = task.get("wecom_chat_id") if task else None
-    if not chat_id:
-        raise HTTPException(status_code=404, detail="not found")
-    full_path = os.path.join(
-        cfg.storage_root, chat_id, "tasks", str(task_id), "files", path
-    )
-    if not os.path.exists(full_path) or os.path.isdir(full_path):
-        raise HTTPException(status_code=404, detail="not found")
-    return FileResponse(full_path)

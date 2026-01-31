@@ -42,6 +42,6 @@ def test_task_files_directory_listing_and_download(tmp_path, monkeypatch):
     names2 = [f["name"] for f in payload2["files"]]
     assert "readme.txt" in names2
 
-    res3 = client.get(f"/api/task/{task_id}/files/download?path=docs/readme.txt")
+    res3 = client.get(f"/api/task/{task_id}/file?path=docs/readme.txt")
     assert res3.status_code == 200
     assert res3.text == "hello"
