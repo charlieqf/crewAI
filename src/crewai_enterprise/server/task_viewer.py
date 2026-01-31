@@ -362,7 +362,7 @@ def task_page(task_id: int):
 
       function refresh() {{
         loadTask();
-        loadFiles();
+        loadFiles(currentPath);
         loadLogs();
       }}
 
