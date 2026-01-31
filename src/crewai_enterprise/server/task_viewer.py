@@ -625,8 +625,14 @@ def task_list_page():
           listEl.innerHTML = '<div class="empty">No tasks yet.</div>';
           return;
         }
+        const ordered = [...items].sort((a, b) => {
+          const aTime = Date.parse(a.updated_at || '') || 0;
+          const bTime = Date.parse(b.updated_at || '') || 0;
+          if (bTime !== aTime) return bTime - aTime;
+          return (b.id || 0) - (a.id || 0);
+        });
         listEl.innerHTML = '';
-        for (const task of items) {
+        for (const task of ordered) {
           const card = document.createElement('div');
           card.className = 'item';
 
