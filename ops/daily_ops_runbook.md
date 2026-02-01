@@ -10,7 +10,7 @@ Goal: confirm services are healthy, archives are up to date, and image/PDF extra
 
 ```powershell
 ssh -i $env:USERPROFILE\.ssh\kamatera root@104.238.213.119 "systemctl is-active wecom-callback"
-ssh -i $env:USERPROFILE\.ssh\kamatera root@104.238.213.119 "ps aux | grep -E 'archive_sync_worker.py|backfill_ocr_throttled.py' | grep -v grep || true"
+ssh -i $env:USERPROFILE\.ssh\kamatera root@104.238.213.119 "pgrep -af 'archive_sync_worker.py|backfill_ocr_throttled.py'"
 ```
 
 Expected:
@@ -41,6 +41,15 @@ rm -f /tmp/query.sql
 EOF
 ```
 
+PowerShell-safe alternative without heredocs:
+```powershell
+$cmd = "sqlite3 /var/lib/wecom-callback/chat_history.db 'SELECT seq, updated_at FROM archive_cursor WHERE id = 1;'"
+ssh -i $env:USERPROFILE\.ssh\kamatera root@104.238.213.119 $cmd
+
+$cmd = "sqlite3 /var/lib/wecom-callback/chat_history.db 'SELECT MAX(created_at) FROM archived_messages;'"
+ssh -i $env:USERPROFILE\.ssh\kamatera root@104.238.213.119 $cmd
+```
+
 Interpretation:
 - The cursor `updated_at` should be close to the latest `created_at`.
 - A consistent 8‑hour offset is acceptable (Beijing vs UTC); larger gaps indicate stale sync.
@@ -48,20 +57,27 @@ Interpretation:
 If stale:
 1) Check lock + PID
 ```powershell
-ssh -i $env:USERPROFILE\.ssh\kamatera root@104.238.213.119 'if [ -f /var/lib/wecom-callback/archive_sync.lock ]; then cat /var/lib/wecom-callback/archive_sync.lock; ps -p $(cat /var/lib/wecom-callback/archive_sync.lock) -o pid,cmd; else echo "no lock"; fi'
+ssh -i $env:USERPROFILE\.ssh\kamatera root@104.238.213.119 'if [ -f /opt/wecom-callback/archive_sync.lock ]; then cat /opt/wecom-callback/archive_sync.lock; ps -p $(cat /opt/wecom-callback/archive_sync.lock) -o pid,cmd; else echo "no lock"; fi'
 ```
 2) Clear stale lock and run one-shot sync:
 ```powershell
 ssh -i $env:USERPROFILE\.ssh\kamatera root@104.238.213.119 'bash -s' <<'EOF'
 set -e
-if [ -f /var/lib/wecom-callback/archive_sync.lock ]; then
-  pid=$(cat /var/lib/wecom-callback/archive_sync.lock || true)
+if [ -f /opt/wecom-callback/archive_sync.lock ]; then
+  pid=$(cat /opt/wecom-callback/archive_sync.lock || true)
   if [ -n "$pid" ] && ! ps -p "$pid" >/dev/null 2>&1; then
-    rm -f /var/lib/wecom-callback/archive_sync.lock
+    rm -f /opt/wecom-callback/archive_sync.lock
   fi
 fi
+source /etc/wecom-callback/env
 /opt/wecom-callback/venv/bin/python /opt/wecom-callback/scripts/archive_sync_worker.py 0
 EOF
+```
+
+PowerShell-safe alternative without heredocs:
+```powershell
+$cmd = "sqlite3 /var/lib/wecom-callback/chat_storage.db 'SELECT mime_type, status, COUNT(*) FROM file_contents WHERE mime_type LIKE ''image/%'' OR mime_type = ''application/pdf'' GROUP BY mime_type, status ORDER BY mime_type, status;'"
+ssh -i $env:USERPROFILE\.ssh\kamatera root@104.238.213.119 $cmd
 ```
 
 Re-check Step 2.
@@ -98,9 +114,15 @@ $fromDate = (Get-Date).AddDays(-1).ToString('yyyy-MM-dd 00:00:00')
 ssh -i $env:USERPROFILE\.ssh\kamatera root@104.238.213.119 "nohup env OCR_TIMEOUT_SECS=30 OCR_MAX_IMAGE_BYTES=1048576 OCR_SIMPLE=true GOOGLE_VISION_ENABLED=true GOOGLE_APPLICATION_CREDENTIALS=/opt/wecom-callback/keys/google_vision.json /opt/wecom-callback/venv/bin/python /opt/wecom-callback/scripts/backfill_ocr_throttled.py 200 1 '$fromDate' >/var/log/wecom-callback/ocr_backfill.log 2>&1 &"
 ```
 
+If OCR fails with `ImageAnnotatorClient` missing or `google_vision.json` not found:
+- Ensure `/opt/wecom-callback/venv` has `google-cloud-vision` installed
+- Ensure `/opt/wecom-callback/keys/google_vision.json` exists and is readable
+
+Avoid running multiple backfills at once; keep a single `backfill_ocr_throttled.py` process.
+
 If the command returns no output for a while, it may still be running. Verify:
 ```powershell
-ssh -i $env:USERPROFILE\.ssh\kamatera root@104.238.213.119 "ps aux | grep -E 'backfill_ocr_throttled.py' | grep -v grep || true"
+ssh -i $env:USERPROFILE\.ssh\kamatera root@104.238.213.119 "pgrep -af backfill_ocr_throttled.py"
 ```
 
 Optional: recent OCR failures (images/PDFs only):

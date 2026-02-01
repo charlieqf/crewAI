@@ -10,6 +10,7 @@ Usage:
 
 Output (stdout): JSON with {"status": "ok", "new_max_seq": N} or {"status": "error", "message": "..."}
 """
+
 import os
 import sys
 import json
@@ -26,8 +27,15 @@ sys.path.insert(0, base_dir)
 
 MAX_ARCHIVE_FILE_BYTES = 5 * 1024 * 1024
 # Default to project root for lock and env
-ARCHIVE_SYNC_LOCK = os.getenv("ARCHIVE_SYNC_LOCK", os.path.join(base_dir, "archive_sync.lock"))
-ARCHIVE_INLINE_EXTRACT = os.getenv("ARCHIVE_INLINE_EXTRACT", "").strip().lower() in {"1", "true", "yes"}
+ARCHIVE_SYNC_LOCK = os.getenv(
+    "ARCHIVE_SYNC_LOCK", os.path.join(base_dir, "archive_sync.lock")
+)
+ARCHIVE_INLINE_EXTRACT = os.getenv("ARCHIVE_INLINE_EXTRACT", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+}
+
 
 def load_env(path):
     if not os.path.exists(path):
@@ -41,6 +49,7 @@ def load_env(path):
                 key, val = line.split("=", 1)
                 os.environ[key.strip()] = val.strip()
 
+
 # Load env before importing SDK
 # Try .env in current directory or project root
 env_path = os.getenv("ENV_PATH", os.path.join(base_dir, ".env"))
@@ -48,12 +57,15 @@ load_env(env_path)
 
 from src.crewai_enterprise.utils.wework_finance_sdk import WeWorkFinanceSDK
 from src.crewai_enterprise.utils.file_content_store import FileContentStore
-from src.crewai_enterprise.utils.file_extractor import compute_file_hash, extract_text_from_file
+from src.crewai_enterprise.utils.file_extractor import (
+    compute_file_hash,
+    extract_text_from_file,
+)
 from Crypto.PublicKey import RSA
 from Crypto.Cipher import PKCS1_v1_5
 import base64
 
-logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 
@@ -61,10 +73,10 @@ def init_db(db_path: str):
     """Initialize database tables if they don't exist."""
     conn = sqlite3.connect(db_path, timeout=30)
     cursor = conn.cursor()
-    
+
     # Enable WAL mode for better concurrency
     cursor.execute("PRAGMA journal_mode=WAL")
-    
+
     # Archive cursor table
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS archive_cursor (
@@ -74,7 +86,7 @@ def init_db(db_path: str):
         )
     """)
     cursor.execute("INSERT OR IGNORE INTO archive_cursor (id, seq) VALUES (1, 0)")
-    
+
     # Archived messages table
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS archived_messages (
@@ -88,7 +100,7 @@ def init_db(db_path: str):
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
-    
+
     # Chat files table
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS chat_files (
@@ -102,22 +114,23 @@ def init_db(db_path: str):
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
-    
+
     conn.commit()
     conn.close()
 
 
 def _detect_image_extension(file_bytes: bytes) -> str:
     """Detect image extension from magic bytes."""
-    if file_bytes.startswith(b'\xff\xd8\xff'):
+    if file_bytes.startswith(b"\xff\xd8\xff"):
         return "jpg"
-    elif file_bytes.startswith(b'\x89PNG\r\n\x1a\n'):
+    elif file_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
         return "png"
-    elif file_bytes.startswith(b'GIF87a') or file_bytes.startswith(b'GIF89a'):
+    elif file_bytes.startswith(b"GIF87a") or file_bytes.startswith(b"GIF89a"):
         return "gif"
-    elif file_bytes.startswith(b'RIFF') and file_bytes[8:12] == b'WEBP':
+    elif file_bytes.startswith(b"RIFF") and file_bytes[8:12] == b"WEBP":
         return "webp"
     return "jpg"  # Default fallback
+
 
 def _get_content_type(ext: str) -> str:
     """Get MIME type from extension."""
@@ -126,35 +139,38 @@ def _get_content_type(ext: str) -> str:
         "jpeg": "image/jpeg",
         "png": "image/png",
         "gif": "image/gif",
-        "webp": "image/webp"
+        "webp": "image/webp",
     }
     return types.get(ext, "application/octet-stream")
+
 
 def upload_to_qiniu(file_bytes: bytes, filename: str, content_type: str = None) -> str:
     """Upload file bytes to Qiniu and return the URL."""
     from qiniu import Auth, put_data
-    
+
     access_key = os.getenv("QINIU_ACCESS_KEY")
     secret_key = os.getenv("QINIU_SECRET_KEY")
     bucket = os.getenv("QINIU_BUCKET")
     domain = os.getenv("QINIU_DOMAIN")
-    
+
     if not all([access_key, secret_key, bucket, domain]):
         logger.error("Qiniu credentials not configured")
         return None
-    
+
     # Generate unique key
     file_hash = hashlib.md5(file_bytes).hexdigest()[:8]
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     key = f"archive/{timestamp}_{file_hash}_{filename}"
-    
+
     q = Auth(access_key, secret_key)
     token = q.upload_token(bucket, key)
-    
+
     # Pass params to put_data if content_type is provided
     # The put_data signature: put_data(up_token, key, data, params=None, mime_type='application/octet-stream', check_crc=False, progress_handler=None, etag=None)
-    ret, info = put_data(token, key, file_bytes, mime_type=content_type or 'application/octet-stream')
-    
+    ret, info = put_data(
+        token, key, file_bytes, mime_type=content_type or "application/octet-stream"
+    )
+
     if info.status_code == 200:
         url = f"https://{domain}/{key}"
         logger.info(f"Uploaded to Qiniu: {url}")
@@ -162,8 +178,6 @@ def upload_to_qiniu(file_bytes: bytes, filename: str, content_type: str = None) 
     else:
         logger.error(f"Qiniu upload failed: {info}")
         return None
-
-
 
 
 def _extract_and_store(
@@ -220,24 +234,24 @@ def process_file_message(sdk, msg: dict, cursor) -> bool:
                 f"Skipping large file {filename} ({file_size} bytes) > {MAX_ARCHIVE_FILE_BYTES} bytes"
             )
             return False
-        
+
         logger.info(f"Downloading file: {filename} ({file_size} bytes)")
-        
+
         # Download file using SDK
         file_bytes = sdk.get_media_data(sdkfileid)
         if not file_bytes:
             logger.error(f"Failed to download file {sdkfileid}")
             return False
-        
+
         logger.info(f"Downloaded {len(file_bytes)} bytes")
-        
+
         mime_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
 
         # Upload to Qiniu
         file_uri = upload_to_qiniu(file_bytes, filename, content_type=mime_type)
         if not file_uri:
             return False
-        
+
         # Save to database using existing cursor (Beijing time)
         msg_time_ms = msg.get("msgtime", 0)
         if msg_time_ms:
@@ -245,22 +259,27 @@ def process_file_message(sdk, msg: dict, cursor) -> bool:
             dt_beijing = dt_utc.astimezone(timezone(timedelta(hours=8)))
             created_at_str = dt_beijing.strftime("%Y-%m-%d %H:%M:%S")
         else:
-            created_at_str = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
+            created_at_str = datetime.now(timezone(timedelta(hours=8))).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
 
-        cursor.execute("""
+        cursor.execute(
+            """
             INSERT OR REPLACE INTO chat_files 
             (msgid, room_id, sender_id, filename, file_size, file_uri, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (
-            msg.get("msgid"),
-            msg.get("roomid", ""),
-            msg.get("from", ""),
-            filename,
-            len(file_bytes),
-            file_uri,
-            created_at_str,
-        ))
-        
+        """,
+            (
+                msg.get("msgid"),
+                msg.get("roomid", ""),
+                msg.get("from", ""),
+                filename,
+                len(file_bytes),
+                file_uri,
+                created_at_str,
+            ),
+        )
+
         if ARCHIVE_INLINE_EXTRACT:
             # Inline extraction can crash on some PDFs; keep it optional.
             try:
@@ -277,7 +296,7 @@ def process_file_message(sdk, msg: dict, cursor) -> bool:
 
         logger.info(f"Saved file record: {filename} -> {file_uri}")
         return True
-        
+
     except Exception as e:
         logger.error(f"Error processing file: {e}")
         return False
@@ -304,25 +323,25 @@ def process_image_message(sdk, msg: dict, cursor) -> bool:
             return False
 
         logger.info(f"Downloading image: {msgid} ({file_size} bytes)")
-        
+
         # Download image using SDK
         image_bytes = sdk.get_media_data(sdkfileid)
         if not image_bytes:
             logger.error(f"Failed to download image {sdkfileid}")
             return False
-        
+
         # Detect extension and content type
         ext = _detect_image_extension(image_bytes)
         content_type = _get_content_type(ext)
         filename = f"{msgid}.{ext}"
-        
+
         logger.info(f"Downloaded {len(image_bytes)} bytes, type={content_type}")
-        
+
         # Upload to Qiniu
         file_uri = upload_to_qiniu(image_bytes, filename, content_type=content_type)
         if not file_uri:
             return False
-        
+
         # Save to database using existing cursor (Beijing time)
         msg_time_ms = msg.get("msgtime", 0)
         if msg_time_ms:
@@ -330,22 +349,27 @@ def process_image_message(sdk, msg: dict, cursor) -> bool:
             dt_beijing = dt_utc.astimezone(timezone(timedelta(hours=8)))
             created_at_str = dt_beijing.strftime("%Y-%m-%d %H:%M:%S")
         else:
-            created_at_str = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
+            created_at_str = datetime.now(timezone(timedelta(hours=8))).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
 
-        cursor.execute("""
+        cursor.execute(
+            """
             INSERT OR REPLACE INTO chat_files 
             (msgid, room_id, sender_id, filename, file_size, file_uri, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (
-            msgid,
-            msg.get("roomid", ""),
-            msg.get("from", ""),
-            filename,
-            len(image_bytes),
-            file_uri,
-            created_at_str,
-        ))
-        
+        """,
+            (
+                msgid,
+                msg.get("roomid", ""),
+                msg.get("from", ""),
+                filename,
+                len(image_bytes),
+                file_uri,
+                created_at_str,
+            ),
+        )
+
         if ARCHIVE_INLINE_EXTRACT:
             # Inline extraction can crash on some PDFs; keep it optional.
             try:
@@ -362,7 +386,7 @@ def process_image_message(sdk, msg: dict, cursor) -> bool:
 
         logger.info(f"Saved image record: {filename} -> {file_uri}")
         return True
-        
+
     except Exception as e:
         logger.error(f"Error processing image: {e}")
         return False
@@ -376,7 +400,12 @@ def sync(start_seq: int):
             os.write(lock_fd, str(os.getpid()).encode("utf-8"))
         except FileExistsError:
             logger.warning("Archive sync already running; skipping new run.")
-            return {"status": "ok", "new_max_seq": start_seq, "processed": 0, "files": 0}
+            return {
+                "status": "ok",
+                "new_max_seq": start_seq,
+                "processed": 0,
+                "files": 0,
+            }
         except Exception as e:
             return {"status": "error", "message": f"Failed to acquire sync lock: {e}"}
 
@@ -388,13 +417,18 @@ def sync(start_seq: int):
         )
         db_path = os.getenv("ARCHIVE_DB_PATH")
         if not db_path:
-            db_path = os.getenv("CHAT_DB_PATH", "/var/lib/wecom-callback/chat_history.db")
+            db_path = os.getenv(
+                "CHAT_DB_PATH", "/var/lib/wecom-callback/chat_history.db"
+            )
             logger.warning(
                 f"ARCHIVE_DB_PATH not set, falling back to {db_path}. Contention may occur."
             )
 
         if not corp_id or not secret:
-            return {"status": "error", "message": "Missing WECOM_CORP_ID or ARCHIVE_SECRET"}
+            return {
+                "status": "error",
+                "message": "Missing WECOM_CORP_ID or ARCHIVE_SECRET",
+            }
 
         # Initialize database
         init_db(db_path)
@@ -420,7 +454,12 @@ def sync(start_seq: int):
         # Pull messages
         chat_data = sdk.get_chat_data(start_seq, limit=100)
         if not chat_data:
-            return {"status": "ok", "new_max_seq": start_seq, "processed": 0, "files": 0}
+            return {
+                "status": "ok",
+                "new_max_seq": start_seq,
+                "processed": 0,
+                "files": 0,
+            }
 
         logger.info(
             f"[SYNC] Received {len(chat_data)} messages. "
@@ -459,7 +498,9 @@ def sync(start_seq: int):
                 random_key = random_key_bytes.decode("utf-8")
 
                 # SDK Decrypt
-                decrypted_json = sdk.decrypt_data(random_key, msg.get("encrypt_chat_msg", ""))
+                decrypted_json = sdk.decrypt_data(
+                    random_key, msg.get("encrypt_chat_msg", "")
+                )
                 if not decrypted_json:
                     logger.warning(f"SDK decryption failed for msg seq={msg_seq}")
                     continue
@@ -468,10 +509,11 @@ def sync(start_seq: int):
                 msg_type = decrypted_msg.get("msgtype", "unknown")
                 sender_id = decrypted_msg.get("from", "")
 
-                # [FIX] Debugging Archive Data Corruption: 
-                # Filter out "polluting" messages like internal events, switch_model, or missing sender_id.
-                if not sender_id or msg_type == "unknown" or "action" in decrypted_msg:
-                    logger.info(f"Filtering out noise/corrupted message (type: {msg_type}, action: {decrypted_msg.get('action')}) seq={msg_seq}")
+                # Filter out messages missing sender or unknown types.
+                if not sender_id or msg_type == "unknown":
+                    logger.info(
+                        f"Filtering out noise/corrupted message (type: {msg_type}, action: {decrypted_msg.get('action')}) seq={msg_seq}"
+                    )
                     continue
 
                 # Save message to database
@@ -480,12 +522,16 @@ def sync(start_seq: int):
                     msg_time_ms = decrypted_msg.get("msgtime", 0)
                     if msg_time_ms:
                         # WeCom msgtime is in milliseconds
-                        dt_utc = datetime.fromtimestamp(msg_time_ms / 1000.0, tz=timezone.utc)
+                        dt_utc = datetime.fromtimestamp(
+                            msg_time_ms / 1000.0, tz=timezone.utc
+                        )
                         # Offset to Beijing Time (UTC+8)
                         dt_beijing = dt_utc.astimezone(timezone(timedelta(hours=8)))
                         created_at_str = dt_beijing.strftime("%Y-%m-%d %H:%M:%S")
                     else:
-                        created_at_str = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
+                        created_at_str = datetime.now(
+                            timezone(timedelta(hours=8))
+                        ).strftime("%Y-%m-%d %H:%M:%S")
 
                     cursor.execute(
                         """
@@ -534,13 +580,19 @@ def sync(start_seq: int):
                             if it_type == "image":
                                 if process_image_message(sdk, fake_msg, cursor):
                                     files_processed += 1
-                                    logger.info(f"Successfully processed mixed image {idx}")
+                                    logger.info(
+                                        f"Successfully processed mixed image {idx}"
+                                    )
                             elif it_type == "file":
                                 if process_file_message(sdk, fake_msg, cursor):
                                     files_processed += 1
-                                    logger.info(f"Successfully processed mixed file {idx}")
+                                    logger.info(
+                                        f"Successfully processed mixed file {idx}"
+                                    )
                         except Exception as it_e:
-                            logger.error(f"Failed to process mixed item {idx} for seq {msg_seq}: {it_e}")
+                            logger.error(
+                                f"Failed to process mixed item {idx} for seq {msg_seq}: {it_e}"
+                            )
 
                 logger.info(f"Processed msg seq={msg_seq} type={msg_type}")
                 processed += 1
@@ -577,6 +629,7 @@ def sync(start_seq: int):
             except OSError:
                 pass
 
+
 if __name__ == "__main__":
     try:
         start_seq = int(sys.argv[1]) if len(sys.argv) > 1 else 0
@@ -584,4 +637,8 @@ if __name__ == "__main__":
         print(json.dumps(result))
     except Exception as e:
         logger.error(f"Fatal error in main: {e}")
-        print(json.dumps({"status": "error", "message": str(e), "processed": 0, "files": 0}))
+        print(
+            json.dumps(
+                {"status": "error", "message": str(e), "processed": 0, "files": 0}
+            )
+        )
