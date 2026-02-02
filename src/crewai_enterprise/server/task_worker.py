@@ -1,12 +1,14 @@
 import os
 import json
 import os
+import re
 import time
 from datetime import datetime, timedelta, timezone
 
 from src.crewai_enterprise.server.task_config import get_task_config
 from src.crewai_enterprise.server.task_store import TaskStore
 from src.crewai_enterprise.server.opencode_client import OpenCodeClient
+
 from src.crewai_enterprise.server.opencode_storage_reader import read_new_messages
 from src.crewai_enterprise.server.opencode_file_sync import mirror_session_files
 from src.crewai_enterprise.utils.wecom_context import (
@@ -119,6 +121,11 @@ class TaskWorker:
         self._write_worker_log(task_id, chat_id, f"session {session_id} ready")
         skills = _load_task_skills()
         prompt_text = _build_prompt(skills, inp.get("content", ""))
+        guard = (
+            "IMPORTANT: If you claim a file was saved, it must exist on disk in the workdir. "
+            "If you cannot write the file, say so clearly."
+        )
+        prompt_text = guard + "\n\n" + prompt_text
         if context_block:
             prompt_text = context_block + "\n\n" + prompt_text
         try:
@@ -194,8 +201,55 @@ class TaskWorker:
             )
             if copied:
                 self._write_worker_log(task_id, chat_id, f"synced {len(copied)} files")
+            self._verify_claimed_files(task_id, inp["id"], files_dir, workdir)
         self.store.mark_task_done_if_idle(task_id)
         return True
+
+    def _verify_claimed_files(
+        self,
+        task_id: int,
+        input_id: int,
+        files_dir: str,
+        workdir: str | None,
+    ) -> None:
+        messages = self.store.list_messages(task_id)
+        latest = None
+        for msg in reversed(messages):
+            if msg.get("input_id") == input_id and msg.get("role") == "assistant":
+                latest = msg
+                break
+        if not latest:
+            return
+        text = latest.get("content") or ""
+        if not re.search(r"已写入|written|saved|path", text, re.IGNORECASE):
+            return
+        filenames = re.findall(
+            r"([A-Za-z0-9._-]+\.(?:html|md|txt|json|csv|png|jpg|jpeg|pdf))",
+            text,
+        )
+        if not filenames:
+            return
+        missing = []
+        for name in filenames:
+            file_in_files = os.path.join(files_dir, name)
+            file_in_workdir = os.path.join(workdir, name) if workdir else None
+            if os.path.exists(file_in_files):
+                continue
+            if file_in_workdir and os.path.exists(file_in_workdir):
+                continue
+            missing.append(name)
+        if missing:
+            warning = (
+                "File claim verification failed. Claimed files not found: "
+                + ", ".join(missing)
+            )
+            self.store.append_message(
+                task_id,
+                "system",
+                warning,
+                "file_check",
+                input_id=input_id,
+            )
 
     def _write_worker_log(
         self, task_id: int, chat_id: str | None, message: str

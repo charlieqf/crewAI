@@ -15,7 +15,9 @@ class OpenCodeClient:
         self.base_url = base_url.rstrip("/")
         self.session = requests.Session()
         self.retry_session = requests.Session()  # Session WITH retries
-        self.default_agent = self._normalize_agent(os.getenv("OPENCODE_AGENT", "sisyphus"))
+        self.default_agent = self._normalize_agent(
+            os.getenv("OPENCODE_AGENT", "sisyphus")
+        )
         self.default_model = self._parse_model(
             os.getenv("OPENCODE_MODEL") or "",
             os.getenv("OPENCODE_MODEL_PROVIDER") or "",
@@ -110,9 +112,7 @@ class OpenCodeClient:
             for part in msg.get("parts", []) if isinstance(msg, dict) else []:
                 if isinstance(part, dict):
                     part_types.append(part.get("type"))
-            summary.append(
-                f"{role} id={mid} parent={parent} parts={part_types}"
-            )
+            summary.append(f"{role} id={mid} parent={parent} parts={part_types}")
         return " | ".join(summary)
 
     def prompt_async(
@@ -137,6 +137,11 @@ class OpenCodeClient:
         self._attach_agent(body, self._resolve_agent(agent))
         self._attach_model(body, self._resolve_model(agent))
         params = {"directory": directory} if directory else None
+        logger.info(
+            "[OPENCODE_CLIENT] prompt_interactive agent=%s model=%s",
+            body.get("agent"),
+            body.get("model"),
+        )
 
         try:
             response = self.retry_session.post(
@@ -348,7 +353,15 @@ class OpenCodeClient:
             response.raise_for_status()
             logger.info(f"[OPENCODE_CLIENT] Aborted session {session_id}")
         except Exception as e:
-            logger.warning(f"[OPENCODE_CLIENT] Failed to abort session {session_id}: {e}")
+            logger.warning(
+                f"[OPENCODE_CLIENT] Failed to abort session {session_id}: {e}"
+            )
+
+    def get_config(self) -> Dict[str, Any]:
+        url = f"{self.base_url}/config"
+        response = self.session.get(url, timeout=15)
+        response.raise_for_status()
+        return response.json()
 
     def prompt_interactive_with_polling(
         self,
@@ -385,6 +398,11 @@ class OpenCodeClient:
         self._attach_agent(body, self._resolve_agent(agent))
         self._attach_model(body, self._resolve_model(agent))
         params = {"directory": directory} if directory else None
+        logger.info(
+            "[OPENCODE_CLIENT] prompt_interactive_with_polling agent=%s model=%s",
+            body.get("agent"),
+            body.get("model"),
+        )
 
         # Get initial message count - we need to track what messages existed BEFORE our request
         try:
@@ -431,7 +449,9 @@ class OpenCodeClient:
                             err_msg = ""
                             if isinstance(err, dict):
                                 data = err.get("data", {})
-                                err_msg = data.get("message") or err.get("message") or ""
+                                err_msg = (
+                                    data.get("message") or err.get("message") or ""
+                                )
                             if not err_msg:
                                 err_msg = "OpenCode returned an error."
                             yield {"type": "error", "message": err_msg}
@@ -510,7 +530,12 @@ class OpenCodeClient:
                 return True
             if len(stripped) >= min_complete_len:
                 return False
-            has_structure = ("\n" in stripped) or ("##" in stripped) or ("- " in stripped) or ("1." in stripped)
+            has_structure = (
+                ("\n" in stripped)
+                or ("##" in stripped)
+                or ("- " in stripped)
+                or ("1." in stripped)
+            )
             if has_structure:
                 return False
             if any(key in stripped for key in leadin_keywords):
@@ -560,7 +585,11 @@ class OpenCodeClient:
                 if role == "assistant" and our_message_seen:
                     info = msg.get("info", {})
                     parent_id = info.get("parentID") or info.get("parentId")
-                    if sync_user_message_id and parent_id and parent_id != sync_user_message_id:
+                    if (
+                        sync_user_message_id
+                        and parent_id
+                        and parent_id != sync_user_message_id
+                    ):
                         # Ignore assistant messages that belong to earlier turns
                         continue
                     if info.get("error"):
@@ -616,7 +645,9 @@ class OpenCodeClient:
                 if is_idle and last_text:
                     if _looks_incomplete(last_text):
                         if incomplete_idle_deadline is None:
-                            incomplete_idle_deadline = time.time() + incomplete_idle_grace
+                            incomplete_idle_deadline = (
+                                time.time() + incomplete_idle_grace
+                            )
                         if time.time() < incomplete_idle_deadline:
                             logger.info(
                                 "[OPENCODE_CLIENT] Session idle but response looks incomplete; continue polling briefly"
@@ -632,9 +663,15 @@ class OpenCodeClient:
                 if last_text and first_response_time:
                     stable_duration = time.time() - first_response_time
                     text_len = len(last_text.strip())
-                    ends_with_colon = last_text.strip().endswith(":") or last_text.strip().endswith("：")
+                    ends_with_colon = last_text.strip().endswith(
+                        ":"
+                    ) or last_text.strip().endswith("：")
                     if stable_duration > response_stable_timeout:
-                        if text_len < min_stable_text_len or ends_with_colon or _looks_incomplete(last_text):
+                        if (
+                            text_len < min_stable_text_len
+                            or ends_with_colon
+                            or _looks_incomplete(last_text)
+                        ):
                             logger.info(
                                 "[OPENCODE_CLIENT] Stable but too short/looks incomplete; continue polling "
                                 f"len={text_len} ends_with_colon={ends_with_colon}"

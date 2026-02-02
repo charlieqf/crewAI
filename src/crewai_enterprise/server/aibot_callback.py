@@ -925,6 +925,20 @@ async def _call_opencode_async(
             result_text = ""
             logger.info(f"[OPENCODE] Starting prompt for session={session_uuid}")
             opencode_agent = _get_opencode_agent()
+            try:
+                config = opencode_client.get_config()
+                agent_cfg = config.get("agent", {}) if isinstance(config, dict) else {}
+                agent_info = agent_cfg.get(opencode_agent or "", {})
+                model_info = (
+                    agent_info.get("model") if isinstance(agent_info, dict) else None
+                )
+                logger.info(
+                    "[OPENCODE] Using agent=%s model=%s",
+                    opencode_agent,
+                    model_info,
+                )
+            except Exception as e:
+                logger.warning(f"[OPENCODE] Failed to read config for model: {e}")
             parent_id: str | None = None
             try:
                 existing = opencode_client.get_session_messages(session_uuid)
