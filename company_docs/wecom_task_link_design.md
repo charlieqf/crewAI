@@ -85,15 +85,7 @@ TaskMessage {
 ```
 
 ### 4.3 TaskEvent 表（可选）
-```
-TaskEvent {
-  id: int
-  task_id: int
-  type: string       # status/log/error
-  payload: text
-  created_at: datetime
-}
-```
+已决定暂不实现。当前仅保留 TaskMessage 与 TaskInput。
 
 ### 4.4 TaskInput 表（推荐）
 用于串行化 `/task 1234 <补充>`，避免和正在执行的 worker 竞争。
@@ -137,10 +129,7 @@ body: { role, content, source }
 ```
 
 ### 5.5 文件写入（v1.5，非 v1 必需）
-```
-POST /api/task/{id}/file
-body: { filename, content }
-```
+已决定暂不实现；当前仅支持任务文件目录的下载/查看。
 
 ## 6. 任务执行流程
 
@@ -219,8 +208,8 @@ OpenCode 在 Kamatera 本地持久化 session 到：
 **第一版采用此方式**：
 1. 任务执行器轮询消息目录（按文件时间/文件名排序）。
 2. 对每个 assistant message，读取其 `part` 目录。
-3. 拼接 `type == "text"` 的内容，追加到 TaskMessage / output.log。
-4. 使用 `last_seen_message_id` 去重，避免重复写入。
+3. 拼接 `type == "text"` 的内容，追加到 TaskMessage。
+4. 使用 `last_seen_message_file` 去重（按存储文件名）。
 
 **优点**：实现最快，不改 OpenCode。  
 **缺点**：耦合 OpenCode 内部存储格式，升级需复核。
@@ -232,7 +221,7 @@ OpenCode 在 Kamatera 本地持久化 session 到：
 
 ### 输出数据源（低成本选择）
 - **单一真源**：以 `TaskMessage` 为准。
-- `output.log` 仅作为顺序追加日志（可选），不作为 UI 的主数据源。
+- `output.log` 暂不使用；仅保留 `worker.log` 作为执行器日志。
 
 ### 配置项（低成本但必须外置）
 - `TASK_BASE_URL`（如 `http://104.238.213.119:8080`）
@@ -263,7 +252,7 @@ OpenCode 在 Kamatera 本地持久化 session 到：
 {TASK_STORAGE_ROOT}/
   task-1234/
     meta.json            # 任务元信息（session_id、创建人、标题等）
-    output.log           # 原始输出流（按时间追加）
+    worker.log           # 执行器日志（可选）
     files/               # 产出文件目录
       report.md
       diagram.mmd
@@ -272,7 +261,7 @@ OpenCode 在 Kamatera 本地持久化 session 到：
 
 ### 文件写入原则
 - **所有产出物落盘**到 `files/`。
-- 原始输出流追加写入 `output.log`，保持完整、可追溯。
+- 原始输出不再写 `output.log`，以 TaskMessage 为准。
 - 文件名避免冲突：使用时间戳或递增序号（如 `20260129-001-report.md`）。
 - **文件名安全规则（低成本）**：只允许 `[A-Za-z0-9._-]`，其他替换为 `_`，并禁止 `../`。
 
@@ -340,7 +329,7 @@ OpenCode 在 Kamatera 本地持久化 session 到：
    - `POST /api/task/{id}/append`
    - `GET /api/task/{id}`
    - `POST /api/task/{id}/output`
-   - `POST /api/task/{id}/file`（v1.5）
+    - `POST /api/task/{id}/file`（v1.5，暂不实现）
 3. 实现 Task ID 生成（自增或雪花）。
 4. 基础日志（创建/追加/输出）。
 
@@ -373,7 +362,7 @@ OpenCode 在 Kamatera 本地持久化 session 到：
 ### E. 任务文件管理
 1. 任务创建时初始化目录 `/var/lib/wecom-tasks/task-{id}`。
 2. `meta.json` 保存 session_id、创建人、标题。
-3. 原始输出追加写入 `output.log`。
+3. 原始输出不写 `output.log`，以 TaskMessage 为主。
 4. 产出文件写入 `files/`。
 
 ---
@@ -452,14 +441,7 @@ def append_output(task_id, body):
 ```
 
 ### 12.5 伪代码：写入文件
-```python
-def write_file(task_id, body):
-    task_dir = f"{TASK_STORAGE_ROOT}/task-{task_id}/files"
-    ensure_dir(task_dir)
-    path = safe_join(task_dir, sanitize_filename(body.filename))
-    write_text(path, body.content)
-    return {"ok": True}
-```
+已决定暂不实现；如需写文件由任务执行器直接写入 `files/`。
 
 ---
 
@@ -559,9 +541,7 @@ CREATE INDEX idx_task_message_task_time ON task_message(task_id, created_at);
 ```
 
 ### 16.3 Task（补充字段）
-```sql
-ALTER TABLE task ADD COLUMN last_seen_message_id TEXT;
-```
+当前使用 `last_seen_message_file`（存储文件名）而非 `last_seen_message_id`。
 
 ---
 
