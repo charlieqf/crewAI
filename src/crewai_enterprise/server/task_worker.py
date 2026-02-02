@@ -124,6 +124,16 @@ class TaskWorker:
             context_block += "Use this context for background only.\n"
         session_id = self.store.ensure_session(task_id, self.client, workdir)
         self._write_worker_log(task_id, chat_id, f"session {session_id} ready")
+        try:
+            config = self.client.get_config()
+            agent_cfg = config.get("agent", {}) if isinstance(config, dict) else {}
+            agent_info = agent_cfg.get(self.client.default_agent or "", {})
+            model_info = (
+                agent_info.get("model") if isinstance(agent_info, dict) else None
+            )
+            self._write_worker_log(task_id, chat_id, f"opencode model: {model_info}")
+        except Exception as exc:
+            self._write_worker_log(task_id, chat_id, f"model lookup failed: {exc}")
         skills = _load_task_skills()
         prompt_text = _build_prompt(skills, inp.get("content", ""))
         guard = (
