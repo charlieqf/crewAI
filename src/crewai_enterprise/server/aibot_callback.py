@@ -901,7 +901,14 @@ async def _call_opencode_async(
         if not safe_content:
             safe_content = "(empty message)"
 
-        parts: list[dict[str, Any]] = [{"type": "text", "text": safe_content}]
+        lang_guard = (
+            "IMPORTANT: Reply in Chinese. Technical terms that are commonly written in English "
+            "may remain in English. The only exception is a leading line like "
+            "'Using skill: save-to-workdir', which may remain in English."
+        )
+        parts: list[dict[str, Any]] = [
+            {"type": "text", "text": lang_guard + "\n\n" + safe_content}
+        ]
         if quoted_content:
             parts.append(
                 {

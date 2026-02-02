@@ -130,7 +130,12 @@ class TaskWorker:
             "IMPORTANT: If you claim a file was saved, it must exist on disk in the workdir. "
             "If you cannot write the file, say so clearly."
         )
-        prompt_text = guard + "\n\n" + prompt_text
+        lang_guard = (
+            "IMPORTANT: Reply in Chinese. Technical terms that are commonly written in English "
+            "may remain in English. The only exception is a leading line like "
+            "'Using skill: save-to-workdir', which may remain in English."
+        )
+        prompt_text = guard + "\n" + lang_guard + "\n\n" + prompt_text
         if context_block:
             prompt_text = context_block + "\n\n" + prompt_text
         try:
