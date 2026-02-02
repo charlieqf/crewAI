@@ -48,3 +48,13 @@ def test_handle_task_create_sets_workdir(monkeypatch, tmp_path):
     expected = workdir_root / str(task_id)
     assert task["workdir"] == str(expected)
     assert expected.is_dir()
+
+
+def test_handle_task_reply_includes_context_ack(monkeypatch, tmp_path):
+    monkeypatch.setenv("TASK_DB_PATH", str(tmp_path / "tasks.db"))
+    monkeypatch.setenv("TASK_BASE_URL", "http://tasks")
+    res = handle_task_command(
+        "/task /context:1d do something", chat_id="room", user_id="u1"
+    )
+    assert res is not None
+    assert "已包含" in res

@@ -48,6 +48,8 @@ class TaskStore:
                     status TEXT NOT NULL DEFAULT 'pending',
                     content TEXT NOT NULL,
                     source TEXT NOT NULL,
+                    context_source TEXT,
+                    context_window INTEGER,
                     FOREIGN KEY (task_id) REFERENCES task(id)
                 );
                 CREATE INDEX IF NOT EXISTS idx_task_input_task_status
@@ -58,6 +60,7 @@ class TaskStore:
             )
             self._ensure_task_columns(conn)
             self._ensure_task_message_columns(conn)
+            self._ensure_task_input_columns(conn)
 
     @staticmethod
     def _ensure_task_columns(conn: sqlite3.Connection) -> None:
@@ -74,6 +77,16 @@ class TaskStore:
             conn.execute("ALTER TABLE task_message ADD COLUMN input_id INTEGER")
         if "user_id" not in cols:
             conn.execute("ALTER TABLE task_message ADD COLUMN user_id TEXT")
+
+    @staticmethod
+    def _ensure_task_input_columns(conn: sqlite3.Connection) -> None:
+        cols = {
+            row[1] for row in conn.execute("PRAGMA table_info(task_input)").fetchall()
+        }
+        if "context_source" not in cols:
+            conn.execute("ALTER TABLE task_input ADD COLUMN context_source TEXT")
+        if "context_window" not in cols:
+            conn.execute("ALTER TABLE task_input ADD COLUMN context_window INTEGER")
 
     def create_task(self, wecom_chat_id: str, wecom_user_id: str, title: str) -> int:
         with self.connect() as conn:
@@ -112,11 +125,27 @@ class TaskStore:
                 (task_id,),
             )
 
-    def append_input(self, task_id: int, content: str, source: str) -> int:
+    def append_input(
+        self,
+        task_id: int,
+        content: str,
+        source: str,
+        context_source: str | None = None,
+        context_window: int | None = None,
+    ) -> int:
         with self.connect() as conn:
             cur = conn.execute(
-                "INSERT INTO task_input(task_id, content, source) VALUES (?, ?, ?)",
-                (task_id, content, source),
+                """
+                INSERT INTO task_input(
+                    task_id,
+                    content,
+                    source,
+                    context_source,
+                    context_window
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (task_id, content, source, context_source, context_window),
             )
             conn.execute(
                 "UPDATE task SET status='queued', updated_at=CURRENT_TIMESTAMP WHERE id=?",
@@ -127,6 +156,14 @@ class TaskStore:
                 raise ValueError("Failed to append input")
             assert last_id is not None
             return int(last_id)
+
+    def get_input(self, input_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM task_input WHERE id=?",
+                (input_id,),
+            ).fetchone()
+        return dict(row) if row else None
 
     def set_workdir(self, task_id: int, workdir: str) -> None:
         with self.connect() as conn:

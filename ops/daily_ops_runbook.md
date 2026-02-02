@@ -125,6 +125,11 @@ If the command returns no output for a while, it may still be running. Verify:
 ssh -i $env:USERPROFILE\.ssh\kamatera root@104.238.213.119 "pgrep -af backfill_ocr_throttled.py"
 ```
 
+### 4) Task /context notes
+
+- `/context:<window>` attaches WeCom context to a task input and stores raw messages under `files/context/wecom-<timestamp>.json`.
+- Task page shows a short context summary (time range + first/last message) with a download link to the raw file.
+
 Optional: recent OCR failures (images/PDFs only):
 ```powershell
 ssh -i $env:USERPROFILE\.ssh\kamatera root@104.238.213.119 'bash -s' <<'EOF'

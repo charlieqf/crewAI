@@ -26,6 +26,13 @@
       查看进度: {TASK_BASE_URL}/task/1234
 ```
 
+支持上下文参数（可选）：
+```
+用户: /task /context:1d 设计录音文件同步状态机
+系统: 已创建任务 #1234
+      查看进度: {TASK_BASE_URL}/task/1234（已包含 2026-02-01 00:00 至 2026-02-02 00:00 的聊天上下文）
+```
+
 ### 2.2 任务内追加问题（保持同一任务）
 ```
 用户: /task 1234 补充：手机端需要离线状态
@@ -219,8 +226,8 @@ OpenCode 在 Kamatera 本地持久化 session 到：
 **第一版采用此方式**：
 1. 任务执行器轮询消息目录（按文件时间/文件名排序）。
 2. 对每个 assistant message，读取其 `part` 目录。
-3. 拼接 `type == "text"` 的内容，追加到 TaskMessage / output.log。
-4. 使用 `last_seen_message_id` 去重，避免重复写入。
+3. 拼接 `type == "text"` 的内容，追加到 TaskMessage。
+4. 使用 `last_seen_message_file` 去重（按存储文件名）。
 
 **优点**：实现最快，不改 OpenCode。  
 **缺点**：耦合 OpenCode 内部存储格式，升级需复核。
@@ -232,7 +239,7 @@ OpenCode 在 Kamatera 本地持久化 session 到：
 
 ### 输出数据源（低成本选择）
 - **单一真源**：以 `TaskMessage` 为准。
-- `output.log` 仅作为顺序追加日志（可选），不作为 UI 的主数据源。
+- `output.log` 暂不使用；仅保留 `worker.log` 作为执行器日志。
 
 ### 配置项（低成本但必须外置）
 - `TASK_BASE_URL`（如 `http://104.238.213.119:8080`）
@@ -263,7 +270,7 @@ OpenCode 在 Kamatera 本地持久化 session 到：
 {TASK_STORAGE_ROOT}/
   task-1234/
     meta.json            # 任务元信息（session_id、创建人、标题等）
-    output.log           # 原始输出流（按时间追加）
+    worker.log           # 执行器日志（可选）
     files/               # 产出文件目录
       report.md
       diagram.mmd
@@ -272,7 +279,7 @@ OpenCode 在 Kamatera 本地持久化 session 到：
 
 ### 文件写入原则
 - **所有产出物落盘**到 `files/`。
-- 原始输出流追加写入 `output.log`，保持完整、可追溯。
+- 原始输出不再写 `output.log`，以 TaskMessage 为准。
 - 文件名避免冲突：使用时间戳或递增序号（如 `20260129-001-report.md`）。
 - **文件名安全规则（低成本）**：只允许 `[A-Za-z0-9._-]`，其他替换为 `_`，并禁止 `../`。
 
@@ -281,6 +288,10 @@ OpenCode 在 Kamatera 本地持久化 session 到：
 - 直接读取 `files/` 目录并生成链接。
 - 暂不处理权限（后续补）。
 
+### 上下文文件（WeCom）
+- 上下文原始消息保存到 `files/context/wecom-<timestamp>.json`。
+- 任务页仅展示摘要（时间范围、数量、首尾消息），可点击链接下载原始文件。
+
 ## 8. WeCom 命令规范
 
 ### 8.1 创建任务
@@ -288,9 +299,20 @@ OpenCode 在 Kamatera 本地持久化 session 到：
 /task <问题>
 ```
 
+### 8.1.1 上下文参数（可选）
+```
+/task /context:<window> <问题>
+```
+`window` 支持：`6h`、`1d`、`2w`，表示最近 6 小时 / 1 天 / 2 周。
+
 ### 8.2 追加任务
 ```
 /task <task_id> <补充内容>
+```
+
+支持缩写：
+```
+/task<task_id> <补充内容>
 ```
 
 ### 8.3 返回文案（统一简洁）
@@ -373,7 +395,7 @@ OpenCode 在 Kamatera 本地持久化 session 到：
 ### E. 任务文件管理
 1. 任务创建时初始化目录 `/var/lib/wecom-tasks/task-{id}`。
 2. `meta.json` 保存 session_id、创建人、标题。
-3. 原始输出追加写入 `output.log`。
+3. 原始输出不写 `output.log`，以 TaskMessage 为主。
 4. 产出文件写入 `files/`。
 
 ---
