@@ -4,6 +4,7 @@ import os
 import re
 import time
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from src.crewai_enterprise.server.task_config import get_task_config
 from src.crewai_enterprise.server.task_store import TaskStore
@@ -13,6 +14,7 @@ from src.crewai_enterprise.server.opencode_storage_reader import read_new_messag
 from src.crewai_enterprise.server.opencode_file_sync import mirror_session_files
 from src.crewai_enterprise.utils.wecom_context import (
     build_context_summary,
+    build_context_transcript,
     fetch_wecom_chat_context,
 )
 
@@ -45,7 +47,7 @@ class TaskWorker:
         context_block = None
         if chat_id and inp.get("context_window"):
             window = int(inp["context_window"])
-            end_dt = datetime.now(timezone(timedelta(hours=8)))
+            end_dt = datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Shanghai"))
             start_dt = end_dt - timedelta(seconds=window)
             start_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
             end_str = end_dt.strftime("%Y-%m-%d %H:%M:%S")
@@ -68,8 +70,12 @@ class TaskWorker:
                 self.store.mark_input_done(inp["id"])
                 self.store.mark_task_done_if_idle(task_id)
                 return True
+            transcript, transcript_truncated = build_context_transcript(messages)
             summary = build_context_summary(
-                messages, start_str, end_str, truncated=truncated
+                messages,
+                start_str,
+                end_str,
+                truncated=truncated or transcript_truncated,
             )
             base_dir = os.path.join(
                 self.cfg.storage_root, chat_id, "tasks", str(task_id)
@@ -110,12 +116,11 @@ class TaskWorker:
                 f"Timeframe: {summary['start']} to {summary['end']}\n"
                 f"Messages: {summary['count']}\n"
             )
-            if summary.get("first"):
-                context_block += f"First: {summary['first']}\n"
-            if summary.get("last"):
-                context_block += f"Last: {summary['last']}\n"
             if summary.get("truncated"):
                 context_block += "Truncated: yes\n"
+            context_block += "TRANSCRIPT:\n"
+            if transcript:
+                context_block += transcript + "\n"
             context_block += "Use this context for background only.\n"
         session_id = self.store.ensure_session(task_id, self.client, workdir)
         self._write_worker_log(task_id, chat_id, f"session {session_id} ready")

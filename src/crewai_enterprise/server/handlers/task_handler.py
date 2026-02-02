@@ -1,5 +1,6 @@
 import os
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import os
 
@@ -37,7 +38,7 @@ def handle_task_command(text: str, chat_id: str, user_id: str) -> str | None:
         )
         reply = f"已创建任务 #{task_id} 查看进度: {cfg.base_url}/task/{task_id}"
         if cmd.get("context_window"):
-            end_dt = datetime.now(timezone(timedelta(hours=8)))
+            end_dt = datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Shanghai"))
             start_dt = end_dt - timedelta(seconds=int(cmd["context_window"]))
             reply += (
                 f"（已包含 {start_dt.strftime('%Y-%m-%d %H:%M')} 至 "
@@ -70,7 +71,7 @@ def handle_task_command(text: str, chat_id: str, user_id: str) -> str | None:
     )
     reply = f"已追加到任务 #{task_id} 查看进度: {cfg.base_url}/task/{task_id}"
     if cmd.get("context_window"):
-        end_dt = datetime.now(timezone(timedelta(hours=8)))
+        end_dt = datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Shanghai"))
         start_dt = end_dt - timedelta(seconds=int(cmd["context_window"]))
         reply += (
             f"（已包含 {start_dt.strftime('%Y-%m-%d %H:%M')} 至 "

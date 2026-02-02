@@ -4,7 +4,6 @@ import json
 import logging
 import os
 import sqlite3
-from datetime import datetime
 
 from src.crewai_enterprise.tools.chat_storage.chat_storage_tool import ChatStorageTool
 
@@ -45,6 +44,34 @@ def build_context_summary(
         "last": last_text,
         "truncated": truncated,
     }
+
+
+def build_context_transcript(
+    messages: list[dict],
+    *,
+    max_messages: int = 2000,
+    max_chars: int = 200000,
+) -> tuple[str, bool]:
+    if not messages:
+        return "", False
+    truncated = False
+    output: list[str] = []
+    total_chars = 0
+    for idx, msg in enumerate(messages):
+        if idx >= max_messages:
+            truncated = True
+            break
+        created_at = msg.get("created_at") or ""
+        sender = msg.get("sender") or ""
+        text = msg.get("text") or ""
+        line = f"[{created_at}] {sender}: {text}".strip()
+        projected = total_chars + len(line) + 1
+        if projected > max_chars:
+            truncated = True
+            break
+        output.append(line)
+        total_chars = projected
+    return "\n".join(output), truncated
 
 
 def fetch_wecom_chat_context(
