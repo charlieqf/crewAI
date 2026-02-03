@@ -231,7 +231,14 @@ class TaskWorker:
             if copied:
                 self._write_worker_log(task_id, chat_id, f"synced {len(copied)} files")
             else:
-                if _assistant_claimed_file_save(task_id, self.store):
+                if _assistant_claimed_file_save(
+                    task_id, self.store
+                ) and not _claimed_files_exist(
+                    task_id,
+                    self.store,
+                    files_dir,
+                    workdir,
+                ):
                     warn = (
                         "I couldn't find the file you said you saved. "
                         "Please verify the file was actually written to the task workdir."
@@ -428,3 +435,31 @@ def _assistant_claimed_file_save(task_id: int, store: TaskStore) -> bool:
         r"\b[\w.-]+\.(txt|md|html|json|csv)\b",
     ]
     return any(re.search(p, content, re.IGNORECASE) for p in patterns)
+
+
+def _claimed_files_exist(
+    task_id: int, store: TaskStore, files_dir: str, workdir: str | None
+) -> bool:
+    messages = store.list_recent_messages(task_id, limit=10)
+    if not messages:
+        return False
+    content = "\n".join(
+        m.get("content", "") for m in messages if m.get("role") == "assistant"
+    )
+    if not content:
+        return False
+    filenames = re.findall(
+        r"([A-Za-z0-9._-]+\.(?:html|md|txt|json|csv|png|jpg|jpeg|pdf))",
+        content,
+    )
+    if not filenames:
+        return False
+    for name in filenames:
+        file_in_files = os.path.join(files_dir, name)
+        if os.path.exists(file_in_files):
+            return True
+        if workdir:
+            file_in_workdir = os.path.join(workdir, name)
+            if os.path.exists(file_in_workdir):
+                return True
+    return False
