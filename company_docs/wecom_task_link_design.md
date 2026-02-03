@@ -92,15 +92,7 @@ TaskMessage {
 ```
 
 ### 4.3 TaskEvent 表（可选）
-```
-TaskEvent {
-  id: int
-  task_id: int
-  type: string       # status/log/error
-  payload: text
-  created_at: datetime
-}
-```
+已决定暂不实现。当前仅保留 TaskMessage 与 TaskInput。
 
 ### 4.4 TaskInput 表（推荐）
 用于串行化 `/task 1234 <补充>`，避免和正在执行的 worker 竞争。
@@ -144,10 +136,7 @@ body: { role, content, source }
 ```
 
 ### 5.5 文件写入（v1.5，非 v1 必需）
-```
-POST /api/task/{id}/file
-body: { filename, content }
-```
+已决定暂不实现；当前仅支持任务文件目录的下载/查看。
 
 ## 6. 任务执行流程
 
@@ -362,7 +351,7 @@ OpenCode 在 Kamatera 本地持久化 session 到：
    - `POST /api/task/{id}/append`
    - `GET /api/task/{id}`
    - `POST /api/task/{id}/output`
-   - `POST /api/task/{id}/file`（v1.5）
+    - `POST /api/task/{id}/file`（v1.5，暂不实现）
 3. 实现 Task ID 生成（自增或雪花）。
 4. 基础日志（创建/追加/输出）。
 
@@ -474,14 +463,7 @@ def append_output(task_id, body):
 ```
 
 ### 12.5 伪代码：写入文件
-```python
-def write_file(task_id, body):
-    task_dir = f"{TASK_STORAGE_ROOT}/task-{task_id}/files"
-    ensure_dir(task_dir)
-    path = safe_join(task_dir, sanitize_filename(body.filename))
-    write_text(path, body.content)
-    return {"ok": True}
-```
+已决定暂不实现；如需写文件由任务执行器直接写入 `files/`。
 
 ---
 
@@ -581,9 +563,7 @@ CREATE INDEX idx_task_message_task_time ON task_message(task_id, created_at);
 ```
 
 ### 16.3 Task（补充字段）
-```sql
-ALTER TABLE task ADD COLUMN last_seen_message_id TEXT;
-```
+当前使用 `last_seen_message_file`（存储文件名）而非 `last_seen_message_id`。
 
 ---
 
