@@ -131,7 +131,16 @@ class TaskWorker:
             model_info = (
                 agent_info.get("model") if isinstance(agent_info, dict) else None
             )
-            self._write_worker_log(task_id, chat_id, f"opencode model: {model_info}")
+            self._write_worker_log(
+                task_id,
+                chat_id,
+                f"opencode model (agent config): {model_info}",
+            )
+            self._write_worker_log(
+                task_id,
+                chat_id,
+                f"opencode model (default_model): {self.client.default_model}",
+            )
         except Exception as exc:
             self._write_worker_log(task_id, chat_id, f"model lookup failed: {exc}")
         skills = _load_task_skills(inp.get("content", ""))

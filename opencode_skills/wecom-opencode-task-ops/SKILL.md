@@ -33,3 +33,21 @@ description: Troubleshoot WeCom ↔ OpenCode task integration. Use when task pag
 - **Claimed file missing**: verify workdir; if missing, check OpenCode session output and prompt guardrails.
 - **No task output**: verify `opencode_storage_root`, session messages, and `last_seen_message_file`.
 - **Sync not happening**: ensure `mirror_session_files` ran and `files/` exists.
+
+## Script: Safe Python scan (no f-string pitfalls)
+
+Use this when you need to scan a file for `OPENCODE` or `model` references without hitting f-string syntax errors.
+
+```bash
+ssh -i "/c/Users/rdpuser/.ssh/kamatera" root@104.238.213.119 "python3 - <<'PY'
+from pathlib import Path
+path = Path('/opt/wecom-callback/src/crewai_enterprise/server/task_worker.py')
+if not path.exists():
+    print('task_worker.py not found')
+    raise SystemExit(0)
+lines = path.read_text().splitlines()
+for i, line in enumerate(lines, 1):
+    if 'opencode' in line.lower() or 'model' in line.lower() or 'OPENCODE' in line:
+        print('%d: %s' % (i, line))
+PY"
+```
