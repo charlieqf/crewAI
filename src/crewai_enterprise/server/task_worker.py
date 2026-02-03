@@ -1,6 +1,7 @@
 import os
 import os
 import time
+import re
 
 from src.crewai_enterprise.server.task_config import get_task_config
 from src.crewai_enterprise.server.task_store import TaskStore
@@ -36,7 +37,7 @@ class TaskWorker:
             os.makedirs(workdir, exist_ok=True)
         session_id = self.store.ensure_session(task_id, self.client, workdir)
         self._write_worker_log(task_id, chat_id, f"session {session_id} ready")
-        skills = _load_task_skills()
+        skills = _load_task_skills(inp.get("content", ""))
         prompt_text = _build_prompt(skills, inp.get("content", ""))
         try:
             self.client.prompt_interactive(
@@ -111,6 +112,33 @@ class TaskWorker:
             )
             if copied:
                 self._write_worker_log(task_id, chat_id, f"synced {len(copied)} files")
+            else:
+                if _assistant_claimed_file_save(task_id, self.store):
+                    warn = (
+                        "I couldn't find the file you said you saved. "
+                        "Please verify the file was actually written to the task workdir."
+                    )
+                    self.store.append_message(
+                        task_id,
+                        "assistant",
+                        warn,
+                        "system",
+                        input_id=inp["id"],
+                    )
+                    try:
+                        self.client.prompt_interactive(
+                            session_id,
+                            [{"type": "text", "text": warn}],
+                            None,
+                            directory=workdir,
+                        )
+                        self._write_worker_log(
+                            task_id, chat_id, "warned opencode: missing file"
+                        )
+                    except Exception:
+                        self._write_worker_log(
+                            task_id, chat_id, "failed to warn opencode"
+                        )
         self.store.mark_task_done_if_idle(task_id)
         return True
 
@@ -130,7 +158,39 @@ class TaskWorker:
             return
 
 
-def _load_task_skills() -> list[tuple[str, str]]:
+def _should_load_save_skill(prompt: str) -> bool:
+    if os.getenv("TASK_FORCE_SAVE_SKILL") in {"1", "true", "yes", "on"}:
+        return True
+    text = (prompt or "").lower()
+    keywords = (
+        "save to ",
+        "write to ",
+        "write into ",
+        "create file",
+        "create a file",
+        "generate file",
+        "generate a file",
+        "output to ",
+        "export to ",
+        "save as ",
+        "保存",
+        "写入",
+        "写到",
+        "生成文件",
+        "导出",
+        "输出到",
+        "另存为",
+        ".txt",
+        ".md",
+        ".html",
+        ".json",
+        ".csv",
+        "file ",
+    )
+    return any(k in text for k in keywords)
+
+
+def _load_task_skills(prompt: str) -> list[tuple[str, str]]:
     paths = []
     explicit_paths = os.getenv("TASK_SKILL_PATHS")
     if explicit_paths:
@@ -145,6 +205,9 @@ def _load_task_skills() -> list[tuple[str, str]]:
         paths.append(
             os.path.join(base_dir, "opencode_skills", "save-to-workdir", "SKILL.md")
         )
+
+    if not _should_load_save_skill(prompt):
+        paths = [p for p in paths if "save-to-workdir" not in p]
 
     loaded: list[tuple[str, str]] = []
     for path in paths:
@@ -181,3 +244,22 @@ def _build_prompt(skills: list[tuple[str, str]], prompt: str) -> str:
     skill_names = ", ".join(name for name, _ in skills)
     skill_blocks = "\n\n".join(body for _, body in skills if body)
     return f"Loaded skills: {skill_names}\n\n{skill_blocks}\n\nUser request:\n{prompt}".strip()
+
+
+def _assistant_claimed_file_save(task_id: int, store: TaskStore) -> bool:
+    messages = store.list_recent_messages(task_id, limit=10)
+    if not messages:
+        return False
+    content = "\n".join(
+        m.get("content", "") for m in messages if m.get("role") == "assistant"
+    )
+    if not content:
+        return False
+    if "Using skill: save-to-workdir" in content:
+        return True
+    patterns = [
+        r"\b(saved|written|saved to|write to|wrote to)\b",
+        r"已将|已写入|已保存|已生成",
+        r"\b[\w.-]+\.(txt|md|html|json|csv)\b",
+    ]
+    return any(re.search(p, content, re.IGNORECASE) for p in patterns)
