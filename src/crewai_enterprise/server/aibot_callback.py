@@ -28,6 +28,8 @@ import mimetypes
 import os
 import re
 import time
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from urllib.parse import urlparse
 from typing import Any
 
@@ -72,6 +74,12 @@ from src.crewai_enterprise.server.handlers.aibot.llm_orchestrator import (
     _process_llm_file_output,
 )
 from src.crewai_enterprise.server.handlers.task_handler import handle_task_command
+from src.crewai_enterprise.server.handlers.context_prefix import extract_context_prefix
+from src.crewai_enterprise.utils.wecom_context import (
+    build_context_summary,
+    build_context_transcript,
+    fetch_wecom_chat_context,
+)
 
 # Configure logging
 logging.basicConfig(
@@ -801,6 +809,45 @@ async def _ensure_opencode_session_idle(
         return True
 
 
+def _build_wecom_context_block(chat_id: str, window: int) -> str | None:
+    if not chat_id or not window:
+        return None
+    end_dt = datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Shanghai"))
+    start_dt = end_dt - timedelta(seconds=window)
+    start_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
+    end_str = end_dt.strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        messages, truncated = fetch_wecom_chat_context(chat_id, start_str, end_str)
+    except Exception as exc:
+        logger.warning("[AIBOT_CTX] WeCom context fetch failed: %s", exc)
+        return None
+    if not messages:
+        return None
+    transcript, transcript_truncated = build_context_transcript(messages)
+    summary = build_context_summary(
+        messages,
+        start_str,
+        end_str,
+        truncated=truncated or transcript_truncated,
+    )
+    lines = [
+        "SYSTEM CONTEXT (WeCom)",
+        f"Timeframe: {summary['start']} to {summary['end']}",
+        f"Messages: {summary['count']}",
+    ]
+    if summary.get("truncated"):
+        lines.append("Truncated: yes")
+    if summary.get("first"):
+        lines.append(f"First: {summary['first']}")
+    if summary.get("last"):
+        lines.append(f"Last: {summary['last']}")
+    if transcript:
+        lines.append("TRANSCRIPT:")
+        lines.append(transcript)
+    lines.append("Use this context for background only.")
+    return "\n".join(lines)
+
+
 async def _call_opencode_async(
     stream_id: str,
     content: str,
@@ -825,6 +872,13 @@ async def _call_opencode_async(
     allow_force_fallback = False
 
     try:
+        cleaned_content, context_window = extract_context_prefix(content)
+        if cleaned_content != content:
+            content = cleaned_content
+        context_block = None
+        if context_window is not None:
+            context_block = _build_wecom_context_block(chat_id, context_window)
+
         # Handle /file-html and other prompt commands (OpenCode path).
         stripped_content = content.strip()
         if stripped_content.startswith("/"):
@@ -906,9 +960,10 @@ async def _call_opencode_async(
             "may remain in English. The only exception is a leading line like "
             "'Using skill: save-to-workdir', which may remain in English."
         )
-        parts: list[dict[str, Any]] = [
-            {"type": "text", "text": lang_guard + "\n\n" + safe_content}
-        ]
+        prompt_text = lang_guard + "\n\n" + safe_content
+        if context_block:
+            prompt_text = context_block + "\n\n" + prompt_text
+        parts: list[dict[str, Any]] = [{"type": "text", "text": prompt_text}]
         if quoted_content:
             parts.append(
                 {

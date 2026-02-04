@@ -404,5 +404,99 @@ class TestAPIEndpoints(unittest.TestCase):
             self.assertIn(response.status_code, [403, 500])
 
 
+def test_context_prefix_injects_summary(monkeypatch):
+    import types
+    from src.crewai_enterprise.server.handlers.aibot import llm_orchestrator as mod
+    from src.crewai_enterprise.server.handlers.aibot.config import _stream_tasks
+
+    stream_id = "stream_ctx"
+    _stream_tasks[stream_id] = {"content": "", "finished": False}
+
+    class DummyStorage:
+        def _run(self, *args, **kwargs):
+            return "None"
+
+    class DummyContext:
+        def __init__(self):
+            self.messages = []
+
+    class DummyContextManager:
+        def __init__(self):
+            self.storage = DummyStorage()
+            self.added = []
+
+        def add_message(self, **kwargs):
+            self.added.append(kwargs.get("content", ""))
+
+        def get_messages_for_llm(self, chat_id, system_prompt=None, bot_type=None):
+            content = self.added[-1] if self.added else ""
+            return [{"role": "user", "content": content}]
+
+        def get_context(self, chat_id, bot_type=None):
+            return DummyContext()
+
+    dummy_cm = DummyContextManager()
+    monkeypatch.setattr(mod, "get_context_manager", lambda: dummy_cm)
+    monkeypatch.setattr(mod, "get_merged_chat_history", lambda *args, **kwargs: [])
+
+    monkeypatch.setattr(
+        mod,
+        "fetch_wecom_chat_context",
+        lambda chat_id, start, end, limit=500: (
+            [{"created_at": "t", "sender": "u", "text": "hi"}],
+            False,
+        ),
+    )
+    monkeypatch.setattr(
+        mod,
+        "build_context_summary",
+        lambda messages, start, end, truncated=False: {
+            "count": len(messages),
+            "start": start,
+            "end": end,
+            "first": "u: hi",
+            "last": "u: hi",
+            "truncated": False,
+        },
+    )
+    monkeypatch.setattr(
+        mod,
+        "build_context_transcript",
+        lambda messages, **kwargs: ("[t] u: hi", False),
+    )
+
+    captured = {}
+
+    class DummyRouter:
+        def chat(self, provider, messages):
+            captured["messages"] = messages
+            return types.SimpleNamespace(content="ok")
+
+    monkeypatch.setattr(mod, "get_router", lambda: DummyRouter())
+
+    async def _noop_process_llm_file_output(**kwargs):
+        return kwargs["content"]
+
+    monkeypatch.setattr(mod, "_process_llm_file_output", _noop_process_llm_file_output)
+
+    asyncio.run(
+        mod._call_llm_async(
+            stream_id=stream_id,
+            bot_type="chatgpt",
+            content="/context:1d hello",
+            chat_id="room",
+            user_id="u1",
+            user_name="User",
+            wecom_msg_id="m1",
+        )
+    )
+
+    last_content = captured["messages"][-1]["content"]
+    assert "SYSTEM CONTEXT (WeCom)" in last_content
+    assert "Timeframe:" in last_content
+    assert "hello" in last_content
+    assert "/context:" not in last_content
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -127,6 +127,15 @@ GET /wecom/callback?msg_signature=xxx&timestamp=xxx&nonce=xxx&echostr=xxx
 
 ---
 
+## 5. 非 /task 的 /context 前缀
+
+当用户发送普通消息且消息以 `/` 开头时，会解析前缀命令：
+
+- 语法：`/context:<window>`，例如 `/context:1d 请总结昨天的对话重点`
+- 仅解析前缀中的 `/context`，最后一个生效
+- 会从消息中移除所有 `/context:*` 前缀，不会额外回复提示
+- window 支持 `h`/`d`/`w`（小时/天/周）
+
 ## 6. 架构设计原则：模块化独立部署
 
 ### 核心原则

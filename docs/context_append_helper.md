@@ -40,3 +40,8 @@
 - **Truncation Logic**: `max_len` should be applied to the *raw text* before escaping to ensure HTML entities aren't cut in half.
 - **Centralization**: Once the helper is ready, `report_generator.py` should be updated to use it instead of its internal Jinja-based injection to ensure 100% UI consistency.
 - **Styling**: Consider making the theme (Dark/Light) or primary color a parameter to allow for future UI flexibility.
+
+## Non-task /context prefix behavior
+- Only messages that start with `/` are parsed for prefix commands.
+- `/context:<window>` can be combined with other leading slash tokens; the last `/context` wins.
+- All `/context:*` prefix tokens are removed before the prompt is sent, with no user-visible acknowledgement.
