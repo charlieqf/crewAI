@@ -500,6 +500,7 @@ class OpenCodeClient:
         # Poll for new messages
         start_time = time.time()
         last_text = ""
+        last_activity_time = start_time
         # Track if we've seen our own user message come back. Some OpenCode servers
         # do not echo the exact message_id, so we also accept the first new user message.
         our_message_seen = False
@@ -508,8 +509,7 @@ class OpenCodeClient:
         response_stable_timeout = 20.0  # If response unchanged for this long, return it
         min_stable_text_len = 50  # Avoid returning very short intermediate fragments
         min_complete_len = 120
-        incomplete_idle_grace = 10.0
-        incomplete_idle_deadline: float | None = None
+        incomplete_idle_grace = 45.0
         leadin_keywords = (
             "我来",
             "让我",
@@ -576,6 +576,7 @@ class OpenCodeClient:
                     our_message_seen = True
                     sync_user_message_id = msg_id
                     seen_message_ids.add(msg_id)
+                    last_activity_time = time.time()
                     logger.info(
                         f"[OPENCODE_CLIENT] Saw a new user message {msg_id}, proceeding"
                     )
@@ -630,6 +631,7 @@ class OpenCodeClient:
                             }
 
                     seen_message_ids.add(msg_id)
+                    last_activity_time = time.time()
 
             # Check if session is idle (agent finished)
             # If we got a new message and session is not busy, we're done
@@ -644,11 +646,7 @@ class OpenCodeClient:
                 )
                 if is_idle and last_text:
                     if _looks_incomplete(last_text):
-                        if incomplete_idle_deadline is None:
-                            incomplete_idle_deadline = (
-                                time.time() + incomplete_idle_grace
-                            )
-                        if time.time() < incomplete_idle_deadline:
+                        if time.time() - last_activity_time < incomplete_idle_grace:
                             logger.info(
                                 "[OPENCODE_CLIENT] Session idle but response looks incomplete; continue polling briefly"
                             )

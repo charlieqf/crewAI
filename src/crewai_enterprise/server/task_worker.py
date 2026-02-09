@@ -197,7 +197,7 @@ class TaskWorker:
                 message_id=None,
                 directory=workdir,
                 poll_interval=float(os.getenv("TASK_OPENCODE_POLL_INTERVAL", "2")),
-                max_wait=float(os.getenv("TASK_OPENCODE_MAX_WAIT", "280")),
+                max_wait=float(os.getenv("TASK_OPENCODE_MAX_WAIT", "480")),
             ):
                 etype = event.get("type") if isinstance(event, dict) else None
                 if etype in {"text", "final"}:
@@ -274,7 +274,7 @@ class TaskWorker:
                 message_id=None,
                 directory=workdir,
                 poll_interval=float(os.getenv("TASK_OPENCODE_POLL_INTERVAL", "2")),
-                max_wait=float(os.getenv("TASK_OPENCODE_MAX_WAIT", "280")),
+                max_wait=float(os.getenv("TASK_OPENCODE_MAX_WAIT", "480")),
             ):
                 etype = event.get("type") if isinstance(event, dict) else None
                 if etype in {"text", "final"}:
