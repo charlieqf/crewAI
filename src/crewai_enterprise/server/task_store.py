@@ -125,6 +125,55 @@ class TaskStore:
                 (task_id,),
             )
 
+    def create_message(
+        self,
+        task_id: int,
+        role: str,
+        content: str,
+        source: str,
+        input_id: int | None = None,
+        user_id: str | None = None,
+    ) -> int:
+        """Insert a task_message row and return its id.
+
+        Used for streaming-style updates where the content may be updated later.
+        """
+        with self.connect() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO task_message(task_id, role, content, source, input_id, user_id)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (task_id, role, content, source, input_id, user_id),
+            )
+            conn.execute(
+                "UPDATE task SET updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                (task_id,),
+            )
+            last_id = cur.lastrowid
+            if last_id is None:
+                raise ValueError("Failed to create task message")
+            return int(last_id)
+
+    def update_message_content(self, message_id: int, content: str) -> None:
+        """Update an existing task_message content by id."""
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT task_id FROM task_message WHERE id=?",
+                (message_id,),
+            ).fetchone()
+            if not row:
+                return
+            task_id = int(row[0])
+            conn.execute(
+                "UPDATE task_message SET content=? WHERE id=?",
+                (content, message_id),
+            )
+            conn.execute(
+                "UPDATE task SET updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                (task_id,),
+            )
+
     def append_input(
         self,
         task_id: int,

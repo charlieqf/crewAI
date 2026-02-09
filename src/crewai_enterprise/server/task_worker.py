@@ -10,7 +10,6 @@ from src.crewai_enterprise.server.task_config import get_task_config
 from src.crewai_enterprise.server.task_store import TaskStore
 from src.crewai_enterprise.server.opencode_client import OpenCodeClient
 
-from src.crewai_enterprise.server.opencode_storage_reader import read_new_messages
 from src.crewai_enterprise.server.opencode_file_sync import mirror_session_files
 from src.crewai_enterprise.utils.wecom_context import (
     build_context_summary,
@@ -157,14 +156,91 @@ class TaskWorker:
         prompt_text = guard + "\n" + lang_guard + "\n\n" + prompt_text
         if context_block:
             prompt_text = context_block + "\n\n" + prompt_text
+
+        def extract_text_from_message(msg: dict) -> str:
+            if not isinstance(msg, dict):
+                return ""
+            parts = msg.get("parts", [])
+            if not isinstance(parts, list):
+                return ""
+            chunks: list[str] = []
+            for part in parts:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    text = part.get("text")
+                    if isinstance(text, str) and text:
+                        chunks.append(text)
+            return "".join(chunks)
+
+        stream_message_id: int | None = None
+        last_stream_text = ""
         try:
-            self.client.prompt_interactive(
-                session_id,
-                [{"type": "text", "text": prompt_text}],
-                None,
+            self._write_worker_log(task_id, chat_id, "prompt dispatch (polling)")
+            for event in self.client.prompt_interactive_with_polling(
+                session_id=session_id,
+                parts=[{"type": "text", "text": prompt_text}],
+                message_id=None,
                 directory=workdir,
-            )
-            self._write_worker_log(task_id, chat_id, "prompt sent")
+                poll_interval=float(os.getenv("TASK_OPENCODE_POLL_INTERVAL", "2")),
+                max_wait=float(os.getenv("TASK_OPENCODE_MAX_WAIT", "280")),
+            ):
+                etype = event.get("type") if isinstance(event, dict) else None
+                if etype in {"text", "final"}:
+                    text = event.get("text")
+                    if not isinstance(text, str) or not text:
+                        continue
+                    if text == last_stream_text:
+                        continue
+                    last_stream_text = text
+                    if stream_message_id is None:
+                        stream_message_id = self.store.create_message(
+                            task_id,
+                            "assistant",
+                            text,
+                            "opencode",
+                            input_id=inp["id"],
+                        )
+                    else:
+                        self.store.update_message_content(stream_message_id, text)
+                elif etype == "complete":
+                    data = event.get("data")
+                    if isinstance(data, dict):
+                        text = extract_text_from_message(data)
+                        if text and text != last_stream_text:
+                            last_stream_text = text
+                            if stream_message_id is None:
+                                stream_message_id = self.store.create_message(
+                                    task_id,
+                                    "assistant",
+                                    text,
+                                    "opencode",
+                                    input_id=inp["id"],
+                                )
+                            else:
+                                self.store.update_message_content(
+                                    stream_message_id, text
+                                )
+                elif etype == "error":
+                    msg = event.get("message") if isinstance(event, dict) else None
+                    if isinstance(msg, str) and msg:
+                        self.store.append_message(
+                            task_id,
+                            "assistant",
+                            msg,
+                            "opencode",
+                            input_id=inp["id"],
+                        )
+                    break
+                elif etype in {"tool_call", "tool_result"}:
+                    # Keep task page focused on assistant output; tool events go to worker.log.
+                    try:
+                        name = event.get("name")
+                        self._write_worker_log(
+                            task_id, chat_id, f"opencode {etype}: {name}"
+                        )
+                    except Exception:
+                        pass
+
+            self._write_worker_log(task_id, chat_id, "prompt completed")
         except Exception:
             self._write_worker_log(task_id, chat_id, "prompt failed; replaying")
             replay = self.store.list_recent_messages(task_id, limit=50)
@@ -173,9 +249,10 @@ class TaskWorker:
             self._write_worker_log(
                 task_id, chat_id, f"new session {session_id} created"
             )
-            self.client.prompt_interactive(
-                session_id,
-                [
+            self._write_worker_log(task_id, chat_id, "replay prompt dispatch (polling)")
+            for event in self.client.prompt_interactive_with_polling(
+                session_id=session_id,
+                parts=[
                     {
                         "type": "text",
                         "text": _build_prompt(
@@ -184,34 +261,60 @@ class TaskWorker:
                         ),
                     }
                 ],
-                None,
+                message_id=None,
                 directory=workdir,
-            )
-            self._write_worker_log(task_id, chat_id, "replay prompt sent")
+                poll_interval=float(os.getenv("TASK_OPENCODE_POLL_INTERVAL", "2")),
+                max_wait=float(os.getenv("TASK_OPENCODE_MAX_WAIT", "280")),
+            ):
+                etype = event.get("type") if isinstance(event, dict) else None
+                if etype in {"text", "final"}:
+                    text = event.get("text")
+                    if not isinstance(text, str) or not text:
+                        continue
+                    if text == last_stream_text:
+                        continue
+                    last_stream_text = text
+                    if stream_message_id is None:
+                        stream_message_id = self.store.create_message(
+                            task_id,
+                            "assistant",
+                            text,
+                            "opencode",
+                            input_id=inp["id"],
+                        )
+                    else:
+                        self.store.update_message_content(stream_message_id, text)
+                elif etype == "complete":
+                    data = event.get("data")
+                    if isinstance(data, dict):
+                        text = extract_text_from_message(data)
+                        if text and text != last_stream_text:
+                            last_stream_text = text
+                            if stream_message_id is None:
+                                stream_message_id = self.store.create_message(
+                                    task_id,
+                                    "assistant",
+                                    text,
+                                    "opencode",
+                                    input_id=inp["id"],
+                                )
+                            else:
+                                self.store.update_message_content(
+                                    stream_message_id, text
+                                )
+                elif etype == "error":
+                    msg = event.get("message") if isinstance(event, dict) else None
+                    if isinstance(msg, str) and msg:
+                        self.store.append_message(
+                            task_id,
+                            "assistant",
+                            msg,
+                            "opencode",
+                            input_id=inp["id"],
+                        )
+                    break
 
-        quiet_rounds = 0
-        while quiet_rounds < 3:
-            chunks = read_new_messages(
-                session_id,
-                last_seen_file,
-                self.cfg.opencode_storage_root,
-            )
-            if not chunks:
-                quiet_rounds += 1
-                time.sleep(1)
-                continue
-            quiet_rounds = 0
-            self._write_worker_log(task_id, chat_id, f"received {len(chunks)} chunks")
-            for chunk in chunks:
-                self.store.append_message(
-                    task_id,
-                    "assistant",
-                    chunk["text"],
-                    "opencode",
-                    input_id=inp["id"],
-                )
-                self.store.update_last_seen_file(task_id, chunk["filename"])
-                last_seen_file = chunk["filename"]
+            self._write_worker_log(task_id, chat_id, "replay prompt completed")
         self.store.mark_input_done(inp["id"])
         self._write_worker_log(task_id, chat_id, f"input {inp['id']} done")
         if task and task.get("wecom_chat_id"):
