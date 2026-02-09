@@ -405,7 +405,10 @@ class TaskWorker:
             if (
                 not copied
                 and workdir
-                and _assistant_claimed_file_save(task_id, self.store)
+                and (
+                    _assistant_claimed_file_save(task_id, self.store)
+                    or _assistant_used_save_skill(task_id, self.store)
+                )
             ):
                 # File writes can land a few seconds after we start syncing, especially if
                 # the OpenCode client returned early to provide faster UX.
@@ -631,6 +634,18 @@ def _assistant_claimed_file_save(task_id: int, store: TaskStore) -> bool:
         return True
     # If the save skill was used but we never saw any filename/verbs, don't warn yet.
     return False
+
+
+def _assistant_used_save_skill(task_id: int, store: TaskStore) -> bool:
+    messages = store.list_recent_messages(task_id, limit=10)
+    if not messages:
+        return False
+    content = "\n".join(
+        m.get("content", "") for m in messages if m.get("role") == "assistant"
+    )
+    if not content:
+        return False
+    return "Using skill: save-to-workdir" in content
 
 
 def _claimed_files_exist(

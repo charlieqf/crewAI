@@ -501,6 +501,7 @@ class OpenCodeClient:
         start_time = time.time()
         last_text = ""
         last_activity_time = start_time
+        saw_non_text_activity = False
         # Track if we've seen our own user message come back. Some OpenCode servers
         # do not echo the exact message_id, so we also accept the first new user message.
         our_message_seen = False
@@ -511,6 +512,7 @@ class OpenCodeClient:
         min_complete_len = 120
         incomplete_idle_grace = 45.0
         short_idle_grace = 8.0
+        tool_idle_grace = 45.0
         leadin_keywords = (
             "我来",
             "让我",
@@ -610,8 +612,19 @@ class OpenCodeClient:
                             err_msg = "OpenCode returned an error."
                         yield {"type": "error", "message": err_msg}
                         return
-                    # Extract text from parts
-                    for part in msg.get("parts", []):
+                    # Extract text from parts and track non-text activity
+                    parts = msg.get("parts", [])
+                    if isinstance(parts, list):
+                        for part in parts:
+                            if isinstance(part, dict) and part.get("type") not in {
+                                None,
+                                "",
+                                "text",
+                            }:
+                                saw_non_text_activity = True
+                                break
+
+                    for part in parts if isinstance(parts, list) else []:
                         part_type = part.get("type", "")
                         if part_type == "text":
                             text = part.get("text", "")
@@ -652,10 +665,24 @@ class OpenCodeClient:
                     f"[OPENCODE_CLIENT] Session status: {status}, is_idle={is_idle}, last_text={bool(last_text)}"
                 )
                 if is_idle and last_text:
+                    if (
+                        saw_non_text_activity
+                        and time.time() - last_activity_time < tool_idle_grace
+                    ):
+                        logger.info(
+                            "[OPENCODE_CLIENT] Session looks idle but tool activity continues; keep polling"
+                        )
+                        continue
+
+                    stripped = last_text.strip()
                     grace = (
-                        short_idle_grace
-                        if len(last_text.strip()) < min_stable_text_len
-                        else incomplete_idle_grace
+                        incomplete_idle_grace
+                        if stripped.startswith("Using skill:")
+                        else (
+                            short_idle_grace
+                            if len(stripped) < min_stable_text_len
+                            else incomplete_idle_grace
+                        )
                     )
                     if _looks_incomplete(last_text):
                         if time.time() - last_activity_time < grace:
