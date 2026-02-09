@@ -331,6 +331,25 @@ class TaskWorker:
                 state_path,
                 workdir=workdir,
             )
+            if (
+                not copied
+                and workdir
+                and _assistant_claimed_file_save(task_id, self.store)
+            ):
+                # File writes can land a few seconds after we start syncing, especially if
+                # the OpenCode client returned early to provide faster UX.
+                retry_deadline = time.time() + float(
+                    os.getenv("TASK_FILE_SYNC_RETRY_WINDOW", "12")
+                )
+                while time.time() < retry_deadline and not copied:
+                    time.sleep(2.0)
+                    copied = mirror_session_files(
+                        session_id,
+                        files_dir,
+                        self.cfg.opencode_storage_root,
+                        state_path,
+                        workdir=workdir,
+                    )
             if copied:
                 self._write_worker_log(task_id, chat_id, f"synced {len(copied)} files")
             else:
