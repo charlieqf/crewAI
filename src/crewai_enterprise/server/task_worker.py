@@ -426,6 +426,11 @@ class TaskWorker:
                     )
             if copied:
                 self._write_worker_log(task_id, chat_id, f"synced {len(copied)} files")
+                self._append_completion_notice_if_missing(
+                    task_id=task_id,
+                    input_id=inp["id"],
+                    copied=copied,
+                )
             else:
                 if _assistant_claimed_file_save(
                     task_id, self.store
@@ -463,6 +468,66 @@ class TaskWorker:
             self._verify_claimed_files(task_id, inp["id"], files_dir, workdir)
         self.store.mark_task_done_if_idle(task_id)
         return True
+
+    def _append_completion_notice_if_missing(
+        self,
+        task_id: int,
+        input_id: int,
+        copied: list[str],
+    ) -> None:
+        # If OpenCode didn't provide a clear completion message, add one so the task
+        # page isn't stuck with only an initial "starting" response.
+        try:
+            messages = self.store.list_messages(task_id)
+        except Exception:
+            return
+
+        assistant_texts = [
+            (m.get("content") or "")
+            for m in messages
+            if m.get("input_id") == input_id and m.get("role") == "assistant"
+        ]
+        combined = "\n".join(t for t in assistant_texts if t).strip()
+        if "已完成" in combined or "完成" in combined or "saved" in combined.lower():
+            return
+
+        files = sorted(set(copied))
+        if not files:
+            return
+        # Prefer linking to index.html if present.
+        entry = None
+        for candidate in ("index.html", "horse-racing-live/index.html"):
+            if candidate in files:
+                entry = candidate
+                break
+        if entry is None:
+            for f in files:
+                if f.lower().endswith(".html"):
+                    entry = f
+                    break
+
+        hint_lines = ["已完成并保存全部文件。", "", "文件列表:"]
+        for f in files[:25]:
+            hint_lines.append(f"- {f}")
+        if len(files) > 25:
+            hint_lines.append(f"- ... ({len(files) - 25} more)")
+        if entry:
+            hint_lines.extend(
+                [
+                    "",
+                    "入口页面:",
+                    f"/api/task/{task_id}/raw/{entry}",
+                    "",
+                    "说明: 使用 /api/task/<id>/raw/... 打开 HTML，才能正确加载相对的 CSS/JS 资源。",
+                ]
+            )
+        self.store.append_message(
+            task_id,
+            "assistant",
+            "\n".join(hint_lines),
+            "system",
+            input_id=input_id,
+        )
 
     def _verify_claimed_files(
         self,

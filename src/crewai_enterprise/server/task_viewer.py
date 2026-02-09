@@ -1,4 +1,5 @@
 import os
+import mimetypes
 import tempfile
 import zipfile
 
@@ -338,7 +339,7 @@ def task_page(task_id: int):
             }});
           }} else {{
             const filePath = currentPath ? `${{currentPath}}/${{name}}` : name;
-            link.href = `/api/task/${{taskId}}/file?path=${{encodeURIComponent(filePath)}}`;
+            link.href = `/api/task/${{taskId}}/raw/${{encodeURIComponent(filePath)}}`;
             link.textContent = name;
           }}
           filesEl.appendChild(link);
@@ -787,6 +788,28 @@ def download_task_file_path(task_id: int, path: str):
     if not os.path.exists(full_path) or os.path.isdir(full_path):
         raise HTTPException(status_code=404, detail="not found")
     return FileResponse(full_path)
+
+
+@router.get("/api/task/{task_id}/raw/{file_path:path}")
+def serve_task_file(task_id: int, file_path: str):
+    """Serve task files with a real path so relative assets work.
+
+    Example: /api/task/45/raw/index.html can reference ./style.css.
+    """
+    if ".." in file_path or file_path.startswith("/") or file_path.startswith("\\"):
+        raise HTTPException(status_code=400, detail="invalid path")
+    cfg = get_task_config()
+    store = TaskStore(cfg.db_path)
+    task = store.get_task(task_id)
+    chat_id = task.get("wecom_chat_id") if task else None
+    if not chat_id:
+        raise HTTPException(status_code=404, detail="not found")
+    root_dir = os.path.join(cfg.storage_root, chat_id, "tasks", str(task_id), "files")
+    full_path = os.path.join(root_dir, file_path)
+    if not os.path.exists(full_path) or os.path.isdir(full_path):
+        raise HTTPException(status_code=404, detail="not found")
+    media_type, _ = mimetypes.guess_type(full_path)
+    return FileResponse(full_path, media_type=media_type or None)
 
 
 @router.get("/api/task/{task_id}/files/{filename}")
