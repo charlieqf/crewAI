@@ -510,6 +510,7 @@ class OpenCodeClient:
         min_stable_text_len = 50  # Avoid returning very short intermediate fragments
         min_complete_len = 120
         incomplete_idle_grace = 45.0
+        short_idle_grace = 8.0
         leadin_keywords = (
             "我来",
             "让我",
@@ -528,6 +529,11 @@ class OpenCodeClient:
             stripped = text.strip()
             if not stripped:
                 return True
+            if stripped.startswith("Using skill:"):
+                return True
+            # Very short, unstructured replies are often intermediate fragments.
+            if len(stripped) < min_stable_text_len:
+                return True
             if len(stripped) >= min_complete_len:
                 return False
             has_structure = (
@@ -540,7 +546,8 @@ class OpenCodeClient:
                 return False
             if any(key in stripped for key in leadin_keywords):
                 return True
-            return False
+            # Short, single-paragraph answers without structure are usually incomplete.
+            return True
 
         while time.time() - start_time < max_wait:
             time.sleep(poll_interval)
@@ -645,8 +652,13 @@ class OpenCodeClient:
                     f"[OPENCODE_CLIENT] Session status: {status}, is_idle={is_idle}, last_text={bool(last_text)}"
                 )
                 if is_idle and last_text:
+                    grace = (
+                        short_idle_grace
+                        if len(last_text.strip()) < min_stable_text_len
+                        else incomplete_idle_grace
+                    )
                     if _looks_incomplete(last_text):
-                        if time.time() - last_activity_time < incomplete_idle_grace:
+                        if time.time() - last_activity_time < grace:
                             logger.info(
                                 "[OPENCODE_CLIENT] Session idle but response looks incomplete; continue polling briefly"
                             )

@@ -444,7 +444,7 @@ class TaskWorker:
                         input_id=inp["id"],
                     )
                     try:
-                        self.client.prompt_interactive(
+                        self.client.prompt_async(
                             session_id,
                             [{"type": "text", "text": warn}],
                             None,
@@ -620,14 +620,17 @@ def _assistant_claimed_file_save(task_id: int, store: TaskStore) -> bool:
     )
     if not content:
         return False
-    if "Using skill: save-to-workdir" in content:
-        return True
+    # "Using skill: save-to-workdir" indicates intent, but is not by itself a file claim.
     patterns = [
         r"\b(saved|written|saved to|write to|wrote to)\b",
         r"已将|已写入|已保存|已生成",
         r"\b[\w.-]+\.(txt|md|html|json|csv)\b",
     ]
-    return any(re.search(p, content, re.IGNORECASE) for p in patterns)
+    matched = any(re.search(p, content, re.IGNORECASE) for p in patterns)
+    if matched:
+        return True
+    # If the save skill was used but we never saw any filename/verbs, don't warn yet.
+    return False
 
 
 def _claimed_files_exist(
