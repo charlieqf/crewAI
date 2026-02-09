@@ -173,6 +173,22 @@ class TaskWorker:
 
         stream_message_id: int | None = None
         last_stream_text = ""
+        opencode_error: str | None = None
+
+        def workdir_file_list(root: str, max_depth: int = 2) -> list[str]:
+            if not root or not os.path.isdir(root):
+                return []
+            root = os.path.abspath(root)
+            root_depth = root.rstrip(os.sep).count(os.sep)
+            out: list[str] = []
+            for dirpath, _, filenames in os.walk(root):
+                depth = os.path.abspath(dirpath).count(os.sep) - root_depth
+                if depth > max_depth:
+                    continue
+                for name in filenames:
+                    out.append(os.path.relpath(os.path.join(dirpath, name), root))
+            return sorted(out)
+
         try:
             self._write_worker_log(task_id, chat_id, "prompt dispatch (polling)")
             for event in self.client.prompt_interactive_with_polling(
@@ -222,13 +238,7 @@ class TaskWorker:
                 elif etype == "error":
                     msg = event.get("message") if isinstance(event, dict) else None
                     if isinstance(msg, str) and msg:
-                        self.store.append_message(
-                            task_id,
-                            "assistant",
-                            msg,
-                            "opencode",
-                            input_id=inp["id"],
-                        )
+                        opencode_error = msg
                     break
                 elif etype in {"tool_call", "tool_result"}:
                     # Keep task page focused on assistant output; tool events go to worker.log.
@@ -305,16 +315,77 @@ class TaskWorker:
                 elif etype == "error":
                     msg = event.get("message") if isinstance(event, dict) else None
                     if isinstance(msg, str) and msg:
-                        self.store.append_message(
-                            task_id,
-                            "assistant",
-                            msg,
-                            "opencode",
-                            input_id=inp["id"],
-                        )
+                        opencode_error = msg
                     break
 
             self._write_worker_log(task_id, chat_id, "replay prompt completed")
+
+        if opencode_error and (stream_message_id is None or not last_stream_text):
+            files_now = workdir_file_list(workdir or "") if workdir else []
+            if files_now:
+                if stream_message_id is None:
+                    stream_message_id = self.store.create_message(
+                        task_id,
+                        "assistant",
+                        "已生成/更新文件，但未在超时内返回文字说明。正在请求简要总结...",
+                        "opencode",
+                        input_id=inp["id"],
+                    )
+                summary_prompt = (
+                    "IMPORTANT: Do not run tools. Do not write or modify any files.\n"
+                    "IMPORTANT: Reply in Chinese.\n\n"
+                    "Please reply with:\n"
+                    "1) First line must be exactly: 已完成并保存全部文件\n"
+                    "2) Explain the directory structure briefly\n"
+                    "3) How to open/run the site locally\n"
+                    "4) Note key files and what they do\n\n"
+                    "Files currently present in the workdir:\n"
+                    + "\n".join(f"- {f}" for f in files_now[:60])
+                )
+
+                last_summary = last_stream_text
+                for ev in self.client.prompt_interactive_with_polling(
+                    session_id=session_id,
+                    parts=[{"type": "text", "text": summary_prompt}],
+                    message_id=None,
+                    directory=workdir,
+                    poll_interval=float(os.getenv("TASK_OPENCODE_POLL_INTERVAL", "2")),
+                    max_wait=float(os.getenv("TASK_OPENCODE_SUMMARY_MAX_WAIT", "90")),
+                ):
+                    et = ev.get("type") if isinstance(ev, dict) else None
+                    if et in {"text", "final"}:
+                        txt = ev.get("text")
+                        if isinstance(txt, str) and txt and txt != last_summary:
+                            last_summary = txt
+                            self.store.update_message_content(stream_message_id, txt)
+                    elif et == "complete":
+                        data = ev.get("data")
+                        if isinstance(data, dict):
+                            txt = extract_text_from_message(data)
+                            if txt and txt != last_summary:
+                                last_summary = txt
+                                self.store.update_message_content(
+                                    stream_message_id, txt
+                                )
+                    elif et == "error":
+                        break
+            else:
+                self.store.append_message(
+                    task_id,
+                    "assistant",
+                    opencode_error,
+                    "opencode",
+                    input_id=inp["id"],
+                )
+
+        elif opencode_error:
+            self.store.append_message(
+                task_id,
+                "assistant",
+                opencode_error,
+                "opencode",
+                input_id=inp["id"],
+            )
         self.store.mark_input_done(inp["id"])
         self._write_worker_log(task_id, chat_id, f"input {inp['id']} done")
         if task and task.get("wecom_chat_id"):
